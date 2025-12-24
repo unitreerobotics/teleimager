@@ -341,11 +341,14 @@ class WebRTC_PublisherThread(threading.Thread):
         return web.Response(content_type="application/javascript", text=CLIENT_JS)
 
     async def _options(self, request):
-        return web.Response(headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
-        })
+        return web.Response(
+            status=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            }
+        )
 
     async def _offer(self, request: web.Request) -> web.Response:
         params = await request.json()
@@ -402,7 +405,11 @@ class WebRTC_PublisherThread(threading.Thread):
         return web.Response(
             content_type="application/json",
             text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
-            headers={"Access-Control-Allow-Origin": "*"}
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            }
         )
 
     async def _cleanup_pc(self, pc):
