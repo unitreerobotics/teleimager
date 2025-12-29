@@ -16,7 +16,7 @@ import argparse
 import glob
 import cv2
 import numpy as np
-import uvc
+# uvc will be imported when needed
 import yaml
 import time
 import threading
@@ -501,7 +501,7 @@ class WebRTC_PublisherManager:
     def _create_publisher(self, port: int, host: str, codec_pref: str):
         t = WebRTC_PublisherThread(port, host, codec_pref)
         t.start()
-        if not t.wait_for_start(timeout=5.0):
+        if not t.wait_for_start(timeout=10.0):  # Increase timeout to 10 seconds
              raise ConnectionError("Publisher failed to start (Timeout)")
         return t
 
@@ -559,6 +559,7 @@ class CameraFinder:
         self.verbose = verbose
         # uvc
         reload_uvc_driver()
+        import uvc
         self.uvc_devices = uvc.device_list()
         self.uid_map = {dev["uid"]: dev for dev in self.uvc_devices}
         # all video devices
@@ -809,6 +810,7 @@ class CameraFinder:
                 for k, v in dev_info.items():
                     logger_mp.info("    %s: %s", k, v)
                 try:
+                    import uvc
                     cap = uvc.Capture(uid)
                     for fmt in cap.available_modes:
                         logger_mp.info("    format: %dx%d@%d %s", fmt.height, fmt.width, fmt.fps, fmt.format_name)
@@ -999,6 +1001,7 @@ class UVCCamera(BaseCamera):
     def __init__(self, cam_topic, uid, img_shape, fps, 
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+        import uvc
         self.uid = uid
         self.cap = None
         try:
@@ -1111,16 +1114,100 @@ class OpenCVCamera(BaseCamera):
         self.cap = None
         logger_mp.info(f"[OpenCVCamera] Released {self._cam_topic}")
 
+class IsaacSimCamera(BaseCamera):
+    def __init__(self, cam_topic, img_shape, fps,
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
+                 image_source="head", binocular=False):
+        """
+        IsaacSim camera that reads from shared memory.
+
+        Args:
+            cam_topic: camera topic name
+            img_shape: image shape [height, width]
+            fps: frames per second
+            enable_zmq: enable ZMQ publishing
+            zmq_port: ZMQ port
+            enable_webrtc: enable WebRTC publishing
+            webrtc_port: WebRTC port
+            webrtc_codec: WebRTC codec preference
+            image_source: which image to read from shared memory ("head", "left", "right")
+            binocular: if True and image_source=="head", concatenate left+right for binocular vision
+        """
+        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+        from tools.shared_memory_utils import MultiImageReader # https://github.com/unitreerobotics/unitree_sim_isaaclab/tree/main/tools
+        self.multi_image_reader = MultiImageReader()
+        self._image_source = image_source  # "head", "left", or "right"
+        self._binocular = binocular
+        # For IsaacSim cameras, set ready immediately since the camera object is initialized
+        # and will wait for shared memory data in _update_frame
+        self._ready.set()
+        logger_mp.info(str(self))
+
+    def __str__(self):
+        mode = "binocular" if self._binocular else "monocular"
+        return (
+            f"[IsaacSimCamera: {self._cam_topic}] initialized with "
+            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS, source='{self._image_source}', mode='{mode}'.\n"
+            f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
+            f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
+        )
+
+    def _update_frame(self):
+        # Get the image data based on source and binocular settings
+        frame_data = None
+        if self._binocular:
+            # For binocular cameras: concatenate left + right images
+            left_img = self.multi_image_reader.read_single_image('left')
+            right_img = self.multi_image_reader.read_single_image('right')
+            logger_mp.debug(f"[IsaacSimCamera] {self._cam_topic} - left: {left_img is not None}, right: {right_img is not None}")
+
+            if left_img is not None and right_img is not None:
+                frame_data = cv2.hconcat([left_img, right_img])
+                logger_mp.debug(f"[IsaacSimCamera] {self._cam_topic} - concatenated binocular frame: {frame_data.shape}")
+        else:
+            # For monocular cameras: use the specified source directly
+            frame_data = self.multi_image_reader.read_single_image(self._image_source)
+            if frame_data is None:
+                logger_mp.debug(f"[IsaacSimCamera] {self._cam_topic} - no data for source '{self._image_source}'")
+
+        # Publish the frame data only if we have valid data
+        if frame_data is not None:
+            # For ZMQ: encode to JPEG bytes
+            if self._enable_zmq:
+                ok, buf = cv2.imencode(".jpg", frame_data)
+                if ok:
+                    self._zmq_buffer.write(buf.tobytes())
+                else:
+                    logger_mp.warning(f"[IsaacSimCamera] Failed to encode to JPEG for {self._cam_topic}")
+
+            # For WebRTC: use BGR frames directly
+            if self._enable_webrtc:
+                self._webrtc_buffer.write(frame_data)
+            else:
+                logger_mp.warning(f"[IsaacSimCamera] Failed to encode to WebRTC for {self._cam_topic}")
+            if not self._ready.is_set():
+                self._ready.set()
+        else:
+            logger_mp.debug(f"[IsaacSimCamera] No data available for {self._cam_topic}, frame_data is None")
+        # If no data is available, just return silently and wait for next frame
+
+    def release(self):
+        if hasattr(self, 'multi_image_reader') and self.multi_image_reader is not None:
+            self.multi_image_reader.close()
+        self.multi_image_reader = None
+        logger_mp.info(f"[IsaacSimCamera] Released {self._cam_topic}")
 # ========================================================
 # image server
 # ========================================================
 class ImageServer:
-    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False):
+    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False):
         self._cam_config = cam_config
         self._realsense_enable = realsense_enable
+        self._isaacsim_enable = isaacsim_enable
         self._stop_event = threading.Event()
         self._cameras: dict[str, BaseCamera] = {}
-        self._cam_finder = CameraFinder(realsense_enable, camera_finder_verbose)
+        if not self._isaacsim_enable:
+            self._cam_finder = CameraFinder(realsense_enable, camera_finder_verbose)
         self._responser = ZMQ_Responser(self._cam_config)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
@@ -1138,6 +1225,8 @@ class ImageServer:
                 webrtc_port = cam_cfg.get("webrtc_port", None)
                 webrtc_codec = cam_cfg.get("webrtc_codec", None)
                 cam_type = cam_cfg.get("type", "uvc").lower()
+                if self._isaacsim_enable and cam_type!="isaacsim":
+                    cam_type = "isaacsim"
                 img_shape = cam_cfg.get("image_shape", None)
                 fps = cam_cfg.get("fps", 30)
                 video_id = cam_cfg.get("video_id", "0")
@@ -1210,19 +1299,26 @@ class ImageServer:
                         # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
                         # ——— even if no camera matches the given path/serial.
                         continue
+                elif cam_type == "isaacsim":
+                    # Check if binocular mode is enabled
+                    binocular = cam_cfg.get("binocular", False)
 
-                    if video_id is not None:
-                        if not self._cam_finder.is_vpath_exist(video_path):
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with video_id {video_id}")
+                    # For IsaacSim cameras, determine image source based on camera topic and binocular setting
+                    if binocular:
+                        # Binocular cameras (like head) need to read left+right and concatenate
+                        image_source = "head"  # Special marker for binocular
+                    else:
+                        # Monocular cameras read their specific source
+                        if "left" in cam_topic.lower():
+                            image_source = "left"
+                        elif "right" in cam_topic.lower():
+                            image_source = "right"
                         else:
-                            uid = self._cam_finder.get_uid_by_vpath(video_path)
-                            if uid is None:
-                                self._cameras[cam_topic] = None
-                                logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with uid from video_id {video_id}")
-                            else:
-                                self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps, 
-                                                                     enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                            image_source = "head"  # fallback
+
+                    self._cameras[cam_topic] = IsaacSimCamera(cam_topic, img_shape, fps,
+                                                                enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                image_source=image_source, binocular=binocular)
                 else:
                     logger_mp.error(f"[Image Server] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                     continue
@@ -1340,11 +1436,18 @@ class ImageServer:
             t = threading.Thread(target=self._update_frames, args=(camera_topic, camera), daemon=True)
             t.start()
             self._publisher_threads.append(t)
-        
+        if self._isaacsim_enable:
+            time.sleep(2.0)  # wait a bit for IsaacSim shared memory to be ready
+
         for camera_topic, camera in self._cameras.items():
-            ready = camera.wait_until_ready(timeout=5.0)
+            # Use longer timeout for IsaacSim cameras since they need to wait for shared memory data
+            if self._isaacsim_enable:
+                timeout = 15.0
+            else:
+                timeout = 5.0
+            ready = camera.wait_until_ready(timeout=timeout)
             if not ready:
-                logger_mp.error(f"[Image Server] {camera_topic} ready timeout.")
+                logger_mp.error(f"[Image Server] {camera_topic} ready timeout after {timeout}s.")
                 self._stop_event.set()
                 self._clean_up()
             logger_mp.info(f"[Image Server] {camera_topic} is ready.")
@@ -1388,6 +1491,17 @@ def set_performance_mode(cores=[0, 1, 2]):
     except Exception as e:
         logger_mp.error(f"[Performance] Error: {e}")
 
+def run_isaacsim_server():
+    # Load config file, start image server
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            cam_config = yaml.safe_load(f)
+    except Exception as e:
+        logger_mp.error(f"Failed to load configuration file at {CONFIG_PATH}: {e}")
+        exit(1)
+    # start image server
+    server = ImageServer(cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=True)
+    server.start()
 
 def main():
     logger_mp.info(

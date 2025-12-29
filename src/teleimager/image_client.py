@@ -172,7 +172,7 @@ class ZMQ_PublisherManager:
             publisher_thread = ZMQ_PublisherThread(port, host, self._context)
             publisher_thread.start()
             # Wait for the thread to start and socket to be ready
-            if not publisher_thread.wait_for_start(timeout=1.0):
+            if not publisher_thread.wait_for_start(timeout=5.0):  # Increase timeout to 5 seconds
                 raise ConnectionError(f"Publisher thread failed to start for {host}:{port}")
 
             return publisher_thread
