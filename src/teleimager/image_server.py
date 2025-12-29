@@ -1502,7 +1502,7 @@ def run_isaacsim_server():
     # start image server
     server = ImageServer(cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=True)
     server.start()
-
+    return server
 def main():
     logger_mp.info(
         "\n====================== Image Server Startup Guide ======================\n"
