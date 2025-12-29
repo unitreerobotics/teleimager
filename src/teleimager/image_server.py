@@ -1113,6 +1113,7 @@ class OpenCVCamera(BaseCamera):
         self.cap.release()
         self.cap = None
         logger_mp.info(f"[OpenCVCamera] Released {self._cam_topic}")
+
 class IsaacSimCamera(BaseCamera):
     def __init__(self, cam_topic, img_shape, fps,
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
@@ -1133,7 +1134,7 @@ class IsaacSimCamera(BaseCamera):
             binocular: if True and image_source=="head", concatenate left+right for binocular vision
         """
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-        from tools.shared_memory_utils import MultiImageReader
+        from tools.shared_memory_utils import MultiImageReader # https://github.com/unitreerobotics/unitree_sim_isaaclab/tree/main/tools
         self.multi_image_reader = MultiImageReader()
         self._image_source = image_source  # "head", "left", or "right"
         self._binocular = binocular
@@ -1199,7 +1200,7 @@ class IsaacSimCamera(BaseCamera):
 # image server
 # ========================================================
 class ImageServer:
-    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False,isaacsim_enable=False):
+    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False):
         self._cam_config = cam_config
         self._realsense_enable = realsense_enable
         self._isaacsim_enable = isaacsim_enable
@@ -1318,19 +1319,6 @@ class ImageServer:
                     self._cameras[cam_topic] = IsaacSimCamera(cam_topic, img_shape, fps,
                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
                                                                 image_source=image_source, binocular=binocular)
-                    continue
-                    if video_id is not None:
-                        if not self._cam_finder.is_vpath_exist(video_path):
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with video_id {video_id}")
-                        else:
-                            uid = self._cam_finder.get_uid_by_vpath(video_path)
-                            if uid is None:
-                                self._cameras[cam_topic] = None
-                                logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with uid from video_id {video_id}")
-                            else:
-                                self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps, 
-                                                                     enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
                 else:
                     logger_mp.error(f"[Image Server] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                     continue
@@ -1448,10 +1436,15 @@ class ImageServer:
             t = threading.Thread(target=self._update_frames, args=(camera_topic, camera), daemon=True)
             t.start()
             self._publisher_threads.append(t)
-        time.sleep(1.0)
+        if self._isaacsim_enable:
+            time.sleep(2.0)  # wait a bit for IsaacSim shared memory to be ready
+
         for camera_topic, camera in self._cameras.items():
             # Use longer timeout for IsaacSim cameras since they need to wait for shared memory data
-            timeout = 15.0 if isinstance(camera, IsaacSimCamera) else 5.0
+            if self._isaacsim_enable:
+                timeout = 15.0
+            else:
+                timeout = 5.0
             ready = camera.wait_until_ready(timeout=timeout)
             if not ready:
                 logger_mp.error(f"[Image Server] {camera_topic} ready timeout after {timeout}s.")
@@ -1469,7 +1462,7 @@ class ImageServer:
                 t = threading.Thread(target=self._zmq_pub, args=(camera_topic, camera), daemon=True)
                 t.start()
                 self._publisher_threads.append(t)
-        logger_mp.info("[Image Server] IsaacSim server has started, waiting for client connections...") 
+
     def wait(self):
         self._stop_event.wait()
         self._clean_up()
@@ -1497,7 +1490,6 @@ def set_performance_mode(cores=[0, 1, 2]):
         logger_mp.warning("[Performance] Access Denied: Run as sudo for full optimization")
     except Exception as e:
         logger_mp.error(f"[Performance] Error: {e}")
-
 
 def run_isaacsim_server():
     # Load config file, start image server
