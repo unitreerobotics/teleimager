@@ -28,6 +28,7 @@ import zmq
 import numpy as np
 import yaml
 import os
+from collections import deque
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__, level=logging_mp.INFO)
 
@@ -57,6 +58,39 @@ class TripleRingBuffer:
             self.read_index = self.latest_index
         return self.buffer[self.read_index]
 
+class SimpleFPSMonitor:
+    def __init__(self, window_size: int = 10):
+        self._times = deque(maxlen=window_size)
+        self._rolling_sum = 0.0
+        self._last_tick = None
+        self._fps = 0.0
+
+    def tick(self):
+        now = time.monotonic()
+        if self._last_tick is not None:
+            interval = now - self._last_tick
+            if interval < 1e-6:
+                return
+            
+            if len(self._times) == self._times.maxlen:
+                self._rolling_sum -= self._times[0]
+            
+            self._times.append(interval)
+            self._rolling_sum += interval
+            
+            self._fps = len(self._times) / self._rolling_sum
+            
+        self._last_tick = now
+    
+    def reset(self):
+        self._times.clear()
+        self._rolling_sum = 0.0
+        self._last_tick = None
+        self._fps = 0.0
+
+    @property
+    def fps(self):
+        return self._fps
 # ========================================================
 # ZMQ publish
 # ========================================================
@@ -248,29 +282,78 @@ class ZMQ_PublisherManager:
 # ========================================================
 # ZMQ subscribe
 # ========================================================
+class TeleImage:
+    _NOT_SET = object()
+    __slots__ = ['jpg', '_bgr', 'fps']
+
+    def __init__(self, fps: float, jpg: Optional[bytes], bgr: Any = _NOT_SET):
+        self.fps = fps
+        self.jpg = jpg
+        self._bgr = bgr
+
+    @property
+    def bgr(self) -> Optional[np.ndarray]:
+        """ Get decoded BGR image if decoding is enabled and data is available."""
+        # state 1: decoding disabled
+        if self._bgr is TeleImage._NOT_SET:
+            logger_mp.warning(f"[TeleImager] Accessing .bgr but decoding was DISABLED.")
+            return None
+        # state 2: decoding enabled but no data
+        if self._bgr is None:
+            logger_mp.debug(f"[TeleImager] Accessing .bgr but no image data received.")
+            return None
+        # state 3: decoding enabled and data available
+        return self._bgr
+
+    def __bool__(self):
+        """ Truth value based on whether jpg byte data is available """
+        return bool(self.jpg)
+
+    def __iter__(self):
+        """ Allow unpacking like: jpg, bgr, fps = teleimage_instance """
+        yield self.fps
+        yield self.jpg
+        yield (None if self._bgr is TeleImage._NOT_SET else self._bgr)
+
+    def __repr__(self):
+        """ String representation for debugging """
+        size = len(self.jpg) if self.jpg else 0
+        state = "DISABLED" if self._bgr is TeleImage._NOT_SET else ("FAILED" if self._bgr is None else "OK")
+        return f"TeleImage(fps={self.fps:.1f}, jpg_byte_size={size}, bgr_state={state})"
+        
+
 class ZMQ_SubscriberThread(threading.Thread):
     """Thread that owns a SUB socket and handles receiving the latest message."""
 
-    def __init__(self, host: str, port: int, context: Optional[zmq.Context] = None):
+    def __init__(self, host: str, port: int, context: Optional[zmq.Context] = None, request_bgr: bool = False):
         """Initialize subscriber thread.
 
         Args:
             port: The port number to connect to.
             host: The server host address to connect to.
+            context: Optional ZMQ context to use. If None, a new context will be created.
         """
         super().__init__(daemon=True)
         self._host = host
         self._port = port
-        self._context = context
+        self._context = context or zmq.Context.instance()
+        self._request_bgr = request_bgr
+
         self._socket = None
         self._running = True
-        self._triple_ring_buffer = TripleRingBuffer()
         self._started = threading.Event()
-        # for fps calculation
-        self._image_fps = 0.0
-        self._t0 = None
-        self._fps_count = 0
-        self._fps_interval = 8  # update fps every 8 frames
+
+        self._jpg_3ring_buffer = TripleRingBuffer()
+        self._fps_monitor = SimpleFPSMonitor(window_size=10)
+        if self._request_bgr:
+            self._bgr_3ring_buffer = TripleRingBuffer()
+            self._bgr_decode_queue = queue.Queue(maxsize=1)
+            self._decoder_thread = threading.Thread(target=self._decoder_loop, daemon=True)
+            self._decoder_thread.start()
+        else:
+            self._bgr_3ring_buffer = None
+            self._bgr_decode_queue = None
+            self._decoder_thread = None
 
     def _decode_image(self, jpg_bytes):
         """Decode JPEG bytes to OpenCV image."""
@@ -282,38 +365,39 @@ class ZMQ_SubscriberThread(threading.Thread):
         except Exception as e:
             logger_mp.warning(f"[ZMQ_SubscriberThread] Failed to decode image: {e}")
             return None
+
+    def _decoder_loop(self):
+        while self._running:
+            try:
+                jpg_bytes = self._bgr_decode_queue.get(timeout=0.1)
+                if jpg_bytes is None:
+                    continue
+                img_numpy = self._decode_image(jpg_bytes)
+                self._bgr_3ring_buffer.write(img_numpy)
+                self._bgr_decode_queue.task_done()
+            except queue.Empty:
+                continue
         
     def _wait_for_start(self, timeout: float = 1.0) -> bool:
         """Wait until socket context is ready"""
         return self._started.wait(timeout=timeout)
-    
-    def _update_fps(self):
-        now = time.monotonic()
-        if self._t0 is None:
-            self._t0 = now
-
-        self._fps_count += 1
-        if self._fps_count >= self._fps_interval:
-            dt = now - self._t0
-            if dt > 0:
-                self._image_fps = self._fps_interval / dt
-            self._t0 = now
-            self._fps_count = 0
 
     # --------------------------------------------------------
     # public api
     # --------------------------------------------------------
-    def get_fps(self) -> float:
-        """Get the current image receiving FPS."""
-        return self._image_fps
-
-    def recv(self) -> Optional[bytes]:
+    def recv(self) -> TeleImage:
         """Get the latest received message.
 
         Returns:
-            The latest message as an OpenCV image, or None if no message has been received.
+            The latest message as a TeleImage object containing raw bytes, decoded BGR image (if enabled), and FPS.
         """
-        return self._triple_ring_buffer.read()
+        current_fps = self._fps_monitor.fps
+        jpg_data = self._jpg_3ring_buffer.read()
+        if not self._request_bgr:
+            return TeleImage(fps=current_fps, jpg=jpg_data)
+
+        bgr_data = self._bgr_3ring_buffer.read()
+        return TeleImage(fps=current_fps, jpg=jpg_data, bgr=bgr_data)
 
     def stop(self) -> None:
         """Stop the subscriber thread gracefully."""
@@ -343,15 +427,34 @@ class ZMQ_SubscriberThread(threading.Thread):
                     try:
                         # receive the latest message
                         img_bytes = self._socket.recv()
-                        img_numpy = self._decode_image(img_bytes)  # decode JPEG bytes to bgr image
-                        self._update_fps()                         # update fps
-                        self._triple_ring_buffer.write(img_numpy)  # write to 3-ring-buffer
+                        # write to 3-ring-buffer
+                        self._jpg_3ring_buffer.write(img_bytes)
+                        # enqueue for decoding if needed
+                        if self._request_bgr:
+                            try:
+                                if self._bgr_decode_queue.full():
+                                    self._bgr_decode_queue.get_nowait()
+                                self._bgr_decode_queue.put_nowait(img_bytes)
+                            except queue.Full:
+                                pass
+                        # update fps
+                        self._fps_monitor.tick()
+                        
                     except Exception as e:
                         if self._running:
                             logger_mp.error(f"Error in subscriber loop: {e}")
                         break
                 else:
-                    self._triple_ring_buffer.write(None)
+                    self._jpg_3ring_buffer.write(None)
+                    if self._request_bgr:
+                        try:
+                            if self._bgr_decode_queue.full():
+                                self._bgr_decode_queue.get_nowait()
+                            self._bgr_decode_queue.put_nowait(None)
+                        except queue.Full:
+                            pass
+
+                    self._fps_monitor.reset()
                     logger_mp.debug(f"No message received from {self._host}:{self._port} within timeout.")
         except Exception as e:
             logger_mp.error(f"Failed to initialize subscriber socket: {e}")
@@ -375,9 +478,9 @@ class ZMQ_SubscriberManager:
     def __init__(self):
         self._context = zmq.Context()
 
-    def _create_subscriber_thread(self, host: str, port: int) -> ZMQ_SubscriberThread:
+    def _create_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
         try:
-            subscriber_thread = ZMQ_SubscriberThread(host, port, self._context)
+            subscriber_thread = ZMQ_SubscriberThread(host, port, self._context, request_bgr)
             subscriber_thread.start()
             # Wait for the thread to start and socket to be ready
             if not subscriber_thread._wait_for_start(timeout=1.0):
@@ -387,11 +490,11 @@ class ZMQ_SubscriberManager:
             logger_mp.error(f"Failed to create subscriber thread for {host}:{port}: {e}")
             raise 
 
-    def _get_subscriber_thread(self, host: str, port: int) -> ZMQ_SubscriberThread:
+    def _get_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
         key = (host, port)
         with self._lock:
             if key not in self._subscriber_threads:
-                self._subscriber_threads[key] = self._create_subscriber_thread(host, port)
+                self._subscriber_threads[key] = self._create_subscriber_thread(host, port, request_bgr)
             return self._subscriber_threads[key]
         
     # --------------------------------------------------------
@@ -406,21 +509,21 @@ class ZMQ_SubscriberManager:
                     cls._instance = cls()
         return cls._instance
 
-    def subscribe(self, host: str, port: int) -> Tuple[Optional[np.ndarray], float]:
+    def subscribe(self, host: str, port: int, request_bgr: bool = False) -> TeleImage:
         """Receive the latest message from the specified subscriber.
         Args:
             host: The server address
             port: The port number
+            request_bgr: Whether to request BGR decoding
 
         Returns:
-            img: The latest message as an BGR OpenCV image, or None if no message has been received.
-            fps: The current receiving frame per second (FPS).
+            The latest message as a TeleImage object containing current fps, raw bytes and decoded BGR image (if enabled).
         """
         if not self._running:
             raise RuntimeError("SubscriberManager is closed.")
 
-        subscriber_thread = self._get_subscriber_thread(host, port)
-        return subscriber_thread.recv(), subscriber_thread.get_fps()
+        subscriber_thread = self._get_subscriber_thread(host, port, request_bgr=request_bgr)
+        return subscriber_thread.recv()
 
     def close(self) -> None:
         """Close all subscribers."""
@@ -571,14 +674,16 @@ class ZMQ_Requester:
 # image client
 # ========================================================
 class ImageClient:
-    def __init__(self, host="192.168.123.164", request_port=60000):
+    def __init__(self, host="192.168.123.164", request_port=60000, request_bgr: bool = False):
         """
         Args:
             server_address:   IP address of image host server
-            requset_port:     Port for request camera configuration
+            request_port:     TCP port for camera configuration request
+            request_bgr:      Whether to request BGR decoding for subscribers
         """
         self._host = host
         self._request_port = request_port
+        self._request_bgr = request_bgr
 
         # subscriber and requester setup
         self._subscriber_manager = ZMQ_SubscriberManager.get_instance()
@@ -589,13 +694,13 @@ class ImageClient:
             raise RuntimeError("Failed to get camera configuration.")
         
         if self._cam_config['head_camera']['enable_zmq']:
-            self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'])
+            self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
 
         if self._cam_config['left_wrist_camera']['enable_zmq']:
-            self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'])
+            self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
 
         if self._cam_config['right_wrist_camera']['enable_zmq']:
-            self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'])
+            self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
 
         if not self._cam_config['head_camera']['enable_zmq'] and not self._cam_config['head_camera']['enable_webrtc']:
             logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
@@ -607,13 +712,13 @@ class ImageClient:
         return self._cam_config
 
     def get_head_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'])
+        return self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
     
     def get_left_wrist_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'])
+        return self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
     
     def get_right_wrist_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'])
+        return self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
         
     def close(self):
         self._subscriber_manager.close()
@@ -627,32 +732,32 @@ def main():
     args = parser.parse_args()
 
     # Example usage with three camera streams
-    client = ImageClient(host=args.host)
+    client = ImageClient(host=args.host, request_bgr=True)
     cam_config = client.get_cam_config()
 
     running = True
     while running:
         if cam_config['head_camera']['enable_zmq']:
-            head_img, head_fps = client.get_head_frame()
-            if head_img is not None:
-                logger_mp.info(f"Head Camera FPS: {head_fps:.2f}")
+            head_img = client.get_head_frame()
+            if head_img.bgr is not None:
+                logger_mp.info(f"Head Camera FPS: {head_img.fps:.2f}")
                 logger_mp.debug(f"Head Camera Shape: {cam_config['head_camera']['image_shape']}")
                 logger_mp.debug(f"Head Camera Binocular: {cam_config['head_camera']['binocular']}")
-                cv2.imshow("Head Camera", head_img)
+                cv2.imshow("Head Camera", head_img.bgr)
 
         if cam_config['left_wrist_camera']['enable_zmq']:
-            left_wrist_img, left_wrist_fps = client.get_left_wrist_frame()
-            if left_wrist_img is not None:
-                logger_mp.info(f"Left Wrist Camera FPS: {left_wrist_fps:.2f}")
+            left_wrist_img = client.get_left_wrist_frame()
+            if left_wrist_img.bgr is not None:
+                logger_mp.info(f"Left Wrist Camera FPS: {left_wrist_img.fps:.2f}")
                 logger_mp.debug(f"Left Wrist Camera Shape: {cam_config['left_wrist_camera']['image_shape']}")
-                cv2.imshow("Left Wrist Camera", left_wrist_img)
+                cv2.imshow("Left Wrist Camera", left_wrist_img.bgr)
 
         if cam_config['right_wrist_camera']['enable_zmq']:
-            right_wrist_img, right_wrist_fps = client.get_right_wrist_frame()
-            if right_wrist_img is not None:
-                logger_mp.info(f"Right Wrist Camera FPS: {right_wrist_fps:.2f}")
+            right_wrist_img = client.get_right_wrist_frame()
+            if right_wrist_img.bgr is not None:
+                logger_mp.info(f"Right Wrist Camera FPS: {right_wrist_img.fps:.2f}")
                 logger_mp.debug(f"Right Wrist Camera Shape: {cam_config['right_wrist_camera']['image_shape']}")
-                cv2.imshow("Right Wrist Camera", right_wrist_img)
+                cv2.imshow("Right Wrist Camera", right_wrist_img.bgr)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             logger_mp.info("Exiting image client on user request.")
