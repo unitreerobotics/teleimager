@@ -59,37 +59,37 @@ class TripleRingBuffer:
         return self.buffer[self.read_index]
 
 class SimpleFPSMonitor:
-    def __init__(self, window_size: int = 10):
+    def __init__(self, window_size: int):
         self._times = deque(maxlen=window_size)
-        self._rolling_sum = 0.0
         self._last_tick = None
         self._fps = 0.0
 
     def tick(self):
-        now = time.monotonic()
+        now = time.perf_counter_ns()
+
         if self._last_tick is not None:
-            interval = now - self._last_tick
-            if interval < 1e-6:
+            interval_ns = now - self._last_tick
+            if interval_ns < 100_000:
                 return
             
+            self._times.append(interval_ns)
             if len(self._times) == self._times.maxlen:
-                self._rolling_sum -= self._times[0]
-            
-            self._times.append(interval)
-            self._rolling_sum += interval
-            
-            self._fps = len(self._times) / self._rolling_sum
-            
+                rolling_sum = sum(self._times)
+                if rolling_sum > 0:
+                    self._fps = (len(self._times) * 1_000_000_000.0) / rolling_sum
+            else:
+                self._fps = 0.0
+
         self._last_tick = now
     
     def reset(self):
         self._times.clear()
-        self._rolling_sum = 0.0
         self._last_tick = None
         self._fps = 0.0
 
     @property
-    def fps(self):
+    def fps(self) -> float:
+        """Return 0.0 until the sampling window is fully populated."""
         return self._fps
 # ========================================================
 # ZMQ publish
