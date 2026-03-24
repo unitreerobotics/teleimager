@@ -696,12 +696,14 @@ class ImageClient:
         
         if self._cam_config['head_camera']['enable_zmq']:
             self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
+        if self._cam_config['head_camera'].get('enable_depth') and self._cam_config['head_camera'].get('zmq_depth_port'):
+            self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_depth_port'], request_bgr=False)
 
-        if self._cam_config['left_wrist_camera']['enable_zmq']:
-            self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
+       # if self._cam_config['left_wrist_camera']['enable_zmq']:
+      #      self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
 
-        if self._cam_config['right_wrist_camera']['enable_zmq']:
-            self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
+#        if self._cam_config['right_wrist_camera']['enable_zmq']:
+     #       self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
 
         if not self._cam_config['head_camera']['enable_zmq'] and not self._cam_config['head_camera']['enable_webrtc']:
             logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
@@ -714,7 +716,17 @@ class ImageClient:
 
     def get_head_frame(self):
         return self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
-    
+   
+    def get_head_depth_frame(self):
+        depth_port = self._cam_config['head_camera'].get('zmq_depth_port')
+        if not self._cam_config['head_camera'].get('enable_depth') or not depth_port:
+            return None
+        raw = self._subscriber_manager.subscribe(self._host, depth_port, request_bgr=False)
+        if raw is None or raw.jpg is None:
+            return None
+        h, w = self._cam_config['head_camera']['image_shape']
+        return np.frombuffer(raw.jpg, dtype=np.uint16).reshape(h, w)   
+
     def get_left_wrist_frame(self):
         return self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
     
