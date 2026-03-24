@@ -21,14 +21,18 @@ head_camera:
   #   - "opencv"    → opencv driver
   #   - "realsense" → pyrealsense2 driver
   #   - "uvc"       → pyuvc driver
-  type: uvc
+  type: realsense
 
   # Image Format
   # image resolution: [height, width]
-  image_shape: [480, 1280]
+  image_shape: [720, 1280]
   binocular: true
   # frame per second
   fps: 30
+
+  # Depth Format
+  enable_depth: true
+  zmq_depth_port: 55556
 
   # Camera identifiers (choose one or more):
   #   - video_id: X        → /dev/videoX  (e.g. 0 → /dev/video0)
@@ -43,40 +47,7 @@ head_camera:
   #   - type "realsense": supports serial_number only (but a RealSense can also be used as opencv/uvc if desired)
   #   - type "opencv":    supports video_id, serial_number, physical_path
   #   - type "uvc":       supports video_id, serial_number, physical_path
-  video_id: 0
-  serial_number: 01.00.00
+  video_id: null
+  serial_number: 243722075296
   physical_path: null
 
-# =====================================================
-# Left wrist camera configuration
-# =====================================================
-left_wrist_camera:
-  enable_zmq: true
-  zmq_port : 55556
-  enable_webrtc: true
-  webrtc_port : 60002
-  webrtc_codec: h264
-  type: uvc
-  image_shape: [480, 640]
-  binocular: false
-  fps: 30
-  video_id: 2
-  serial_number: 200901010001
-  physical_path: null
-
-# =====================================================
-# Right wrist camera configuration
-# =====================================================
-right_wrist_camera:
-  enable_zmq: true
-  zmq_port : 55557
-  enable_webrtc: true
-  webrtc_port: 60003
-  webrtc_codec: h264
-  type: uvc
-  image_shape: [480, 640]
-  binocular: false
-  fps: 30
-  video_id: 4
-  serial_number: 200901010002
-  physical_path: null
