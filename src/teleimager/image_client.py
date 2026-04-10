@@ -699,11 +699,11 @@ class ImageClient:
         if self._cam_config['head_camera'].get('enable_depth') and self._cam_config['head_camera'].get('zmq_depth_port'):
             self._subscriber_manager.subscribe(self._host, self._cam_config['head_camera']['zmq_depth_port'], request_bgr=False)
 
-       # if self._cam_config['left_wrist_camera']['enable_zmq']:
-      #      self._subscriber_manager.subscribe(self._host, self._cam_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-
-#        if self._cam_config['right_wrist_camera']['enable_zmq']:
-     #       self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
+        rw_cfg = self._cam_config.get('right_wrist_camera')
+        if rw_cfg and rw_cfg.get('enable_zmq'):
+            self._subscriber_manager.subscribe(self._host, rw_cfg['zmq_port'], request_bgr=self._request_bgr)
+        if rw_cfg and rw_cfg.get('enable_depth') and rw_cfg.get('zmq_depth_port'):
+            self._subscriber_manager.subscribe(self._host, rw_cfg['zmq_depth_port'], request_bgr=False)
 
         if not self._cam_config['head_camera']['enable_zmq'] and not self._cam_config['head_camera']['enable_webrtc']:
             logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
@@ -732,6 +732,17 @@ class ImageClient:
     
     def get_right_wrist_frame(self):
         return self._subscriber_manager.subscribe(self._host, self._cam_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
+
+    def get_right_wrist_depth_frame(self):
+        rw_cfg = self._cam_config.get('right_wrist_camera') or {}
+        depth_port = rw_cfg.get('zmq_depth_port')
+        if not rw_cfg.get('enable_depth') or not depth_port:
+            return None
+        raw = self._subscriber_manager.subscribe(self._host, depth_port, request_bgr=False)
+        if raw is None or raw.jpg is None:
+            return None
+        h, w = rw_cfg['image_shape']
+        return np.frombuffer(raw.jpg, dtype=np.uint16).reshape(h, w)
         
     def close(self):
         self._subscriber_manager.close()

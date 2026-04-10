@@ -932,6 +932,10 @@ class RealSenseCamera(BaseCamera):
                 self.g_depth_scale = depth_sensor.get_depth_scale()
 
             self.intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+            if self._enable_depth:
+                self.depth_intrinsics = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
+            else:
+                self.depth_intrinsics = None
             logger_mp.info(str(self))
         except Exception as e:
             if self.pipeline:
@@ -960,13 +964,12 @@ class RealSenseCamera(BaseCamera):
     
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames()
-        aligned_frames = self.align.process(frames)
-        color_frame = aligned_frames.get_color_frame()
+        color_frame = frames.get_color_frame()
         if not color_frame:
             return None
 
-        if self._enable_depth:   
-            depth_frame = aligned_frames.get_depth_frame()
+        if self._enable_depth:
+            depth_frame = frames.get_depth_frame()
             if depth_frame:
                 self._latest_depth = np.asanyarray(depth_frame.get_data())
                 if self._zmq_depth_buffer is not None:
@@ -1294,6 +1297,26 @@ class ImageServer:
                         self._cameras[cam_topic] = RealSenseCamera(cam_topic, serial_number, img_shape, fps,
                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
                                                                    enable_depth=enable_depth, zmq_depth_port=zmq_depth_port)
+                        rs_cam = self._cameras[cam_topic]
+                        intr = rs_cam.intrinsics
+                        cam_cfg['intrinsics'] = {'fx': intr.fx, 'fy': intr.fy, 'cx': intr.ppx, 'cy': intr.ppy}
+                        cam_cfg['color_intrinsics'] = {
+                            'width': intr.width, 'height': intr.height,
+                            'fx': intr.fx, 'fy': intr.fy,
+                            'ppx': intr.ppx, 'ppy': intr.ppy,
+                            'distortion_model': str(intr.model),
+                            'distortion_coeffs': list(intr.coeffs),
+                        }
+                        dintr = rs_cam.depth_intrinsics
+                        if dintr is not None:
+                            cam_cfg['depth_intrinsics'] = {
+                                'width': dintr.width, 'height': dintr.height,
+                                'fx': dintr.fx, 'fy': dintr.fy,
+                                'ppx': dintr.ppx, 'ppy': dintr.ppy,
+                                'distortion_model': str(dintr.model),
+                                'distortion_coeffs': list(dintr.coeffs),
+                            }
+                        cam_cfg['depth_scale'] = getattr(rs_cam, 'g_depth_scale', None)
 
                 elif cam_type == "uvc":
                     uid = None
@@ -1371,6 +1394,7 @@ class ImageServer:
 
     def _zmq_pub(self, cam_topic: str, camera: BaseCamera):
         try:
+            has_depth = camera.enable_depth()
             interval = 1.0 / camera.get_fps()
             next_frame_time = time.monotonic()
 
@@ -1383,6 +1407,12 @@ class ImageServer:
                     self._stop_event.set()
                     break
 
+                # Publish depth in the same tick as color to guarantee 1:1 sync
+                if has_depth:
+                    depth_bytes = camera.get_depth_bytes()
+                    if depth_bytes is not None:
+                        self._zmq_publisher_manager.publish(depth_bytes, camera.get_zmq_depth_port())
+
                 next_frame_time += interval
                 sleep_time = next_frame_time - time.monotonic()
                 if sleep_time > 0:
@@ -1392,24 +1422,6 @@ class ImageServer:
         except Exception as e:
             logger_mp.error(f"[Image Server] Failed to publish zmq frame from {cam_topic} camera.")
             self._stop_event.set()
-   
-    def _zmq_depth_pub(self, cam_topic: str, camera: BaseCamera):
-        try:
-            interval = 1.0 / camera.get_fps()
-            next_frame_time = time.monotonic()
-            while not self._stop_event.is_set():
-                depth_bytes = camera.get_depth_bytes()
-                if depth_bytes is not None:
-                    self._zmq_publisher_manager.publish(depth_bytes, camera.get_zmq_depth_port())
-                next_frame_time += interval
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
-        except Exception as e:
-            logger_mp.error(f"[Image Server] Failed to publish depth zmq frame from {cam_topic} camera.")
-            self._stop_event.set()   
 
     def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
         try:
@@ -1497,11 +1509,6 @@ class ImageServer:
 
             if camera.enable_zmq():
                 t = threading.Thread(target=self._zmq_pub, args=(camera_topic, camera), daemon=True)
-                t.start()
-                self._publisher_threads.append(t)
-
-            if camera.enable_depth():
-                t = threading.Thread(target=self._zmq_depth_pub, args=(camera_topic, camera), daemon=True)
                 t.start()
                 self._publisher_threads.append(t)
 
