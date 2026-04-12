@@ -69,6 +69,10 @@ KEY_PEM_PATH = Path(env_key or (user_key if user_key.exists() else default_key))
 CERT_PEM_PATH = CERT_PEM_PATH.resolve()
 KEY_PEM_PATH = KEY_PEM_PATH.resolve()
 
+LOGO_SVG_PATH = Path(__file__).resolve().with_name("unitree_logo.svg")
+with open(LOGO_SVG_PATH, "r", encoding="utf-8") as f:
+    UNITREE_LOGO_SVG = f.read()
+
 # ========================================================
 # libx264 for Jetson (Patch h264 Encoder)
 # ========================================================
@@ -153,7 +157,7 @@ INDEX_HTML = """
 
     <div style="margin-bottom: 20px;">
         <a href="https://www.unitree.com/" target="_blank">
-            <img src="https://www.unitree.com/images/0079f8938336436e955ea3a98c4e1e59.svg" alt="Unitree LOGO" width="10%">
+            __UNITREE_LOGO_SVG__
         </a>
     </div>
 
@@ -168,7 +172,7 @@ INDEX_HTML = """
     <script src="client.js"></script>
 </body>
 </html>
-"""
+""".replace("__UNITREE_LOGO_SVG__", UNITREE_LOGO_SVG)
 
 CLIENT_JS = """
 var pc = null;
@@ -353,6 +357,8 @@ class WebRTC_PublisherThread(threading.Thread):
     async def _offer(self, request: web.Request) -> web.Response:
         params = await request.json()
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+        user_agent = request.headers.get("User-Agent", "").lower()
+        is_firefox = "firefox" in user_agent and "chrome" not in user_agent
 
         pc = RTCPeerConnection()
         self._pcs.add(pc)
@@ -365,6 +371,9 @@ class WebRTC_PublisherThread(threading.Thread):
                 transceiver = pc.addTransceiver(relayed_track, direction="sendonly")
                 capabilities = RTCRtpSender.getCapabilities("video")
                 pref = (self._codec_pref or "h264").lower()
+                if is_firefox and pref == "h264":
+                    pref = "vp8"
+                    logger_mp.info(f"[WebRTC] Firefox detected, prefer VP8 for port:{self._port}")
 
                 if pref == "h264":
                     h264_codecs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
