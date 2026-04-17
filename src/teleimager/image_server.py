@@ -146,6 +146,12 @@ INDEX_HTML = """
     h1 a:hover {
         color: #555;
     }
+    .brand-logo svg {
+        width: min(180px, 40vw);
+        height: auto;
+        display: block;
+        margin: 0 auto;
+    }
     </style>
 </head>
 <body>
@@ -155,7 +161,7 @@ INDEX_HTML = """
         </a>
     </h1>
 
-    <div style="margin-bottom: 20px;">
+    <div class="brand-logo" style="margin-bottom: 20px;">
         <a href="https://www.unitree.com/" target="_blank">
             __UNITREE_LOGO_SVG__
         </a>
