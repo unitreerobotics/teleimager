@@ -1,5 +1,5 @@
 <div align="center">
-  <h1 align="center">Tele Imager</h1>
+  <img src="https://oss-global-cdn.unitree.com/static/ff07a98a322a42259278adaf6ef2b2c4_3630x1285.png" alt="Teleimager Logo" width="100%">
   <a href="https://www.unitree.com/" target="_blank">
     <img src="https://www.unitree.com/images/0079f8938336436e955ea3a98c4e1e59.svg" alt="Unitree LOGO" width="15%">
   </a>
