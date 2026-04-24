@@ -49,7 +49,7 @@ from typing import Dict, Optional, Tuple, Any
 from pathlib import Path
 CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "cam_config_server.yaml"
+    "cam_config_server.yaml"
 )
 CONFIG_PATH = os.path.normpath(CONFIG_PATH)
 

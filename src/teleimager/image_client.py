@@ -619,7 +619,7 @@ class ZMQ_Requester:
         self._poller.register(self._socket, zmq.POLLIN)
 
         self._current_dir = os.path.dirname(os.path.abspath(__file__))
-        self._package_dir = os.path.abspath(os.path.join(self._current_dir, "../../"))
+        self._package_dir = self._current_dir
         self._config_client_path = os.path.join(self._package_dir, "cam_config_client.yaml")
         self._config_server_path = os.path.join(self._package_dir, "cam_config_server.yaml")
     # --------------------------------------------------------
