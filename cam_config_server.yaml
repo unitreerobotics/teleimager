@@ -21,28 +21,42 @@ head_camera:
   #   - "opencv"    → opencv driver
   #   - "realsense" → pyrealsense2 driver
   #   - "uvc"       → pyuvc driver
-  type: uvc
+  type: opencv
 
   # Image Format
   # image resolution: [height, width]
-  image_shape: [480, 1280]
-  binocular: true
+  image_shape: [1080, 1920]
+  binocular: false
   # frame per second
   fps: 30
 
+  # Camera driver options:
+  #   - camera_driver: v4l2        (default OpenCV V4L2)
+  #   - camera_driver: gstreamer   (Jetson MIPI CSI / V4L2 pipeline)
+  camera_driver: gstreamer
+  gstreamer_pipeline: "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM), framerate=30/1 ! nvvidconv ! video/x-raw, width=1920, height=1080, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink drop=True"
+  #gstreamer_pipeline: "v4l2src device=/dev/video2 ! video/x-raw, format=UYVY, width=1280, height=720, framerate=30/1 ! videoconvert ! video/x-raw, format=BGR ! appsink drop=True"
+
   # Camera identifiers (choose one or more):
+  #   - video_path: /dev/videoX → exact V4L2 device node path (recommended for MIPI CSI cameras)
   #   - video_id: X        → /dev/videoX  (e.g. 0 → /dev/video0)
   #   - serial_number: Y   → camera's hardware serial (e.g. 141722079879)
   #   - physical_path: Z   → sysfs physical USB path (e.g. /sys/devices/pci0000:00/.../1-11.2:1.0)
   #
   # Identifier priority:
-  #   physical_path > serial_number > video_id
+  #   video_path > physical_path > serial_number > video_id
   #   if an identifier is not used, set it to null. The system will resolve the camera by priority.
   #
   # Notes:
   #   - type "realsense": supports serial_number only (but a RealSense can also be used as opencv/uvc if desired)
-  #   - type "opencv":    supports video_id, serial_number, physical_path
+  #   - type "opencv":    supports video_id, serial_number, physical_path, video_path, camera_driver
   #   - type "uvc":       supports video_id, serial_number, physical_path
+  #
+  # For Jetson / MIPI CSI cameras, use camera_driver: gstreamer and provide the pipeline below.
+  # Example:
+  #   camera_driver: gstreamer
+  #   gstreamer_pipeline: "nvarguscamerasrc sensor-id=2 ! video/x-raw(memory:NVMM), width=2560, height=1984, format=NV12, framerate=30/1 ! nvvidconv flip-method=0 ! video/x-raw, width=1280, height=992, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink drop=True"
+  video_path: null
   video_id: 0
   serial_number: 01.00.00
   physical_path: null
@@ -56,27 +70,33 @@ left_wrist_camera:
   enable_webrtc: true
   webrtc_port : 60002
   webrtc_codec: h264
-  type: uvc
-  image_shape: [480, 640]
+  type: opencv
+  image_shape: [720, 1280]
   binocular: false
   fps: 30
-  video_id: 2
-  serial_number: 200901010001
+  camera_driver: gstreamer
+  gstreamer_pipeline: "v4l2src device=/dev/video2 ! video/x-raw, format=UYVY, width=1280, height=720, framerate=30/1 ! videoconvert ! video/x-raw, format=BGR ! appsink drop=True"
+  video_path: null
+  video_id: null
+  serial_number: null
   physical_path: null
 
 # =====================================================
 # Right wrist camera configuration
 # =====================================================
 right_wrist_camera:
-  enable_zmq: true
+  enable_zmq: false
+  enable_webrtc: false
   zmq_port : 55557
-  enable_webrtc: true
-  webrtc_port: 60003
+  webrtc_port : 60003
   webrtc_codec: h264
-  type: uvc
+  type: opencv
   image_shape: [480, 640]
   binocular: false
   fps: 30
-  video_id: 4
-  serial_number: 200901010002
+  camera_driver: gstreamer
+  gstreamer_pipeline: "v4l2src device=/dev/video3 ! video/x-raw, format=UYVY, width=1280, height=720, framerate=30/1 ! videoconvert ! video/x-raw, format=BGR ! videoscale ! video/x-raw, width=640, height=480 ! appsink drop=True"
+  video_path: null
+  video_id: null
+  serial_number: null
   physical_path: null

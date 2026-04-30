@@ -1,6 +1,6 @@
 [project]
 name = "teleimager"
-version = "1.5.0"
+version = "1.5.1"
 description = "TeleImager: multi-camera image streaming service for unitree teleoperation"
 authors = [
     { name = "silencht", email = "silencht@qq.com" }
@@ -14,14 +14,16 @@ dependencies = [
     "numpy>=1.21,<2",
     "pyyaml",
     "pyzmq",
+    "aiohttp",
+    "aiortc",
 ]
 [project.optional-dependencies]
 # execute pip install -e ".[server]" to install server dependencies
-server = [
-    "aiohttp",
-    "aiortc",
-    "pupil-labs-uvc",
-]
+# server = [
+#     "aiohttp",
+#     "aiortc",
+#     "pupil-labs-uvc",
+# ]
 
 [project.urls]
 Homepage = "https://github.com/unitreerobotics/teleimager"

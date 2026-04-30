@@ -555,13 +555,26 @@ class CameraFinder:
     dev_info: extra info from uvc
     sn: serial number of the camera
     """
-    def __init__(self, realsense_enable=False, verbose=False):
+    def __init__(self, realsense_enable=False, verbose=False, uvc_enable=True):
         self.verbose = verbose
-        # uvc
-        reload_uvc_driver()
-        import uvc
-        self.uvc_devices = uvc.device_list()
-        self.uid_map = {dev["uid"]: dev for dev in self.uvc_devices}
+        self._uvc_enable = uvc_enable
+        self.uvc_devices = []
+        self.uid_map = {}
+
+        if self._uvc_enable:
+            # uvc
+            reload_uvc_driver()
+            try:
+                import uvc
+                self.uvc_devices = uvc.device_list()
+                self.uid_map = {dev["uid"]: dev for dev in self.uvc_devices}
+            except Exception as e:
+                self.uvc_devices = []
+                self.uid_map = {}
+                logger_mp.warning(f"[CameraFinder] uvc import failed: {e}; using only OpenCV/V4L2 device discovery")
+        else:
+            logger_mp.info("[CameraFinder] uvc discovery is disabled by configuration")
+
         # all video devices
         self.video_paths = self._list_video_paths()
         # realsense
@@ -608,6 +621,8 @@ class CameraFinder:
         return [f"/dev/{x}" for x in sorted(os.listdir(base)) if x.startswith("video")]
 
     def _list_uvc_rgb_video_paths(self):
+        if not self._uvc_enable:
+            return []
         return [p for p in self.video_paths if self._is_like_rgb(p) and p not in self.rs_video_paths]
 
     def _list_realsense_video_paths(self):
@@ -1063,15 +1078,28 @@ class UVCCamera(BaseCamera):
 
 class OpenCVCamera(BaseCamera):
     def __init__(self, cam_topic, video_path, img_shape, fps, 
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
+                 fourcc=None, driver="v4l2", gst_pipeline=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._video_path = video_path
+        self._fourcc = fourcc
+        self._driver = driver
+        self._gst_pipeline = gst_pipeline
 
-        self.cap = cv2.VideoCapture(self._video_path, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._img_shape[0])
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._img_shape[1])
-        self.cap.set(cv2.CAP_PROP_FPS, self._fps)
+        if self._driver == "gstreamer":
+            if not self._gst_pipeline:
+                raise ValueError("OpenCVCamera with camera_driver='gstreamer' requires gstreamer_pipeline in configuration.")
+            self.cap = cv2.VideoCapture(self._gst_pipeline, cv2.CAP_GSTREAMER)
+        else:
+            self.cap = cv2.VideoCapture(self._video_path, cv2.CAP_V4L2)
+            if self._fourcc:
+                try:
+                    self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self._fourcc))
+                except Exception as e:
+                    logger_mp.warning(f"[OpenCVCamera] Failed to set FOURCC={self._fourcc} for {self._video_path}: {e}")
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._img_shape[0])
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._img_shape[1])
+            self.cap.set(cv2.CAP_PROP_FPS, self._fps)
 
         # Test if the camera can read frames
         if not self._can_read_frame():
@@ -1083,19 +1111,27 @@ class OpenCVCamera(BaseCamera):
     def __str__(self):
         return (
             f"[OpenCVCamera: {self._cam_topic}] initialized with "
-            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
+            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS, driver={self._driver}.\n"
             f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
             f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
         )
         
     def _can_read_frame(self):
-        success, _ = self.cap.read()
+        success, frame = self.cap.read()
+        if success and frame is not None and self._img_shape is not None:
+            frame_height, frame_width = frame.shape[:2]
+            if (frame_height, frame_width) != tuple(self._img_shape):
+                frame = cv2.resize(frame, (self._img_shape[1], self._img_shape[0]), interpolation=cv2.INTER_LINEAR)
         return success
     
     def _update_frame(self):
         if self.cap is not None:
             ret, bgr_numpy = self.cap.read()
-            if ret:
+            if ret and bgr_numpy is not None:
+                if self._img_shape is not None:
+                    frame_height, frame_width = bgr_numpy.shape[:2]
+                    if (frame_height, frame_width) != tuple(self._img_shape):
+                        bgr_numpy = cv2.resize(bgr_numpy, (self._img_shape[1], self._img_shape[0]), interpolation=cv2.INTER_LINEAR)
                 if self._enable_webrtc:
                     self._webrtc_buffer.write(bgr_numpy)
 
@@ -1200,14 +1236,15 @@ class IsaacSimCamera(BaseCamera):
 # image server
 # ========================================================
 class ImageServer:
-    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False):
+    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False, uvc_enable=True):
         self._cam_config = cam_config
         self._realsense_enable = realsense_enable
         self._isaacsim_enable = isaacsim_enable
+        self._uvc_enable = uvc_enable
         self._stop_event = threading.Event()
         self._cameras: dict[str, BaseCamera] = {}
         if not self._isaacsim_enable:
-            self._cam_finder = CameraFinder(realsense_enable, camera_finder_verbose)
+            self._cam_finder = CameraFinder(realsense_enable, camera_finder_verbose, uvc_enable=self._uvc_enable)
         self._responser = ZMQ_Responser(self._cam_config)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
@@ -1229,12 +1266,34 @@ class ImageServer:
                     cam_type = "isaacsim"
                 img_shape = cam_cfg.get("image_shape", None)
                 fps = cam_cfg.get("fps", 30)
-                video_id = cam_cfg.get("video_id", "0")
-                video_path = f"/dev/video{video_id}" if video_id else None
+                video_path = str(cam_cfg.get("video_path")) if cam_cfg.get("video_path") else None
+                video_id = cam_cfg.get("video_id", None)
+                if video_path is None and video_id is not None:
+                    video_path = f"/dev/video{video_id}"
                 physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
                 serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
+                driver = cam_cfg.get("camera_driver", "v4l2").lower()
+                gst_pipeline = cam_cfg.get("gstreamer_pipeline", None)
+                fourcc = cam_cfg.get("fourcc", None)
 
                 if cam_type == "opencv":
+                    if video_path is not None or driver == "gstreamer":
+                        self._cameras[cam_topic] = OpenCVCamera(
+                            cam_topic,
+                            video_path,
+                            img_shape,
+                            fps,
+                            enable_zmq,
+                            zmq_port,
+                            enable_webrtc,
+                            webrtc_port,
+                            webrtc_codec,
+                            fourcc=fourcc,
+                            driver=driver,
+                            gst_pipeline=gst_pipeline,
+                        )
+                        continue
+
                     if physical_path is not None:
                         vpath = self._cam_finder.get_vpath_by_ppath(physical_path)
                         if vpath is None:
@@ -1242,7 +1301,8 @@ class ImageServer:
                             logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with physical path {physical_path}")
                         else:
                             self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps, 
-                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                    fourcc=fourcc)
                             continue
 
                     if serial_number is not None:
@@ -1252,17 +1312,19 @@ class ImageServer:
                             logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with serial number {serial_number}")
                         else:
                             self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps, 
-                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                    fourcc=fourcc)
                         # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
                         # ——— even if no camera matches the given path/serial.
                         continue
                     
-                    if not self._cam_finder.is_vpath_exist(video_path):
+                    if video_path is None or not self._cam_finder.is_vpath_exist(video_path):
                         self._cameras[cam_topic] = None
                         logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with video_id {video_id}")
                     else:
                         self._cameras[cam_topic] = OpenCVCamera(cam_topic, video_path, img_shape, fps,
-                                                                enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                                                                enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                fourcc=fourcc)
                         
 
                 elif cam_type == "realsense":
@@ -1500,7 +1562,7 @@ def run_isaacsim_server():
         logger_mp.error(f"Failed to load configuration file at {CONFIG_PATH}: {e}")
         exit(1)
     # start image server
-    server = ImageServer(cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=True)
+    server = ImageServer(cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=True, uvc_enable=False)
     server.start()
     return server
 
@@ -1529,6 +1591,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cf', action = 'store_true', help = 'Enable camera found mode, print all connected cameras info')
     parser.add_argument('--rs', action = 'store_true', help = 'Enable RealSense camera mode. Otherwise only find UVC/OpenCV cameras.')
+    parser.add_argument('--no-uvc', action='store_true', help='Disable uvc driver reload and uvc device discovery (useful for MIPI CSI or non-UVC cameras).')
     parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Disable CPU affinity setting for performance optimization.')
     args = parser.parse_args()
 
@@ -1537,7 +1600,7 @@ def main():
 
     # if enable camera finder mode, just print cameras info and exit
     if args.cf:
-        CameraFinder(realsense_enable=args.rs, verbose=True)
+        CameraFinder(realsense_enable=args.rs, verbose=True, uvc_enable=(not args.no_uvc))
         exit(0)
 
     # Load config file, start image server
@@ -1549,7 +1612,7 @@ def main():
         exit(1)
 
     # start image server
-    server = ImageServer(cam_config, realsense_enable=args.rs, camera_finder_verbose=False)
+    server = ImageServer(cam_config, realsense_enable=args.rs, camera_finder_verbose=False, uvc_enable=(not args.no_uvc))
     server.start()
 
     # graceful shutdown handling
