@@ -1077,19 +1077,22 @@ class UVCCamera(BaseCamera):
         logger_mp.info(f"[UVCCamera] Released {self._cam_topic}")
 
 class OpenCVCamera(BaseCamera):
-    def __init__(self, cam_topic, video_path, img_shape, fps, 
+    def __init__(self, cam_topic, video_path, img_shape, fps,
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
-                 fourcc=None, driver="v4l2", gst_pipeline=None):
+                 fourcc=None, driver="v4l2", gst_pipeline=None, gst_pipeline_secondary=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._video_path = video_path
         self._fourcc = fourcc
         self._driver = driver
         self._gst_pipeline = gst_pipeline
+        self.cap2 = None
 
         if self._driver == "gstreamer":
             if not self._gst_pipeline:
                 raise ValueError("OpenCVCamera with camera_driver='gstreamer' requires gstreamer_pipeline in configuration.")
             self.cap = cv2.VideoCapture(self._gst_pipeline, cv2.CAP_GSTREAMER)
+            if gst_pipeline_secondary:
+                self.cap2 = cv2.VideoCapture(gst_pipeline_secondary, cv2.CAP_GSTREAMER)
         else:
             self.cap = cv2.VideoCapture(self._video_path, cv2.CAP_V4L2)
             if self._fourcc:
@@ -1118,17 +1121,32 @@ class OpenCVCamera(BaseCamera):
         
     def _can_read_frame(self):
         success, frame = self.cap.read()
+        if self.cap2 is not None:
+            success2, _ = self.cap2.read()
+            return success and success2
         if success and frame is not None and self._img_shape is not None:
             frame_height, frame_width = frame.shape[:2]
             if (frame_height, frame_width) != tuple(self._img_shape):
                 frame = cv2.resize(frame, (self._img_shape[1], self._img_shape[0]), interpolation=cv2.INTER_LINEAR)
         return success
-    
+
     def _update_frame(self):
         if self.cap is not None:
             ret, bgr_numpy = self.cap.read()
             if ret and bgr_numpy is not None:
-                if self._img_shape is not None:
+                if self.cap2 is not None:
+                    ret2, bgr_numpy2 = self.cap2.read()
+                    if not ret2 or bgr_numpy2 is None:
+                        raise RuntimeError
+                    half_shape = (self._img_shape[0], self._img_shape[1] // 2)
+                    h, w = bgr_numpy.shape[:2]
+                    if (h, w) != half_shape:
+                        bgr_numpy = cv2.resize(bgr_numpy, (half_shape[1], half_shape[0]), interpolation=cv2.INTER_LINEAR)
+                    h2, w2 = bgr_numpy2.shape[:2]
+                    if (h2, w2) != half_shape:
+                        bgr_numpy2 = cv2.resize(bgr_numpy2, (half_shape[1], half_shape[0]), interpolation=cv2.INTER_LINEAR)
+                    bgr_numpy = np.hstack([bgr_numpy, bgr_numpy2])
+                elif self._img_shape is not None:
                     frame_height, frame_width = bgr_numpy.shape[:2]
                     if (frame_height, frame_width) != tuple(self._img_shape):
                         bgr_numpy = cv2.resize(bgr_numpy, (self._img_shape[1], self._img_shape[0]), interpolation=cv2.INTER_LINEAR)
@@ -1139,7 +1157,7 @@ class OpenCVCamera(BaseCamera):
                     ok, buf = cv2.imencode(".jpg", bgr_numpy)
                     if ok:
                         self._zmq_buffer.write(buf.tobytes())
-                
+
                 if not self._ready.is_set():
                     self._ready.set()
             else:
@@ -1148,6 +1166,9 @@ class OpenCVCamera(BaseCamera):
     def release(self):
         self.cap.release()
         self.cap = None
+        if self.cap2 is not None:
+            self.cap2.release()
+            self.cap2 = None
         logger_mp.info(f"[OpenCVCamera] Released {self._cam_topic}")
 
 class IsaacSimCamera(BaseCamera):
@@ -1274,6 +1295,7 @@ class ImageServer:
                 serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
                 driver = cam_cfg.get("camera_driver", "v4l2").lower()
                 gst_pipeline = cam_cfg.get("gstreamer_pipeline", None)
+                gst_pipeline_secondary = cam_cfg.get("gstreamer_pipeline_secondary", None)
                 fourcc = cam_cfg.get("fourcc", None)
 
                 if cam_type == "opencv":
@@ -1291,6 +1313,7 @@ class ImageServer:
                             fourcc=fourcc,
                             driver=driver,
                             gst_pipeline=gst_pipeline,
+                            gst_pipeline_secondary=gst_pipeline_secondary,
                         )
                         continue
 

@@ -25,7 +25,7 @@ head_camera:
 
   # Image Format
   # image resolution: [height, width]
-  image_shape: [1080, 1920]
+  image_shape: [1080, 3840]
   binocular: false
   # frame per second
   fps: 30
@@ -35,7 +35,7 @@ head_camera:
   #   - camera_driver: gstreamer   (Jetson MIPI CSI / V4L2 pipeline)
   camera_driver: gstreamer
   gstreamer_pipeline: "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM), framerate=30/1 ! nvvidconv ! video/x-raw, width=1920, height=1080, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink drop=True"
-  #gstreamer_pipeline: "v4l2src device=/dev/video2 ! video/x-raw, format=UYVY, width=1280, height=720, framerate=30/1 ! videoconvert ! video/x-raw, format=BGR ! appsink drop=True"
+  gstreamer_pipeline_secondary: "nvarguscamerasrc sensor-id=1 ! video/x-raw(memory:NVMM), framerate=30/1 ! nvvidconv ! video/x-raw, width=1920, height=1080, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink drop=True"
 
   # Camera identifiers (choose one or more):
   #   - video_path: /dev/videoX → exact V4L2 device node path (recommended for MIPI CSI cameras)
@@ -91,7 +91,7 @@ right_wrist_camera:
   webrtc_port : 60003
   webrtc_codec: h264
   type: opencv
-  image_shape: [480, 640]
+  image_shape: [720, 1280]
   binocular: false
   fps: 30
   camera_driver: gstreamer
