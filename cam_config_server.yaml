@@ -29,8 +29,8 @@ head_camera:
   # Optional: resize published frames to [height, width] before ZMQ/WebRTC output.
   # If aspect ratio differs from image_shape, applies proportional scale + center crop.
   # Set to null to disable. Example for VR binocular head view (each eye 480x640):
-  image_shape_resize_target: [480, 1280]  # e.g. [480, 1280]
-  binocular: false
+  image_shape_resize_target: [540, 1920] # e.g. or null to disable
+  binocular: true
   # frame per second
   fps: 30
 
@@ -78,7 +78,7 @@ left_wrist_camera:
   image_shape: [720, 1280]
   # Optional: resize published frames to [height, width] before ZMQ/WebRTC output.
   # If aspect ratio differs from image_shape, applies proportional scale + center crop.
-  image_shape_resize_target: [480, 640]  # e.g. [480, 640] or null to disable
+  image_shape_resize_target: [360, 640]  # e.g. [480, 640] or null to disable
   binocular: false
   fps: 30
   camera_driver: gstreamer
@@ -101,7 +101,7 @@ right_wrist_camera:
   image_shape: [720, 1280]
   # Optional: resize published frames to [height, width] before ZMQ/WebRTC output.
   # If aspect ratio differs from image_shape, applies proportional scale + center crop.
-  image_shape_resize_target: [480, 640]  # e.g. [480, 640] or null to disable
+  image_shape_resize_target: [360, 640]  # e.g. [480, 640] or null to disable
   binocular: false
   fps: 30
   camera_driver: gstreamer

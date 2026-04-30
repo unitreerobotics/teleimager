@@ -81,7 +81,8 @@ def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: boo
             self.codec = av.CodecContext.create("libx264", "w")
             self.codec.width = frame.width
             self.codec.height = frame.height
-            self.codec.bit_rate = self.target_bitrate
+            # self.codec.bit_rate = self.target_bitrate
+            self.codec.bit_rate = 5_000_000  # 5 Mbps target bitrate for software encoding
             self.codec.pix_fmt = "yuv420p"
             self.codec.framerate = fractions.Fraction(30, 1)
             self.codec.time_base = fractions.Fraction(1, 30)
