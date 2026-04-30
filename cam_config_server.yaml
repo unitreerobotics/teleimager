@@ -26,6 +26,10 @@ head_camera:
   # Image Format
   # image resolution: [height, width]
   image_shape: [1080, 3840]
+  # Optional: resize published frames to [height, width] before ZMQ/WebRTC output.
+  # If aspect ratio differs from image_shape, applies proportional scale + center crop.
+  # Set to null to disable. Example for VR binocular head view (each eye 480x640):
+  image_shape_resize_target: [480, 1280]  # e.g. [480, 1280]
   binocular: false
   # frame per second
   fps: 30
@@ -57,7 +61,7 @@ head_camera:
   #   camera_driver: gstreamer
   #   gstreamer_pipeline: "nvarguscamerasrc sensor-id=2 ! video/x-raw(memory:NVMM), width=2560, height=1984, format=NV12, framerate=30/1 ! nvvidconv flip-method=0 ! video/x-raw, width=1280, height=992, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink drop=True"
   video_path: null
-  video_id: 0
+  video_id: null
   serial_number: 01.00.00
   physical_path: null
 
@@ -72,6 +76,9 @@ left_wrist_camera:
   webrtc_codec: h264
   type: opencv
   image_shape: [720, 1280]
+  # Optional: resize published frames to [height, width] before ZMQ/WebRTC output.
+  # If aspect ratio differs from image_shape, applies proportional scale + center crop.
+  image_shape_resize_target: [480, 640]  # e.g. [480, 640] or null to disable
   binocular: false
   fps: 30
   camera_driver: gstreamer
@@ -92,6 +99,9 @@ right_wrist_camera:
   webrtc_codec: h264
   type: opencv
   image_shape: [720, 1280]
+  # Optional: resize published frames to [height, width] before ZMQ/WebRTC output.
+  # If aspect ratio differs from image_shape, applies proportional scale + center crop.
+  image_shape_resize_target: [480, 640]  # e.g. [480, 640] or null to disable
   binocular: false
   fps: 30
   camera_driver: gstreamer

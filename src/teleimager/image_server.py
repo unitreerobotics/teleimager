@@ -839,8 +839,9 @@ class CameraFinder:
         logger_mp.info("=========================== Camera Discovery End ================================")
 
 class BaseCamera:
-    def __init__(self, cam_topic, img_shape, fps, 
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
+    def __init__(self, cam_topic, img_shape, fps,
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
+                 resize_target=None):
         self._ready = threading.Event()
         self._cam_topic = cam_topic
         self._img_shape = img_shape # (H, W)
@@ -860,11 +861,35 @@ class BaseCamera:
         else:
             self._webrtc_buffer = None
 
+        # Optional: resize frame to this shape (H, W) before publishing via ZMQ/WebRTC.
+        # If aspect ratio differs from source, applies proportional scale + center crop.
+        self._resize_target = tuple(resize_target) if resize_target is not None else None
+
     def __str__(self):
         raise NotImplementedError
     
     def __repr__(self):
         return self.__str__()
+
+    def _apply_publish_resize(self, frame: np.ndarray) -> np.ndarray:
+        if self._resize_target is None:
+            return frame
+        th, tw = self._resize_target
+        fh, fw = frame.shape[:2]
+        if (fh, fw) == (th, tw):
+            return frame
+        src_ar = fw / fh
+        tgt_ar = tw / th
+        if abs(src_ar - tgt_ar) < 0.02:
+            return cv2.resize(frame, (tw, th), interpolation=cv2.INTER_LINEAR)
+        # Proportional resize so target fits, then center crop
+        scale = max(tw / fw, th / fh)
+        rw = int(round(fw * scale))
+        rh = int(round(fh * scale))
+        resized = cv2.resize(frame, (rw, rh), interpolation=cv2.INTER_LINEAR)
+        y0 = (rh - th) // 2
+        x0 = (rw - tw) // 2
+        return resized[y0:y0 + th, x0:x0 + tw]
 
     def _update_frame(self):
         """Return a jepg frame as bytes, and a bgr frame as numpy array"""
@@ -914,10 +939,12 @@ class BaseCamera:
         raise NotImplementedError
 
 class RealSenseCamera(BaseCamera):
-    def __init__(self, cam_topic, serial_number, img_shape, fps, 
-                 enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None, enable_depth=False):
+    def __init__(self, cam_topic, serial_number, img_shape, fps,
+                 enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None, enable_depth=False,
+                 resize_target=None):
         rs = self.check_pyrealsense2_install()
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                         resize_target=resize_target)
         self._serial_number = serial_number
         self._enable_depth = enable_depth
         self._latest_depth = None
@@ -984,6 +1011,8 @@ class RealSenseCamera(BaseCamera):
 
         bgr_numpy = np.asanyarray(color_frame.get_data())
 
+        bgr_numpy = self._apply_publish_resize(bgr_numpy)
+
         if self._enable_webrtc:
             self._webrtc_buffer.write(bgr_numpy)
 
@@ -1013,9 +1042,11 @@ class RealSenseCamera(BaseCamera):
         logger_mp.info(f"[RealSenseCamera] Released {self._cam_topic}")
 
 class UVCCamera(BaseCamera):
-    def __init__(self, cam_topic, uid, img_shape, fps, 
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+    def __init__(self, cam_topic, uid, img_shape, fps,
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
+                 resize_target=None):
+        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                         resize_target=resize_target)
         import uvc
         self.uid = uid
         self.cap = None
@@ -1050,13 +1081,23 @@ class UVCCamera(BaseCamera):
         if self.cap is not None:
             frame = self.cap.get_frame_robust() # get_frame(timeout=500)
             if frame is not None:
-                if self._enable_zmq:
-                    if frame.jpeg_buffer is not None:
-                        self._zmq_buffer.write(bytes(frame.jpeg_buffer))
-
-                if self._enable_webrtc:
-                    if frame.bgr is not None:
-                        self._webrtc_buffer.write(frame.bgr)
+                if self._resize_target is not None:
+                    bgr = frame.bgr
+                    if bgr is not None:
+                        bgr = self._apply_publish_resize(bgr)
+                        if self._enable_zmq:
+                            ok, buf = cv2.imencode(".jpg", bgr)
+                            if ok:
+                                self._zmq_buffer.write(buf.tobytes())
+                        if self._enable_webrtc:
+                            self._webrtc_buffer.write(bgr)
+                else:
+                    if self._enable_zmq:
+                        if frame.jpeg_buffer is not None:
+                            self._zmq_buffer.write(bytes(frame.jpeg_buffer))
+                    if self._enable_webrtc:
+                        if frame.bgr is not None:
+                            self._webrtc_buffer.write(frame.bgr)
 
                 if not self._ready.is_set():
                     self._ready.set()
@@ -1079,8 +1120,10 @@ class UVCCamera(BaseCamera):
 class OpenCVCamera(BaseCamera):
     def __init__(self, cam_topic, video_path, img_shape, fps,
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
-                 fourcc=None, driver="v4l2", gst_pipeline=None, gst_pipeline_secondary=None):
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                 fourcc=None, driver="v4l2", gst_pipeline=None, gst_pipeline_secondary=None,
+                 resize_target=None):
+        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                         resize_target=resize_target)
         self._video_path = video_path
         self._fourcc = fourcc
         self._driver = driver
@@ -1150,6 +1193,7 @@ class OpenCVCamera(BaseCamera):
                     frame_height, frame_width = bgr_numpy.shape[:2]
                     if (frame_height, frame_width) != tuple(self._img_shape):
                         bgr_numpy = cv2.resize(bgr_numpy, (self._img_shape[1], self._img_shape[0]), interpolation=cv2.INTER_LINEAR)
+                bgr_numpy = self._apply_publish_resize(bgr_numpy)
                 if self._enable_webrtc:
                     self._webrtc_buffer.write(bgr_numpy)
 
@@ -1174,7 +1218,7 @@ class OpenCVCamera(BaseCamera):
 class IsaacSimCamera(BaseCamera):
     def __init__(self, cam_topic, img_shape, fps,
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
-                 image_source="head", binocular=False):
+                 image_source="head", binocular=False, resize_target=None):
         """
         IsaacSim camera that reads from shared memory.
 
@@ -1190,7 +1234,8 @@ class IsaacSimCamera(BaseCamera):
             image_source: which image to read from shared memory ("head", "left", "right")
             binocular: if True and image_source=="head", concatenate left+right for binocular vision
         """
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                         resize_target=resize_target)
         from tools.shared_memory_utils import MultiImageReader # https://github.com/unitreerobotics/unitree_sim_isaaclab/tree/main/tools
         self.multi_image_reader = MultiImageReader()
         self._image_source = image_source  # "head", "left", or "right"
@@ -1229,6 +1274,7 @@ class IsaacSimCamera(BaseCamera):
 
         # Publish the frame data only if we have valid data
         if frame_data is not None:
+            frame_data = self._apply_publish_resize(frame_data)
             # For ZMQ: encode to JPEG bytes
             if self._enable_zmq:
                 ok, buf = cv2.imencode(".jpg", frame_data)
@@ -1297,6 +1343,7 @@ class ImageServer:
                 gst_pipeline = cam_cfg.get("gstreamer_pipeline", None)
                 gst_pipeline_secondary = cam_cfg.get("gstreamer_pipeline_secondary", None)
                 fourcc = cam_cfg.get("fourcc", None)
+                resize_target = cam_cfg.get("image_shape_resize_target", None)
 
                 if cam_type == "opencv":
                     if video_path is not None or driver == "gstreamer":
@@ -1314,6 +1361,7 @@ class ImageServer:
                             driver=driver,
                             gst_pipeline=gst_pipeline,
                             gst_pipeline_secondary=gst_pipeline_secondary,
+                            resize_target=resize_target,
                         )
                         continue
 
@@ -1323,9 +1371,9 @@ class ImageServer:
                             self._cameras[cam_topic] = None
                             logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with physical path {physical_path}")
                         else:
-                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps, 
+                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
                                                                     enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
-                                                                    fourcc=fourcc)
+                                                                    fourcc=fourcc, resize_target=resize_target)
                             continue
 
                     if serial_number is not None:
@@ -1334,9 +1382,9 @@ class ImageServer:
                             self._cameras[cam_topic] = None
                             logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with serial number {serial_number}")
                         else:
-                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps, 
+                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
                                                                     enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
-                                                                    fourcc=fourcc)
+                                                                    fourcc=fourcc, resize_target=resize_target)
                         # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
                         # ——— even if no camera matches the given path/serial.
                         continue
@@ -1347,7 +1395,7 @@ class ImageServer:
                     else:
                         self._cameras[cam_topic] = OpenCVCamera(cam_topic, video_path, img_shape, fps,
                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
-                                                                fourcc=fourcc)
+                                                                fourcc=fourcc, resize_target=resize_target)
                         
 
                 elif cam_type == "realsense":
@@ -1359,7 +1407,8 @@ class ImageServer:
                         logger_mp.error(f"[Image Server] Cannot find RealSenseCamera for {cam_topic}")
                     else:
                         self._cameras[cam_topic] = RealSenseCamera(cam_topic, serial_number, img_shape, fps,
-                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                   resize_target=resize_target)
 
                 elif cam_type == "uvc":
                     uid = None
@@ -1369,8 +1418,9 @@ class ImageServer:
                             self._cameras[cam_topic] = None
                             logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with physical path {physical_path}")
                         else:
-                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps, 
-                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
+                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                 resize_target=resize_target)
                             continue
 
                     if serial_number is not None:
@@ -1379,8 +1429,9 @@ class ImageServer:
                             self._cameras[cam_topic] = None
                             logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with serial number {serial_number}")
                         else:
-                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps, 
-                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
+                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
+                                                                 resize_target=resize_target)
                         # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
                         # ——— even if no camera matches the given path/serial.
                         continue
@@ -1403,7 +1454,8 @@ class ImageServer:
 
                     self._cameras[cam_topic] = IsaacSimCamera(cam_topic, img_shape, fps,
                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
-                                                                image_source=image_source, binocular=binocular)
+                                                                image_source=image_source, binocular=binocular,
+                                                                resize_target=resize_target)
                 else:
                     logger_mp.error(f"[Image Server] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                     continue
