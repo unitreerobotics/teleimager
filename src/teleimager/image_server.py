@@ -1134,6 +1134,28 @@ class OpenCVCamera(BaseCamera):
         if self._driver == "gstreamer":
             if not self._gst_pipeline:
                 raise ValueError("OpenCVCamera with camera_driver='gstreamer' requires gstreamer_pipeline in configuration.")
+            if self._resize_target is not None:
+                th, tw = self._resize_target
+                # Binocular: two sensors hstack, each contributes half the target width
+                per_w = (tw // 2) if gst_pipeline_secondary else tw
+                per_h = th
+                # GStreamer requires even dimensions for most pixel formats
+                per_w = per_w if per_w % 2 == 0 else per_w - 1
+                per_h = per_h if per_h % 2 == 0 else per_h - 1
+                actual_tw = per_w * 2 if gst_pipeline_secondary else per_w
+                if (per_h, actual_tw) != (th, tw):
+                    logger_mp.warning(
+                        f"[OpenCVCamera] {cam_topic} image_shape_resize_target {[th, tw]} "
+                        f"has odd dimensions, rounded to {[per_h, actual_tw]} for GStreamer."
+                    )
+                scale_insert = f"! videoscale ! video/x-raw, width={per_w}, height={per_h} "
+                self._gst_pipeline = self._gst_pipeline.replace("! appsink", scale_insert + "! appsink")
+                if gst_pipeline_secondary:
+                    gst_pipeline_secondary = gst_pipeline_secondary.replace("! appsink", scale_insert + "! appsink")
+                # Use actual pipeline output size (may differ from requested if odd values were rounded)
+                actual_tw = per_w * 2 if gst_pipeline_secondary else per_w
+                self._img_shape = [per_h, actual_tw]
+                self._resize_target = None  # pipeline handles resize, Python layer is bypassed
             self.cap = cv2.VideoCapture(self._gst_pipeline, cv2.CAP_GSTREAMER)
             if gst_pipeline_secondary:
                 self.cap2 = cv2.VideoCapture(gst_pipeline_secondary, cv2.CAP_GSTREAMER)
@@ -1171,7 +1193,11 @@ class OpenCVCamera(BaseCamera):
         if success and frame is not None and self._img_shape is not None:
             frame_height, frame_width = frame.shape[:2]
             if (frame_height, frame_width) != tuple(self._img_shape):
-                frame = cv2.resize(frame, (self._img_shape[1], self._img_shape[0]), interpolation=cv2.INTER_LINEAR)
+                raise RuntimeError(
+                    f"[OpenCVCamera] {self._cam_topic} frame size mismatch: "
+                    f"expected {tuple(self._img_shape)}, got {(frame_height, frame_width)}. "
+                    f"Check image_shape in config or camera driver settings."
+                )
         return success
 
     def _update_frame(self):
@@ -1185,15 +1211,24 @@ class OpenCVCamera(BaseCamera):
                     half_shape = (self._img_shape[0], self._img_shape[1] // 2)
                     h, w = bgr_numpy.shape[:2]
                     if (h, w) != half_shape:
-                        bgr_numpy = cv2.resize(bgr_numpy, (half_shape[1], half_shape[0]), interpolation=cv2.INTER_LINEAR)
+                        raise RuntimeError(
+                            f"[OpenCVCamera] {self._cam_topic} primary frame size mismatch: "
+                            f"expected {half_shape}, got {(h, w)}."
+                        )
                     h2, w2 = bgr_numpy2.shape[:2]
                     if (h2, w2) != half_shape:
-                        bgr_numpy2 = cv2.resize(bgr_numpy2, (half_shape[1], half_shape[0]), interpolation=cv2.INTER_LINEAR)
+                        raise RuntimeError(
+                            f"[OpenCVCamera] {self._cam_topic} secondary frame size mismatch: "
+                            f"expected {half_shape}, got {(h2, w2)}."
+                        )
                     bgr_numpy = np.hstack([bgr_numpy, bgr_numpy2])
                 elif self._img_shape is not None:
                     frame_height, frame_width = bgr_numpy.shape[:2]
                     if (frame_height, frame_width) != tuple(self._img_shape):
-                        bgr_numpy = cv2.resize(bgr_numpy, (self._img_shape[1], self._img_shape[0]), interpolation=cv2.INTER_LINEAR)
+                        raise RuntimeError(
+                            f"[OpenCVCamera] {self._cam_topic} frame size mismatch: "
+                            f"expected {tuple(self._img_shape)}, got {(frame_height, frame_width)}."
+                        )
                 bgr_numpy = self._apply_publish_resize(bgr_numpy)
                 if self._enable_webrtc:
                     self._webrtc_buffer.write(bgr_numpy)
