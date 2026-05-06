@@ -59,14 +59,23 @@ unitree@ubuntu:~$ source ~/miniconda3/bin/activate
 3. 安装项目与依赖：
 
 ```
-(teleimager) unitree@ubuntu:~$ sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev
+(teleimager) unitree@ubuntu:~$ sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
 (teleimager) unitree@ubuntu:~$ git clone https://github.com/unitreerobotics/teleimager.git
 (teleimager) unitree@ubuntu:~$ cd teleimager
-# 假如您只使用客户端
 (teleimager) unitree@ubuntu:~/teleimager$ pip install -e .
-# 假如您还使用服务端
-(teleimager) unitree@ubuntu:~/teleimager$ pip install -e ".[server]"
 ```
+
+如果需要完整服务端功能（WebRTC、OpenCV 捕获），还应安装：
+
+```
+(teleimager) unitree@ubuntu:~/teleimager$ pip install aiohttp aiortc
+```
+
+> 在 Jetson/Thor 设备上，应使用系统自带的 OpenCV，而不是通过 `pip install opencv-python` 安装。
+> Jetson/Thor 的系统 OpenCV 已针对 MIPI CSI / GStreamer 管线进行了优化，可避免兼容性问题。
+
+> 注意：当前包配置已不再单独定义 `server` 可选依赖，因此需要按需手动安装 WebRTC/OpenCV 服务端依赖。
+> 对于某些非 USB 摄像头，`pupil-labs-uvc` 并非必需。
 
 4. 添加 video 权限（非 root 用户运行）：
 
@@ -186,7 +195,13 @@ teleimager-server --cf
 ### 1.3 📡 启动图像服务器
 
 根据摄像头搜索结果配置 `cam_config_server.yaml`。
- （示例配置见原文，此处不重复）
+
+常见新增配置项：
+
+- `camera_driver`：`v4l2`（默认 OpenCV V4L2）或 `gstreamer`（Jetson MIPI CSI / V4L2 管线）
+- `gstreamer_pipeline` / `gstreamer_pipeline_secondary`：Jetson CSI 摄像头专用管线配置
+- `image_shape_resize_target`：在 ZMQ/WebRTC 输出前调整发布帧大小，支持等比缩放 + 居中裁剪
+- `video_path`：可优先使用 `/dev/videoX` 精确指定设备
 
 启动服务器：
 

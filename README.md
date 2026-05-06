@@ -50,14 +50,23 @@ unitree@ubuntu:~$ source ~/miniconda3/bin/activate
 3. Install the repository and dependencies:
 
 ```bash
-(teleimager) unitree@ubuntu:~$ sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev
+(teleimager) unitree@ubuntu:~$ sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
 (teleimager) unitree@ubuntu:~$ git clone https://github.com/unitreerobotics/teleimager.git
 (teleimager) unitree@ubuntu:~$ cd teleimager
-# If you only use the client
 (teleimager) unitree@ubuntu:~/teleimager$ pip install -e .
-# If you also use the server
-(teleimager) unitree@ubuntu:~/teleimager$ pip install -e ".[server]"
 ```
+
+If you want full server support with WebRTC and OpenCV capture, also install:
+
+```bash
+(teleimager) unitree@ubuntu:~/teleimager$ pip install aiohttp aiortc
+```
+
+> On Jetson/Thor devices, use the system-provided OpenCV runtime instead of `pip install opencv-python`.
+> The built-in Jetson/Thor OpenCV is optimized for MIPI CSI / GStreamer pipelines and avoids compatibility issues.
+
+> Note: The current package configuration no longer defines a separate `server` extra, so install WebRTC/OpenCV server dependencies manually as needed.
+> For many non-USB cameras, `pupil-labs-uvc` is not required.
 
 4. Add video device permissions for non-root users:
 
@@ -178,7 +187,12 @@ You will see output similar to:
 
 ### 1.3 📡 Start the Image Server
 
-After filling `cam_config_server.yaml` according to camera discovery, start the server:
+After filling `cam_config_server.yaml` according to camera discovery, make sure your config includes the new fields if needed:
+
+- `camera_driver`: `v4l2` (default OpenCV V4L2) or `gstreamer` (Jetson MIPI CSI / V4L2 pipeline)
+- `gstreamer_pipeline` / `gstreamer_pipeline_secondary`: Jetson CSI camera pipeline definitions
+- `image_shape_resize_target`: resize published frames before ZMQ/WebRTC output with proportional scaling + center crop
+- `video_path`: prefer exact `/dev/videoX` device paths for deterministic camera selection
 
 ```bash
 python -m teleimager.image_server
