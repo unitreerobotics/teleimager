@@ -43,7 +43,7 @@ unitree@ubuntu:~$ source ~/miniconda3/bin/activate
 2. Create and activate a conda environment:
 
 ```bash
-(base) unitree@ubuntu:~$ conda create -n teleimager python=3.10 -y
+(base) unitree@ubuntu:~$ conda create -n teleimager python=3.12 -y
 (base) unitree@ubuntu:~$ conda activate teleimager
 ```
 
@@ -56,17 +56,18 @@ unitree@ubuntu:~$ source ~/miniconda3/bin/activate
 (teleimager) unitree@ubuntu:~/teleimager$ pip install -e .
 ```
 
-If you want full server support with WebRTC and OpenCV capture, also install:
-
-```bash
-(teleimager) unitree@ubuntu:~/teleimager$ pip install aiohttp aiortc
-```
-
 > On Jetson/Thor devices, use the system-provided OpenCV runtime instead of `pip install opencv-python`.
 > The built-in Jetson/Thor OpenCV is optimized for MIPI CSI / GStreamer pipelines and avoids compatibility issues.
+> Configure it as follows:
+> **Prerequisite**: activate your Conda environment first: `conda activate teleimager`
+> 1. Confirm that the system OpenCV directory exists and contains the cv2 module:
+> ls -la /usr/lib/python3.12/dist-packages/ | grep cv2
+> 2. Create a .pth file in the Conda teleimager environment's site-packages to point to the system OpenCV:
+> echo "/usr/lib/python3.12/dist-packages" > $(python -c "import site; print(site.getsitepackages()[0])")/system_opencv.pth
+> 3. Verify the setup. If the output path contains `/usr/lib/python3.12/dist-packages/cv2`, system OpenCV has been added successfully:
+> python -c "import cv2; print(cv2.__file__)"
 
-> Note: The current package configuration no longer defines a separate `server` extra, so install WebRTC/OpenCV server dependencies manually as needed.
-> For many non-USB cameras, `pupil-labs-uvc` is not required.
+> "For sensing, which uses non-USB cameras, pupil-labs-uvc is not required."
 
 4. Add video device permissions for non-root users:
 
@@ -245,13 +246,13 @@ https://<host_ip>:<webrtc_port>
 https://192.168.123.164:60001
 ```
 
-And please press `start` button  top-right.
+Click the `start` button.
 
 
 
-## 3. 🚀 Automatic Startup Service
+## 3. 🚀🚀🚀 Automatic Startup Service
 
-After successful setup and testing, enable automatic startup:
+After completing the configuration above and testing successfully, you can configure system autostart with:
 
 ```bash
 bash setup_autostart.sh

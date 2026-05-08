@@ -92,8 +92,8 @@ left_wrist_camera:
 # Right wrist camera configuration
 # =====================================================
 right_wrist_camera:
-  enable_zmq: false
-  enable_webrtc: false
+  enable_zmq: true
+  enable_webrtc: true
   zmq_port : 55557
   webrtc_port : 60003
   webrtc_codec: h264

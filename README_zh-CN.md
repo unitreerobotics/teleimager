@@ -52,7 +52,7 @@ unitree@ubuntu:~$ source ~/miniconda3/bin/activate
 2. 创建并激活 conda 环境：
 
 ```
-(base) unitree@ubuntu:~$ conda create -n teleimager python=3.10 -y
+(base) unitree@ubuntu:~$ conda create -n teleimager python=3.12 -y
 (base) unitree@ubuntu:~$ conda activate teleimager
 ```
 
@@ -65,17 +65,17 @@ unitree@ubuntu:~$ source ~/miniconda3/bin/activate
 (teleimager) unitree@ubuntu:~/teleimager$ pip install -e .
 ```
 
-如果需要完整服务端功能（WebRTC、OpenCV 捕获），还应安装：
-
-```
-(teleimager) unitree@ubuntu:~/teleimager$ pip install aiohttp aiortc
-```
-
 > 在 Jetson/Thor 设备上，应使用系统自带的 OpenCV，而不是通过 `pip install opencv-python` 安装。
-> Jetson/Thor 的系统 OpenCV 已针对 MIPI CSI / GStreamer 管线进行了优化，可避免兼容性问题。
+> Jetson/Thor 的系统 OpenCV 已针对 MIPI CSI / GStreamer 管线进行了优化，可避免兼容性问题。配置过程如下：
+> **前置条件**：请先激活你的 Conda 环境： `conda activate teleimager`
+> 1. 确认系统 OpenCV 的目录存在并包含 cv2 模块：
+> ls -la /usr/lib/python3.12/dist-packages/ | grep cv2
+> 2. 在 Conda teleimager 环境的 site-packages 中创建 .pth 文件指向系统 OpenCV
+> echo "/usr/lib/python3.12/dist-packages" > $(python -c "import site; print(site.getsitepackages()[0])")/system_opencv.pth
+> 3. 验证，如果输出的路径包含 `/usr/lib/python3.12/dist-packages/cv2`，说明系统 OpenCV 已成功添加到环境中：
+> python -c "import cv2; print(cv2.__file__)"
 
-> 注意：当前包配置已不再单独定义 `server` 可选依赖，因此需要按需手动安装 WebRTC/OpenCV 服务端依赖。
-> 对于某些非 USB 摄像头，`pupil-labs-uvc` 并非必需。
+> 对于sensing这种非USB摄像头，`pupil-labs-uvc` 并非必需。
 
 4. 添加 video 权限（非 root 用户运行）：
 
@@ -255,7 +255,7 @@ https://<host_ip>:<webrtc_port>
 https://192.168.123.164:60001
 ```
 
-点击左上角`start` 按钮
+点击 `start` 按钮
 
 
 
