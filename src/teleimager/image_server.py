@@ -1479,6 +1479,8 @@ class OpenCVCamera(BaseCamera):
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._img_shape[0])
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._img_shape[1])
         self.cap.set(cv2.CAP_PROP_FPS, self._fps)
+        if not self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1):
+            logger_mp.info(f"[OpenCVCamera: {cam_topic}] CAP_PROP_BUFFERSIZE=1 not supported by backend, kernel buffer left at default")
 
         # Test if the camera can read frames
         if not self._can_read_frame():
