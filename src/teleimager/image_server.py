@@ -245,6 +245,174 @@ function stop() {
 """
 
 # ========================================================
+# Aggregator page (one page, multiple WebRTC streams)
+# ========================================================
+AGGREGATOR_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebRTC Multi-Stream</title>
+    <style>
+    body {
+        font-family: sans-serif;
+        background: #fff;
+        color: #000;
+        text-align: center;
+        margin: 0;
+        padding: 16px;
+    }
+    h1 a { text-decoration: none; color: #000; }
+    h1 a:hover { color: #555; }
+
+    .streams {
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr;
+        gap: 12px;
+        margin: 0 auto;
+        width: 100%;
+        max-width: 1600px;
+    }
+    .stream {
+        background: #f7f7f7;
+        border-radius: 8px;
+        padding: 12px;
+    }
+    .stream h3 { margin: 4px 0 8px; }
+    .stream video {
+        width: calc(100% + 24px);
+        max-width: none;
+        margin-left: -12px;
+        background: #000;
+        border-radius: 4px;
+        display: block;
+    }
+    .stream .controls { margin: 8px 0; }
+    button { padding: 6px 14px; font-size: 14px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>
+        <a href="https://github.com/unitreerobotics/teleimager" target="_blank">
+            XR Teleoperation WebRTC Camera Stream
+        </a>
+    </h1>
+    <div style="margin-bottom: 16px;">
+        <a href="https://www.unitree.com/" target="_blank">
+            <img src="https://www.unitree.com/images/0079f8938336436e955ea3a98c4e1e59.svg" alt="Unitree LOGO" width="8%">
+        </a>
+    </div>
+
+    <div class="streams" id="streams-table"></div>
+
+    <script>
+        // Injected by the server: list of {topic, port, label, row, col}.
+        window.STREAM_CONFIG = __STREAM_CONFIG__;
+    </script>
+    <script src="aggregator.js"></script>
+</body>
+</html>
+"""
+
+AGGREGATOR_JS = """
+function buildLayout(streams) {
+    var container = document.getElementById('streams-table');
+    streams.sort(function (a, b) {
+        var rowDiff = (a.row != null ? a.row : 0) - (b.row != null ? b.row : 0);
+        if (rowDiff !== 0) return rowDiff;
+        return (a.col != null ? a.col : 0) - (b.col != null ? b.col : 0);
+    }).forEach(function (s) {
+        var streamDiv = document.createElement('div');
+        streamDiv.className = 'stream';
+
+        streamDiv.innerHTML =
+            '<h3>' + s.label + '</h3>' +
+            '<div class="controls">' +
+                '<button id="start-' + s.topic + '">Start</button>' +
+                '<button id="stop-' + s.topic + '" style="display:none">Stop</button>' +
+            '</div>' +
+            '<video id="video-' + s.topic + '" autoplay playsinline muted></video>';
+        container.appendChild(streamDiv);
+    });
+}
+
+function negotiate(pc, port, stream) {
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    return pc.createOffer().then(function (offer) {
+        return pc.setLocalDescription(offer);
+    }).then(function () {
+        return new Promise(function (resolve) {
+            if (pc.iceGatheringState === 'complete') {
+                resolve();
+            } else {
+                var checkState = function () {
+                    if (pc.iceGatheringState === 'complete') {
+                        pc.removeEventListener('icegatheringstatechange', checkState);
+                        resolve();
+                    }
+                };
+                pc.addEventListener('icegatheringstatechange', checkState);
+            }
+        });
+    }).then(function () {
+        var offer = pc.localDescription;
+        var path = (stream && stream.path) ? stream.path : '/offer';
+        var url = 'https://' + window.location.hostname + ':' + port + path;
+        return fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
+        });
+    }).then(function (response) {
+        return response.json();
+    }).then(function (answer) {
+        return pc.setRemoteDescription(answer);
+    });
+}
+
+var peerConnections = {};
+
+function startStream(stream) {
+    var pc = new RTCPeerConnection({ sdpSemantics: 'unified-plan' });
+    peerConnections[stream.topic] = pc;
+
+    pc.addEventListener('track', function (evt) {
+        if (evt.track.kind === 'video') {
+            document.getElementById('video-' + stream.topic).srcObject = evt.streams[0];
+        }
+    });
+
+    document.getElementById('start-' + stream.topic).style.display = 'none';
+    document.getElementById('stop-' + stream.topic).style.display = 'inline-block';
+
+    negotiate(pc, stream.port, stream).catch(function (e) {
+        alert('[' + stream.label + '] ' + e);
+        stopStream(stream);
+    });
+}
+
+function stopStream(stream) {
+    document.getElementById('stop-' + stream.topic).style.display = 'none';
+    document.getElementById('start-' + stream.topic).style.display = 'inline-block';
+    var pc = peerConnections[stream.topic];
+    if (pc) {
+        pc.close();
+        delete peerConnections[stream.topic];
+    }
+}
+
+(function init() {
+    var streams = window.STREAM_CONFIG || [];
+    buildLayout(streams);
+    streams.forEach(function (s) {
+        document.getElementById('start-' + s.topic).addEventListener('click', function () { startStream(s); });
+        document.getElementById('stop-' + s.topic).addEventListener('click', function () { stopStream(s); });
+    });
+})();
+"""
+
+# ========================================================
 # WebRTC publish
 # ========================================================
 class BGRArrayVideoStreamTrack(MediaStreamTrack):
@@ -529,6 +697,245 @@ class WebRTC_PublisherManager:
                     pub.stop()
                 except Exception: pass
             self._publisher_threads.clear()
+
+# ========================================================
+# WebRTC Aggregator (one page, multi-stream)
+# ========================================================
+class WebRTC_AggregatorThread(threading.Thread):
+    """Serves a single HTML page that pulls multiple WebRTC streams from
+    other WebRTC_PublisherThread ports running on the same host.
+
+    Layout is driven by the `streams` list, e.g.:
+        [{"topic": "head_camera",       "port": 60001, "label": "Head",       "row": 0, "col": 0},
+         {"topic": "left_wrist_camera", "port": 60002, "label": "Left Wrist", "row": 1, "col": 0},
+         {"topic": "right_wrist_camera","port": 60003, "label": "Right Wrist","row": 1, "col": 1}]
+    """
+
+    def __init__(self, port: int, streams: list, host: str = "0.0.0.0"):
+        super().__init__(daemon=True)
+        self._host = host
+        self._port = port
+        self._streams = streams
+        self._app = web.Application()
+        self._runner: Optional[web.AppRunner] = None
+        self._start_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        self._app.router.add_get("/", self._index)
+        self._app.router.add_get("/aggregator.js", self._javascript)
+
+    async def _index(self, request: web.Request) -> web.Response:
+        html = AGGREGATOR_HTML.replace("__STREAM_CONFIG__", json.dumps(self._streams))
+        return web.Response(content_type="text/html", text=html)
+
+    async def _javascript(self, request: web.Request) -> web.Response:
+        return web.Response(content_type="application/javascript", text=AGGREGATOR_JS)
+
+    def wait_for_start(self, timeout=1.0):
+        return self._start_event.wait(timeout=timeout)
+
+    def run(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
+        async def _main():
+            self._runner = web.AppRunner(self._app)
+            await self._runner.setup()
+
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(CERT_PEM_PATH, KEY_PEM_PATH)
+            site = web.TCPSite(self._runner, self._host, self._port, ssl_context=ssl_context)
+            await site.start()
+            self._start_event.set()
+
+            while not self._stop_event.is_set():
+                await asyncio.sleep(0.1)
+
+        try:
+            self._loop.run_until_complete(_main())
+        except Exception as e:
+            logger_mp.error(f"WebRTC Aggregator Thread Error: {e}")
+        finally:
+            if self._loop:
+                self._loop.close()
+
+    def stop(self):
+        self._stop_event.set()
+        self.join(timeout=1.0)
+
+
+# ========================================================
+# WebRTC Multi-Publisher (single port hosting many tracks)
+# ========================================================
+class WebRTC_MultiPublisherThread(threading.Thread):
+    """
+    One aiohttp + aiortc server hosting multiple WebRTC tracks behind a single port.
+    Used when ImageServer runs in `--agg` mode to replace the per-camera
+    WebRTC_PublisherThread instances.
+
+    Routes:
+        GET  /                → aggregator HTML
+        GET  /aggregator.js   → aggregator JS
+        POST /offer/{topic}   → WebRTC negotiation for the named topic
+    """
+
+    def __init__(self, port: int, streams: list, host: str = "0.0.0.0"):
+        super().__init__(daemon=True)
+        self._host = host
+        self._port = port
+        self._streams = streams  # [{topic, label, row, col, port, path, codec}]
+        self._app = web.Application()
+        self._runner: Optional[web.AppRunner] = None
+        self._pcs = set()
+        self._start_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        topics = [s["topic"] for s in streams]
+        self._codec_prefs: Dict[str, Optional[str]] = {s["topic"]: s.get("codec") for s in streams}
+        self._frame_queues: Dict[str, queue.Queue] = {t: queue.Queue(maxsize=1) for t in topics}
+        self._tracks: Dict[str, BGRArrayVideoStreamTrack] = {}
+        self._relays: Dict[str, MediaRelay] = {}
+
+        self._app.router.add_get("/", self._index)
+        self._app.router.add_get("/aggregator.js", self._javascript)
+        self._app.router.add_post("/offer/{topic}", self._offer)
+        self._app.router.add_options("/offer/{topic}", self._options)
+
+    async def _index(self, request: web.Request) -> web.Response:
+        html = AGGREGATOR_HTML.replace("__STREAM_CONFIG__", json.dumps(self._streams))
+        return web.Response(content_type="text/html", text=html)
+
+    async def _javascript(self, request: web.Request) -> web.Response:
+        return web.Response(content_type="application/javascript", text=AGGREGATOR_JS)
+
+    async def _options(self, request: web.Request) -> web.Response:
+        return web.Response(
+            status=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            },
+        )
+
+    async def _offer(self, request: web.Request) -> web.Response:
+        topic = request.match_info["topic"]
+        if topic not in self._tracks:
+            return web.Response(status=404, text=f"Unknown topic: {topic}")
+
+        params = await request.json()
+        offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+
+        pc = RTCPeerConnection()
+        self._pcs.add(pc)
+
+        try:
+            relayed_track = self._relays[topic].subscribe(self._tracks[topic])
+            transceiver = pc.addTransceiver(relayed_track, direction="sendonly")
+            capabilities = RTCRtpSender.getCapabilities("video")
+            pref = (self._codec_prefs.get(topic) or "h264").lower()
+
+            if pref == "h264":
+                wanted = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
+            elif pref == "vp8":
+                wanted = [c for c in capabilities.codecs if c.mimeType == "video/VP8"]
+            else:
+                wanted = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
+
+            if wanted:
+                transceiver.setCodecPreferences(wanted)
+                logger_mp.info(f"[WebRTC] Preferred {pref} for topic={topic} on port:{self._port}")
+            else:
+                logger_mp.warning(f"[WebRTC] Codec '{pref}' not available for topic={topic}, using auto-negotiation")
+        except Exception as e:
+            logger_mp.error(f"Multi relay subscription failed for {topic}: {e}")
+
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            if pc.connectionState in ["failed", "closed"]:
+                await self._cleanup_pc(pc)
+
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            },
+        )
+
+    async def _cleanup_pc(self, pc):
+        self._pcs.discard(pc)
+        try:
+            await pc.close()
+        except Exception:
+            pass
+
+    def wait_for_start(self, timeout=1.0):
+        return self._start_event.wait(timeout=timeout)
+
+    def run(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
+        async def _main():
+            self._runner = web.AppRunner(self._app)
+            await self._runner.setup()
+
+            for s in self._streams:
+                topic = s["topic"]
+                self._tracks[topic] = BGRArrayVideoStreamTrack()
+                self._relays[topic] = MediaRelay()
+
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(CERT_PEM_PATH, KEY_PEM_PATH)
+            site = web.TCPSite(self._runner, self._host, self._port, ssl_context=ssl_context)
+            await site.start()
+            self._start_event.set()
+
+            # Frame pushing loop: drain every per-topic queue once per tick.
+            while not self._stop_event.is_set():
+                try:
+                    for topic, q in self._frame_queues.items():
+                        if not q.empty():
+                            frame = q.get_nowait()
+                            self._tracks[topic].push_frame(frame, loop=self._loop)
+                    await asyncio.sleep(0.005)
+                except Exception:
+                    await asyncio.sleep(0.005)
+
+        try:
+            self._loop.run_until_complete(_main())
+        except Exception as e:
+            logger_mp.error(f"WebRTC Multi Thread Error: {e}")
+        finally:
+            if self._loop:
+                self._loop.close()
+
+    def send(self, topic: str, data: np.ndarray):
+        q = self._frame_queues.get(topic)
+        if q is None:
+            return
+        if not q.full():
+            q.put(data)
+        else:
+            try:
+                q.get_nowait()
+                q.put(data)
+            except Exception:
+                pass
+
+    def stop(self):
+        self._stop_event.set()
+        self.join(timeout=1.0)
+
 
 # ========================================================
 # UVC driver reload
@@ -1200,10 +1607,15 @@ class IsaacSimCamera(BaseCamera):
 # image server
 # ========================================================
 class ImageServer:
-    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False):
+    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False,
+                 aggregator_port: int = 60004, agg_mode: bool = False):
         self._cam_config = cam_config
         self._realsense_enable = realsense_enable
         self._isaacsim_enable = isaacsim_enable
+        self._aggregator_port = aggregator_port
+        self._agg_mode = agg_mode
+        self._aggregator_thread: Optional[WebRTC_AggregatorThread] = None
+        self._multi_publisher: Optional[WebRTC_MultiPublisherThread] = None
         self._stop_event = threading.Event()
         self._cameras: dict[str, BaseCamera] = {}
         if not self._isaacsim_enable:
@@ -1383,7 +1795,10 @@ class ImageServer:
                 bgr_frame = camera.get_bgr_frame()
 
                 if bgr_frame is not None:
-                    self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
+                    if self._agg_mode and self._multi_publisher is not None:
+                        self._multi_publisher.send(cam_topic, bgr_frame)
+                    else:
+                        self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
                 else:
                     logger_mp.info(f"[Image Server] {cam_topic} returned no frame.")
                     self._stop_event.set()
@@ -1405,7 +1820,21 @@ class ImageServer:
             if t.is_alive():
                 t.join(timeout=1.0)
         self._publisher_threads.clear()
-        
+
+        if self._aggregator_thread is not None:
+            try:
+                self._aggregator_thread.stop()
+            except Exception:
+                pass
+            self._aggregator_thread = None
+
+        if self._multi_publisher is not None:
+            try:
+                self._multi_publisher.stop()
+            except Exception:
+                pass
+            self._multi_publisher = None
+
         try:
             self._zmq_publisher_manager.close()
         except Exception:
@@ -1422,6 +1851,104 @@ class ImageServer:
                 except Exception as e:
                     logger_mp.error(f"[Image Server] Error releasing camera {cam._cam_topic}: {e}")
         logger_mp.info("[Image Server] Clean up completed. Server stopped.")
+
+    def _build_aggregator_streams(self) -> list:
+        """Compose the [{topic, port, label, row, col, ...}] config consumed by the aggregator HTML.
+
+        Layout heuristic from topic name keywords:
+          - "head"  -> row 0, col 0 (spans the row when alone)
+          - "left"  -> row 1, col 0
+          - "right" -> row 1, col 1
+          - others  -> appended on subsequent rows, one per row
+
+        In `--agg` mode all streams are routed through `self._aggregator_port` + `/offer/<topic>`,
+        otherwise each stream keeps its own `webrtc_port` and the default `/offer` path.
+        """
+        streams = []
+        extra_row = 2
+        for cam_topic, cam_cfg in self._cam_config.items():
+            if not cam_cfg.get("enable_webrtc", False):
+                continue
+
+            topic_l = cam_topic.lower()
+            if "head" in topic_l:
+                row, col = 0, 0
+            elif "left" in topic_l:
+                row, col = 1, 0
+            elif "right" in topic_l:
+                row, col = 1, 1
+            else:
+                row, col = extra_row, 0
+                extra_row += 1
+
+            label = cam_topic.replace("_", " ").title()
+            codec = cam_cfg.get("webrtc_codec")
+
+            if self._agg_mode:
+                entry = {
+                    "topic": cam_topic,
+                    "port": int(self._aggregator_port),
+                    "path": f"/offer/{cam_topic}",
+                    "label": label,
+                    "row": row,
+                    "col": col,
+                    "codec": codec,
+                }
+            else:
+                port = cam_cfg.get("webrtc_port")
+                if port is None:
+                    continue
+                entry = {
+                    "topic": cam_topic,
+                    "port": int(port),
+                    "label": label,
+                    "row": row,
+                    "col": col,
+                }
+            streams.append(entry)
+        return streams
+
+    def _start_aggregator(self):
+        if not self._aggregator_port:
+            if self._agg_mode:
+                logger_mp.error("[Image Server] --agg requires --aggregator-port > 0; aborting.")
+                self._stop_event.set()
+            return
+
+        streams = self._build_aggregator_streams()
+        if not streams:
+            logger_mp.info("[Image Server] No WebRTC streams configured; aggregator page not started.")
+            return
+
+        try:
+            if self._agg_mode:
+                self._multi_publisher = WebRTC_MultiPublisherThread(self._aggregator_port, streams)
+                self._multi_publisher.start()
+                if not self._multi_publisher.wait_for_start(timeout=10.0):
+                    logger_mp.error(f"[Image Server] Multi-publisher failed to start on port {self._aggregator_port}.")
+                    self._multi_publisher = None
+                    self._stop_event.set()
+                    return
+                logger_mp.info(
+                    f"[Image Server] [--agg] All WebRTC streams consolidated on https://<host>:{self._aggregator_port}/ "
+                    f"({len(streams)} streams: {[s['topic'] for s in streams]}); "
+                    f"per-camera webrtc_port in config is ignored."
+                )
+            else:
+                self._aggregator_thread = WebRTC_AggregatorThread(self._aggregator_port, streams)
+                self._aggregator_thread.start()
+                if not self._aggregator_thread.wait_for_start(timeout=5.0):
+                    logger_mp.error(f"[Image Server] Aggregator page failed to start on port {self._aggregator_port}.")
+                    self._aggregator_thread = None
+                else:
+                    logger_mp.info(
+                        f"[Image Server] Aggregator page available at https://<host>:{self._aggregator_port}/ "
+                        f"({len(streams)} streams: {[s['topic'] for s in streams]})"
+                    )
+        except Exception as e:
+            logger_mp.error(f"[Image Server] Failed to launch aggregator page: {e}")
+            self._aggregator_thread = None
+            self._multi_publisher = None
 
     # --------------------------------------------------------
     # public api
@@ -1451,7 +1978,11 @@ class ImageServer:
                 self._stop_event.set()
                 self._clean_up()
             logger_mp.info(f"[Image Server] {camera_topic} is ready.")
-        
+
+        # Start the aggregator BEFORE pub threads so the multi-publisher (in --agg mode)
+        # is ready to receive frames as soon as the pub threads start sending.
+        self._start_aggregator()
+
         for camera_topic, camera in self._cameras.items():
             if camera.enable_webrtc():
                 t = threading.Thread(target=self._webrtc_pub, args=(camera_topic, camera), daemon=True)
@@ -1530,6 +2061,11 @@ def main():
     parser.add_argument('--cf', action = 'store_true', help = 'Enable camera found mode, print all connected cameras info')
     parser.add_argument('--rs', action = 'store_true', help = 'Enable RealSense camera mode. Otherwise only find UVC/OpenCV cameras.')
     parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Disable CPU affinity setting for performance optimization.')
+    parser.add_argument('--aggregator-port', type=int, default=60004,
+                        help='Port for the WebRTC multi-stream aggregator page (default: 60004). Set to 0 to disable.')
+    parser.add_argument('--agg', action='store_true',
+                        help='Consolidate all WebRTC streams onto the aggregator port (skip per-camera publishers on webrtc_port). '
+                             'Saves resources at the cost of ignoring each camera\'s webrtc_port in the YAML.')
     args = parser.parse_args()
 
     if args.affinity:
@@ -1549,7 +2085,8 @@ def main():
         exit(1)
 
     # start image server
-    server = ImageServer(cam_config, realsense_enable=args.rs, camera_finder_verbose=False)
+    server = ImageServer(cam_config, realsense_enable=args.rs, camera_finder_verbose=False,
+                         aggregator_port=args.aggregator_port, agg_mode=args.agg)
     server.start()
 
     # graceful shutdown handling
