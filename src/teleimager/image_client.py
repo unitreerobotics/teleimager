@@ -111,11 +111,11 @@ class ZMQ_PublisherThread(threading.Thread):
         self._context = context
         self._socket = None
         self._running = True
-        self._queue = queue.Queue(maxsize=10)  # Limit queue size to prevent memory issues
+        self._queue = queue.Queue(maxsize=1)  # Only keep the latest message to prevent memory bloat
         self._started = threading.Event()
 
     def send(self, data: Any) -> None:
-        """Send data to the publisher queue (thread-safe).
+        """Send latest data to the publisher queue, dropping stale data if needed.
 
         Args:
             data: The data to publish
@@ -123,19 +123,27 @@ class ZMQ_PublisherThread(threading.Thread):
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise TypeError(f"PublisherThread expects bytes, got {type(data)}")
 
-        try:
-            self._queue.put_nowait(data)
-        except queue.Full:
-            logger_mp.warning(f"Publisher queue full for {self._host}:{self._port}, dropping message")
-        except Exception as e:
-            logger_mp.error(f"Error serializing data for publisher: {e}")
+        dropped_old = False
+        if self._queue.full():
+            with contextlib.suppress(queue.Empty):
+                self._queue.get_nowait()
+                dropped_old = True
+        self._queue.put_nowait(data)
+
+        if dropped_old:
+            logger_mp.debug(f"Publisher queue full for {self._host}:{self._port}, dropped old message")
 
     def stop(self) -> None:
         """Stop the publisher thread gracefully."""
         self._running = False
-        # Put a sentinel value(None) to unblock the queue if needed
+
+        if self._queue.full():
+            with contextlib.suppress(queue.Empty):
+                self._queue.get_nowait()
+
         with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
+
         self.join(timeout=1)
         if self.is_alive():
             logger_mp.warning("Publisher thread did not stop gracefully")
@@ -145,7 +153,8 @@ class ZMQ_PublisherThread(threading.Thread):
         try:
             # Create socket in the worker thread
             self._socket = self._context.socket(zmq.PUB)
-            self._socket.setsockopt(zmq.SNDHWM, 1)  # Only keep latest message
+            self._socket.setsockopt(zmq.CONFLATE, 1)  # Only keep latest message
+            self._socket.setsockopt(zmq.SNDHWM, 1)    # Limit send-side backlog
             self._socket.setsockopt(zmq.LINGER, 0)
             self._socket.bind(f"tcp://{self._host}:{self._port}")
 
@@ -412,7 +421,8 @@ class ZMQ_SubscriberThread(threading.Thread):
         try:
             # Create socket in the worker thread
             self._socket = self._context.socket(zmq.SUB)
-            self._socket.setsockopt(zmq.RCVHWM, 1)  # Only keep latest message
+            self._socket.setsockopt(zmq.CONFLATE, 1)  # Only keep latest message
+            self._socket.setsockopt(zmq.RCVHWM, 1)    # Limit receive-side backlog
             self._socket.setsockopt(zmq.LINGER, 0)
             self._socket.connect(f"tcp://{self._host}:{self._port}")
             self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
