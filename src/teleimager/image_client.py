@@ -672,6 +672,20 @@ class ZMQ_Requester:
 
 
 # ========================================================
+# image client helpers
+# ========================================================
+# Mirrors image_server.decode_cloud_bytes — keep wire format in sync with that copy.
+def decode_cloud_bytes(data: bytes) -> Optional[np.ndarray]:
+    """Decode raw XYZ cloud bytes: 4-byte uint32 N + N*12 float32 bytes."""
+    if len(data) < 4:
+        return None
+    n = int(np.frombuffer(data[:4], dtype=np.uint32)[0])
+    expected = 4 + n * 12
+    if len(data) < expected:
+        return None
+    return np.frombuffer(data[4:4 + n * 12], dtype=np.float32).reshape(n, 3)
+
+# ========================================================
 # image client
 # ========================================================
 class ImageClient:
@@ -704,6 +718,11 @@ class ImageClient:
             self._subscriber_manager.subscribe(self._host, rw_cfg['zmq_port'], request_bgr=self._request_bgr)
         if rw_cfg and rw_cfg.get('enable_depth') and rw_cfg.get('zmq_depth_port'):
             self._subscriber_manager.subscribe(self._host, rw_cfg['zmq_depth_port'], request_bgr=False)
+
+        lidar_cfg = self._cam_config.get("lidar", {})
+        if lidar_cfg.get("enable"):
+            self._subscriber_manager.subscribe(self._host, lidar_cfg["zmq_cloud_port"], request_bgr=False)
+            self._subscriber_manager.subscribe(self._host, lidar_cfg["zmq_range_port"], request_bgr=False)
 
         if not self._cam_config['head_camera']['enable_zmq'] and not self._cam_config['head_camera']['enable_webrtc']:
             logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
@@ -743,7 +762,22 @@ class ImageClient:
             return None
         h, w = rw_cfg['image_shape']
         return np.frombuffer(raw.jpg, dtype=np.uint16).reshape(h, w)
-        
+
+    def get_lidar_cloud(self) -> Optional[np.ndarray]:
+        lidar_cfg = self._cam_config.get("lidar", {})
+        if not lidar_cfg.get("enable"):
+            return None
+        raw = self._subscriber_manager.subscribe(self._host, lidar_cfg["zmq_cloud_port"], request_bgr=False)
+        if raw is None or raw.jpg is None:
+            return None
+        return decode_cloud_bytes(raw.jpg)
+
+    def get_lidar_range_image(self) -> Optional[TeleImage]:
+        lidar_cfg = self._cam_config.get("lidar", {})
+        if not lidar_cfg.get("enable"):
+            return None
+        return self._subscriber_manager.subscribe(self._host, lidar_cfg["zmq_range_port"], request_bgr=False)
+
     def close(self):
         self._subscriber_manager.close()
         logger_mp.info("Image client has been closed.")

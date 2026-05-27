@@ -51,3 +51,12 @@ head_camera:
   serial_number: 243722075296
   physical_path: null
 
+
+
+# =====================================================
+# LiDAR configuration (Unitree G1 MID360)
+# =====================================================
+lidar:
+  enable: true
+  zmq_cloud_port: 55560
+  zmq_range_port: 55561

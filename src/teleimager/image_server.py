@@ -42,6 +42,8 @@ from pathlib import Path
 import queue
 import fractions
 from typing import Dict, Optional, Tuple, Any
+import struct
+
 
 # ========================================================
 # cam_config_server.yaml path
@@ -68,6 +70,7 @@ CERT_PEM_PATH = Path(env_cert or (user_cert if user_cert.exists() else default_c
 KEY_PEM_PATH = Path(env_key or (user_key if user_key.exists() else default_key))
 CERT_PEM_PATH = CERT_PEM_PATH.resolve()
 KEY_PEM_PATH = KEY_PEM_PATH.resolve()
+
 
 # ========================================================
 # libx264 for Jetson (Patch h264 Encoder)
@@ -542,6 +545,7 @@ def reload_uvc_driver():
         logger_mp.info("UVC driver reloaded successfully.")
     except subprocess.CalledProcessError as e:
         logger_mp.error(f"Failed to reload driver: {e}")
+
 
 # ========================================================
 # camera finder and cameras
@@ -1470,6 +1474,7 @@ class ImageServer:
                     cam.release()
                 except Exception as e:
                     logger_mp.error(f"[Image Server] Error releasing camera {cam._cam_topic}: {e}")
+
         logger_mp.info("[Image Server] Clean up completed. Server stopped.")
 
     # --------------------------------------------------------
