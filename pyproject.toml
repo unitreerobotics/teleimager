@@ -9,7 +9,7 @@ license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.8,<3.12"
 dependencies = [
-    "logging_mp",
+    "logging-mp==0.1.6",
     "opencv-python",
     "numpy>=1.21,<2",
     "pyyaml",
