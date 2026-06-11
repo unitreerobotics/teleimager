@@ -362,9 +362,14 @@ class WebRTC_PublisherThread(threading.Thread):
 
     async def _offer(self, request: web.Request) -> web.Response:
         params = await request.json()
-        offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
         user_agent = request.headers.get("User-Agent", "").lower()
         is_firefox = "firefox" in user_agent and "chrome" not in user_agent
+
+        offer_sdp = params["sdp"]
+        if is_firefox and ".local" in offer_sdp:
+            # Keep ICE open when aioice cannot resolve Firefox mDNS candidates.
+            offer_sdp = offer_sdp.replace("a=end-of-candidates\r\n", "")
+        offer = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
 
         pc = RTCPeerConnection()
         self._pcs.add(pc)
