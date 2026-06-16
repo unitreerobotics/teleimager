@@ -1,4 +1,16 @@
 # =====================================================
+# Global WebRTC encoder config (applies to ALL cameras).
+# aiortc bitrate caps are module-level, so this is shared by every track.
+# Tune by network: WiFi6 5GHz dedicated -> max ~12M; WiFi5 shared -> max ~8M; public -> max ~4M.
+# =====================================================
+webrtc:
+  bitrate:
+    min: 2000000      # floor under congestion
+    default: 5000000  # startup rate, skips slow-start
+    max: 12000000     # quality ceiling on healthy network
+  gop_length: 60      # frames between keyframes; lower = faster recovery from packet loss
+
+# =====================================================
 # Head camera configuration
 # =====================================================
 # camera topic

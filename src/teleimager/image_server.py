@@ -1,4 +1,4 @@
-# Copyright 2025 YuShu TECHNOLOGY CO.,LTD ("Unitree Robotics")
+# Copyright 2025-2026 YuShu TECHNOLOGY CO.,LTD ("Unitree Robotics")
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -75,6 +75,25 @@ with open(LOGO_SVG_PATH, "r", encoding="utf-8") as f:
     UNITREE_LOGO_SVG = f.read()
 
 # ========================================================
+# WebRTC global encoder config (bitrate caps + GOP).
+# aiortc's bitrate constants are module-level, so this is global by design.
+# ========================================================
+_GOP_LENGTH = 60  # frames between keyframes; overridden by yaml if present
+
+def _apply_webrtc_config(cam_config):
+    global _GOP_LENGTH
+    cfg = (cam_config or {}).get("webrtc", {})
+    bitrate = cfg.get("bitrate", {})
+    from aiortc.codecs import vpx
+    for key, attr in (("min", "MIN_BITRATE"), ("default", "DEFAULT_BITRATE"), ("max", "MAX_BITRATE")):
+        if key in bitrate and int(bitrate[key]) >= 100_000:
+            setattr(h264, attr, int(bitrate[key]))
+            setattr(vpx, attr, int(bitrate[key]))
+    if "gop_length" in cfg and int(cfg["gop_length"]) > 0:
+        _GOP_LENGTH = int(cfg["gop_length"])
+    logger_mp.info(f"[WebRTC] bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}")
+
+# ========================================================
 # libx264 for Jetson (Patch h264 Encoder)
 # ========================================================
 def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
@@ -95,7 +114,7 @@ def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: boo
                 "preset": "ultrafast",
                 "tune": "zerolatency",
                 "threads": "1",
-                "g": "60",
+                "g": str(_GOP_LENGTH),
             }
             self.frame_count = 0
             force_keyframe = True
@@ -103,7 +122,7 @@ def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: boo
             logger_mp.error(f"[H264 Patch] Initialization failed: {e}")
             return
 
-    if not force_keyframe and hasattr(self, "frame_count") and self.frame_count % 60 == 0:
+    if not force_keyframe and hasattr(self, "frame_count") and self.frame_count % _GOP_LENGTH == 0:
         force_keyframe = True
     
     self.frame_count = self.frame_count + 1 if hasattr(self, "frame_count") else 1
@@ -1224,6 +1243,7 @@ class IsaacSimCamera(BaseCamera):
 # ========================================================
 class ImageServer:
     def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False):
+        _apply_webrtc_config(cam_config)
         self._cam_config = cam_config
         self._realsense_enable = realsense_enable
         self._isaacsim_enable = isaacsim_enable
