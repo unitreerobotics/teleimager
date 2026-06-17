@@ -50,7 +50,6 @@ fi
 # Step 1: Detect Conda installation (robust way)
 if command -v conda >/dev/null 2>&1; then
     CONDA_BIN_PATH="$(which conda)"
-    # Example: /home/changhe/miniforge3/envs/tv/bin/conda
     if [[ "$CONDA_BIN_PATH" == *"/envs/"* ]]; then
         # remove everything from /envs/... onward, leaving the base prefix
         CONDA_PATH="${CONDA_BIN_PATH%/envs/*}"
