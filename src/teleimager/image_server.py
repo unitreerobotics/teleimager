@@ -393,8 +393,30 @@ class WebRTC_PublisherThread(threading.Thread):
             }
         )
 
+    def _error_response(self, status: int, message: str) -> web.Response:
+        return web.Response(
+            status=status,
+            content_type="application/json",
+            text=json.dumps({"error": message}),
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            }
+        )
+
     async def _offer(self, request: web.Request) -> web.Response:
-        params = await request.json()
+        try:
+            params = await request.json()
+        except Exception:
+            return self._error_response(400, "Invalid JSON body")
+
+        # Reject malformed offers (e.g. scanners or non-conforming clients)
+        # instead of letting them raise unhandled exceptions and spam logs.
+        if not isinstance(params, dict) or "sdp" not in params or "type" not in params:
+            logger_mp.warning(f"[WebRTC] Rejected malformed offer (missing sdp/type) for port:{self._port}")
+            return self._error_response(400, "Missing 'sdp' or 'type'")
+
         user_agent = request.headers.get("User-Agent", "").lower()
         is_firefox = "firefox" in user_agent and "chrome" not in user_agent
 
@@ -449,9 +471,16 @@ class WebRTC_PublisherThread(threading.Thread):
             if pc.connectionState in ["failed", "closed"]:
                 await self._cleanup_pc(pc)
 
-        await pc.setRemoteDescription(offer)
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
+        try:
+            await pc.setRemoteDescription(offer)
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+        except Exception as e:
+            # Malformed SDP (missing ICE ufrag/pwd) or codec negotiation failure
+            # (e.g. client offers no codec compatible with our H264 preference).
+            logger_mp.warning(f"[WebRTC] Negotiation failed for port:{self._port}: {e}")
+            await self._cleanup_pc(pc)
+            return self._error_response(400, f"Negotiation failed: {e}")
 
         return web.Response(
             content_type="application/json",
