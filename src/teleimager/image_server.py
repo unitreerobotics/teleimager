@@ -660,22 +660,25 @@ class CameraFinder:
         self.uvc_rgb_uids = [self._get_uid_from_ppath(p) for p in self.uvc_rgb_physical_paths]
         self.uvc_rgb_dev_info = [self.uid_map.get(uid) for uid in self.uvc_rgb_uids]
         self.uvc_rgb_serial_numbers = [dev_info.get("serialNumber") if dev_info else None for dev_info in self.uvc_rgb_dev_info]
+        self.uvc_rgb_bcd_devices = [self._get_bcddevice_from_ppath(p) for p in self.uvc_rgb_physical_paths]
         # all uvc cameras
         self.uvc_rgb_cameras = {}
-        for vpath, vid, ppath, uid, dev_info, sn in zip(
+        for vpath, vid, ppath, uid, dev_info, sn, bcd in zip(
             self.uvc_rgb_video_paths,
             self.uvc_rgb_video_ids,
             self.uvc_rgb_physical_paths,
             self.uvc_rgb_uids,
             self.uvc_rgb_dev_info,
             self.uvc_rgb_serial_numbers,
+            self.uvc_rgb_bcd_devices,
         ):
             self.uvc_rgb_cameras[vpath] = {
                 "video_id": vid,
                 "physical_path": ppath,
                 "uid": uid,
                 "dev_info": dev_info,
-                "serial_number": sn
+                "serial_number": sn,
+                "bcd_device": bcd,
             }
         if self.verbose:
             self.info()
@@ -790,6 +793,21 @@ class CameraFinder:
             return f"{bus}:{dev}"
         return None
 
+    def _get_bcddevice_from_ppath(self, physical_path):
+        def read_file(path):
+            return open(path).read().strip() if os.path.exists(path) else None
+
+        bcd_file = os.path.join(physical_path, "bcdDevice")
+
+        if not os.path.exists(bcd_file):
+            parent = os.path.dirname(physical_path)
+            bcd_file = os.path.join(parent, "bcdDevice")
+
+        if os.path.exists(bcd_file):
+            bcd = read_file(bcd_file)
+            return bcd
+        return None
+
     def _is_like_rgb(self, video_path):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -848,6 +866,29 @@ class CameraFinder:
             raise ValueError(f"Multiple video devices found for serial number {serial_number}: {matches}. ")
         return matches[0]
 
+    def get_uid_by_bcddevice(self, bcd_device):
+        matches = [
+            cam for cam in self.uvc_rgb_cameras.values()
+            if cam.get("bcd_device") == str(bcd_device)
+        ]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(f"Multiple cameras found with bcdDevice {bcd_device}")
+        return matches[0].get("uid")
+
+    def get_vpath_by_bcddevice(self, bcd_device):
+        matches = []
+        for cam in self.uvc_rgb_cameras.values():
+            if cam.get("bcd_device") == str(bcd_device):
+                vpath = f"/dev/video{cam.get('video_id')}"
+                matches.append(vpath)
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(f"Multiple video devices found for bcdDevice {bcd_device}: {matches}. ")
+        return matches[0]
+
     def get_vpath_by_ppath(self, physical_path):
         base = "/sys/class/video4linux/"
         matches = []
@@ -865,43 +906,63 @@ class CameraFinder:
     
 
     def info(self):
-        logger_mp.info("======================= Camera Discovery Start ==================================")
+        logger_mp.info("======================= Camera Discovery =======================")
         logger_mp.info("Found video devices: %s", self.video_paths)
         logger_mp.info("Found RGB video devices: %s", self.uvc_rgb_video_paths)
 
         if self.rs_serial_numbers:
-            logger_mp.info("----------------------- Realsense Cameras ----------------------------------")
-            logger_mp.info(f"RealSense serial numbers: {self.rs_serial_numbers}")
-            logger_mp.info(f"RealSense video paths: {self.rs_video_paths}")
-            logger_mp.info(f"RealSense RGB-like video paths: {self.rs_rgb_video_paths}")
+            logger_mp.info("--- Realsense Cameras ---")
+            logger_mp.info("  serial numbers : %s", self.rs_serial_numbers)
+            logger_mp.info("  video paths    : %s", self.rs_video_paths)
 
         for idx, (vpath, cam) in enumerate(self.uvc_rgb_cameras.items(), start=1):
-            logger_mp.info("----------------------- OpenCV / UVC Camera %d -----------------------------", idx)
-            logger_mp.info("video_path    : %s", vpath)
-            logger_mp.info("video_id      : %s", cam.get("video_id"))
-            logger_mp.info("serial_number : %s", cam.get("serial_number") or "unknown")
-            logger_mp.info("physical_path : %s", cam.get("physical_path"))
-            logger_mp.info("extra_info:")
+            dev_info = cam.get("dev_info") or {}
+            uid = cam.get("uid") or "?"
+            vid = dev_info.get("idVendor", "?")
+            pid = dev_info.get("idProduct", "?")
+            bcd = cam.get("bcd_device") or "?"
+            sn = cam.get("serial_number") or "(none)"
+            name = dev_info.get("name", "?")
+            mfr = dev_info.get("manufacturer", "?")
 
-            dev_info = cam.get("dev_info")
-            uid = cam.get("uid")
+            # format bcdDevice from "0200" → "2.00"
+            bcd_display = bcd
+            if bcd and bcd != "?" and len(bcd) == 4:
+                bcd_display = f"{bcd} (v{int(bcd[:2])}.{bcd[2:]})"
 
-            if dev_info:
-                for k, v in dev_info.items():
-                    logger_mp.info("    %s: %s", k, v)
-                try:
-                    import uvc
-                    cap = uvc.Capture(uid)
-                    for fmt in cap.available_modes:
-                        logger_mp.info("    format: %dx%d@%d %s", fmt.height, fmt.width, fmt.fps, fmt.format_name)
-                    cap.close()
-                    cap = None
-                except Exception as e:
-                    logger_mp.warning("    failed to get formats: %s", e)
+            total = len(self.uvc_rgb_cameras)
+            logger_mp.info("══════ Camera %d/%d: %s (%s) ══════", idx, total, name, mfr)
+            if isinstance(vid, int) and isinstance(pid, int):
+                vidpid_str = f"{vid:04x}:{pid:04x}"
             else:
-                logger_mp.info("    no uvc extra info available")
+                vidpid_str = f"{vid}:{pid}"
+            logger_mp.info("  %-14s: %-15s(USB bus:device address)", "uid", uid)
+            logger_mp.info("  %-14s: %-15s(VendorID : ProductID)", "vid : pid", vidpid_str)
+            logger_mp.info("  %-14s: %s", "serial_number", sn)
+            logger_mp.info("  %-14s: %-15s(USB device release number)", "bcdDevice", bcd_display)
+            logger_mp.info("  %-14s: %s", "physical_path", cam.get("physical_path"))
 
-        logger_mp.info("=========================== Camera Discovery End ================================")
+            # Supported modes: group by resolution, collapse identical fps lists
+            try:
+                import uvc
+                cap = uvc.Capture(uid)
+                from collections import defaultdict
+                by_res = defaultdict(list)
+                fmt_names = set()
+                for m in cap.available_modes:
+                    by_res[(m.width, m.height)].append(m.fps)
+                    fmt_names.add(m.format_name)
+                cap.close()
+
+                fmt_str = ", ".join(sorted(fmt_names))
+                logger_mp.info("  Supported modes (%s)  [width x height @ fps]:", fmt_str)
+                for (w, h), fps_list in sorted(by_res.items()):
+                    fps_str = ", ".join(str(f) for f in sorted(fps_list))
+                    logger_mp.info("    %dx%d @ [%s] fps", w, h, fps_str)
+            except Exception:
+                pass
+
+        logger_mp.info("==============================================================")
 
 class BaseCamera:
     def __init__(self, cam_topic, img_shape, fps, 
@@ -1316,6 +1377,8 @@ class ImageServer:
                 video_path = f"/dev/video{video_id}" if video_id else None
                 physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
                 serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
+                _bcd = cam_cfg.get("bcd_device")
+                bcd_device = f"{_bcd:04d}" if type(_bcd) is int else (str(_bcd) if _bcd else None)
 
                 if cam_type == "opencv":
                     if physical_path is not None:
@@ -1334,12 +1397,22 @@ class ImageServer:
                             self._cameras[cam_topic] = None
                             logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with serial number {serial_number}")
                         else:
-                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps, 
+                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
                                                                     enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
                         # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
                         # ——— even if no camera matches the given path/serial.
                         continue
-                    
+
+                    if bcd_device is not None:
+                        vpath = self._cam_finder.get_vpath_by_bcddevice(bcd_device)
+                        if vpath is None:
+                            self._cameras[cam_topic] = None
+                            logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with bcd_device {bcd_device}")
+                        else:
+                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
+                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                        continue
+
                     if not self._cam_finder.is_vpath_exist(video_path):
                         self._cameras[cam_topic] = None
                         logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with video_id {video_id}")
@@ -1377,10 +1450,20 @@ class ImageServer:
                             self._cameras[cam_topic] = None
                             logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with serial number {serial_number}")
                         else:
-                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps, 
+                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
                                                                  enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
                         # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
                         # ——— even if no camera matches the given path/serial.
+                        continue
+
+                    if bcd_device is not None:
+                        uid = self._cam_finder.get_uid_by_bcddevice(bcd_device)
+                        if uid is None:
+                            self._cameras[cam_topic] = None
+                            logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with bcd_device {bcd_device}")
+                        else:
+                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
+                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
                         continue
                 elif cam_type == "isaacsim":
                     # Check if binocular mode is enabled
