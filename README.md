@@ -300,14 +300,14 @@ The V4L2 device node assigned by the kernel at enumeration time.
 
 
 
-### 4.2 Why Support Three Transmission Methods?
+### 4.2 Why Support Two Transmission Methods?
 
 The image server has two main uses:
 
 1. **Recording high-quality data** → For model training
 2. **Real-time visualization (XR/UI)** → For debugging and monitoring
 
-Different scenarios (local, LAN, remote) require different latency and bandwidth trade-offs. Thus, three transmission methods are supported.
+Different scenarios (local, LAN, remote) require different latency and bandwidth trade-offs. Thus, two transmission methods are supported.
 
 ------
 
@@ -332,19 +332,6 @@ Different scenarios (local, LAN, remote) require different latency and bandwidth
 - Low latency with adaptive bitrate
 - H.264(default) / VP8
 - Browser and VR device compatible
-
-------
-
-**3. Shared Memory**
-
-**Use case:** Server and client on **same machine** for maximum performance
-
-🎯 Advantages
-
-- Maximum bandwidth (memory-limited)
-- μs-level latency
-- Zero-copy or single-copy possible
-- Low CPU usage
 
 
 
