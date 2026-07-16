@@ -889,6 +889,37 @@ class CameraFinder:
             raise ValueError(f"Multiple video devices found for bcdDevice {bcd_device}: {matches}. ")
         return matches[0]
 
+    def get_uid_by_vidpid(self, vid_pid):
+        matches = []
+        for cam in self.uvc_rgb_cameras.values():
+            dev_info = cam.get("dev_info") or {}
+            vid = dev_info.get("idVendor")
+            pid = dev_info.get("idProduct")
+            if vid is not None and pid is not None:
+                if f"{vid:04x}:{pid:04x}" == str(vid_pid):
+                    matches.append(cam)
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(f"Multiple cameras found with vid:pid {vid_pid}")
+        return matches[0].get("uid")
+
+    def get_vpath_by_vidpid(self, vid_pid):
+        matches = []
+        for cam in self.uvc_rgb_cameras.values():
+            dev_info = cam.get("dev_info") or {}
+            vid = dev_info.get("idVendor")
+            pid = dev_info.get("idProduct")
+            if vid is not None and pid is not None:
+                if f"{vid:04x}:{pid:04x}" == str(vid_pid):
+                    vpath = f"/dev/video{cam.get('video_id')}"
+                    matches.append(vpath)
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(f"Multiple video devices found for vid:pid {vid_pid}: {matches}. ")
+        return matches[0]
+
     def get_vpath_by_ppath(self, physical_path):
         base = "/sys/class/video4linux/"
         matches = []
@@ -906,7 +937,7 @@ class CameraFinder:
     
 
     def info(self):
-        logger_mp.info("======================= Camera Discovery =======================")
+        logger_mp.info("============================ Camera Discovery ============================")
         logger_mp.info("Found video devices: %s", self.video_paths)
         logger_mp.info("Found RGB video devices: %s", self.uvc_rgb_video_paths)
 
@@ -931,16 +962,17 @@ class CameraFinder:
                 bcd_display = f"{bcd} (v{int(bcd[:2])}.{bcd[2:]})"
 
             total = len(self.uvc_rgb_cameras)
-            logger_mp.info("══════ Camera %d/%d: %s (%s) ══════", idx, total, name, mfr)
+            logger_mp.info("═════════ Camera %d/%d: %s (%s) ═════════", idx, total, name, mfr)
             if isinstance(vid, int) and isinstance(pid, int):
                 vidpid_str = f"{vid:04x}:{pid:04x}"
             else:
                 vidpid_str = f"{vid}:{pid}"
-            logger_mp.info("  %-14s: %-15s(USB bus:device address)", "uid", uid)
-            logger_mp.info("  %-14s: %-15s(VendorID : ProductID)", "vid : pid", vidpid_str)
+            logger_mp.info("  %-14s: %s", "physical_path", cam.get("physical_path"))
             logger_mp.info("  %-14s: %s", "serial_number", sn)
             logger_mp.info("  %-14s: %-15s(USB device release number)", "bcdDevice", bcd_display)
-            logger_mp.info("  %-14s: %s", "physical_path", cam.get("physical_path"))
+            logger_mp.info("  %-14s: %-15s(VendorID : ProductID)", "vid : pid", vidpid_str)
+            logger_mp.info("  %-14s: %s", "video_id", cam.get("video_id"))
+            logger_mp.info("  %-14s: %-15s(USB bus:device address)", "uid", uid)
 
             # Supported modes: group by resolution, collapse identical fps lists
             try:
@@ -958,11 +990,11 @@ class CameraFinder:
                 logger_mp.info("  Supported modes (%s)  [width x height @ fps]:", fmt_str)
                 for (w, h), fps_list in sorted(by_res.items()):
                     fps_str = ", ".join(str(f) for f in sorted(fps_list))
-                    logger_mp.info("    %dx%d @ [%s] fps", w, h, fps_str)
+                    logger_mp.info("    %dx%d @ [%s]", w, h, fps_str)
             except Exception:
                 pass
 
-        logger_mp.info("==============================================================")
+        logger_mp.info("==========================================================================")
 
 class BaseCamera:
     def __init__(self, cam_topic, img_shape, fps, 
@@ -1379,6 +1411,7 @@ class ImageServer:
                 serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
                 _bcd = cam_cfg.get("bcd_device")
                 bcd_device = f"{_bcd:04d}" if type(_bcd) is int else (str(_bcd) if _bcd else None)
+                vid_pid = str(cam_cfg.get("vid_pid")) if cam_cfg.get("vid_pid") else None
 
                 if cam_type == "opencv":
                     if physical_path is not None:
@@ -1408,6 +1441,16 @@ class ImageServer:
                         if vpath is None:
                             self._cameras[cam_topic] = None
                             logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with bcd_device {bcd_device}")
+                        else:
+                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
+                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                        continue
+
+                    if vid_pid is not None:
+                        vpath = self._cam_finder.get_vpath_by_vidpid(vid_pid)
+                        if vpath is None:
+                            self._cameras[cam_topic] = None
+                            logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with vid_pid {vid_pid}")
                         else:
                             self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
                                                                     enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
@@ -1461,6 +1504,16 @@ class ImageServer:
                         if uid is None:
                             self._cameras[cam_topic] = None
                             logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with bcd_device {bcd_device}")
+                        else:
+                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
+                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+                        continue
+
+                    if vid_pid is not None:
+                        uid = self._cam_finder.get_uid_by_vidpid(vid_pid)
+                        if uid is None:
+                            self._cameras[cam_topic] = None
+                            logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with vid_pid {vid_pid}")
                         else:
                             self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
                                                                  enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)

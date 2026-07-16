@@ -42,29 +42,31 @@ head_camera:
   # frame per second
   fps: 30
 
-  # Camera identifiers (choose one or more):
-  #   - video_id: X        → /dev/videoX  (e.g. 0 → /dev/video0)
-  #   - serial_number: Y   → camera's hardware serial (e.g. "141722079879")
-  #   - bcd_device: Z      → USB device release number (e.g. "0100")
-  #   - physical_path: W   → sysfs physical USB path (e.g. "/sys/devices/pci0000:00/.../1-11.2:1.0")
+  # Camera identifiers (choose one or more), listed in priority order:
+  #   - physical_path → sysfs physical USB path (e.g. "/sys/devices/pci0000:00/.../1-11.2:1.0")
+  #   - serial_number → camera's hardware serial (e.g. "141722079879")
+  #   - bcd_device    → USB device release number (e.g. "0100")
+  #   - vid_pid       → USB vendor:product ID (e.g. "1c45:6200")
+  #   - video_id      → /dev/videoX  (e.g. 0 → /dev/video0)
   #
-  # IMPORTANT: All string identifiers (serial_number, bcd_device, physical_path)
+  # IMPORTANT: All string identifiers (serial_number, bcd_device, vid_pid, physical_path)
   #   MUST be quoted in YAML. Without quotes, values with leading zeros (e.g. 0217)
   #   are parsed as octal integers, and long digit-only serial numbers may lose
   #   precision.  Only video_id is a plain integer.
   #
   # Identifier priority:
-  #   physical_path > serial_number > bcd_device > video_id
+  #   physical_path > serial_number > bcd_device > vid_pid > video_id
   #   if an identifier is not used, set it to null. The system will resolve the camera by priority.
   #
   # Notes:
   #   - type "realsense": supports serial_number only (but a RealSense can also be used as opencv/uvc if desired)
-  #   - type "opencv":    supports video_id, serial_number, bcd_device, physical_path
-  #   - type "uvc":       supports video_id, serial_number, bcd_device, physical_path
-  video_id: 0
+  #   - type "opencv":    supports video_id, serial_number, bcd_device, vid_pid, physical_path
+  #   - type "uvc":       supports video_id, serial_number, bcd_device, vid_pid, physical_path
+  physical_path: null
   serial_number: "01.00.00"
   bcd_device: null
-  physical_path: null
+  vid_pid: null
+  video_id: null
 
 # =====================================================
 # Left wrist camera configuration
@@ -79,10 +81,11 @@ left_wrist_camera:
   image_shape: [480, 640]
   binocular: false
   fps: 30
-  video_id: 2
+  physical_path: null
   serial_number: "200901010001"
   bcd_device: null
-  physical_path: null
+  vid_pid: null
+  video_id: null
 
 # =====================================================
 # Right wrist camera configuration
@@ -97,7 +100,8 @@ right_wrist_camera:
   image_shape: [480, 640]
   binocular: false
   fps: 30
-  video_id: 4
+  physical_path: null
   serial_number: "200901010002"
   bcd_device: null
-  physical_path: null
+  vid_pid: null
+  video_id: null
