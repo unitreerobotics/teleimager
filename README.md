@@ -27,7 +27,7 @@ Currently, **Tele Imager** is used in the [xr_teleoperate](https://github.com/un
 - 📢 Publishes video frames using **ZeroMQ PUB-SUB**
 - 📢 Publishes video frames using **WebRTC**
 - 💬 Responds to image configuration commands via **ZeroMQ REQ-REP**
-- 🆔 Multiple camera identifiers: physical path, serial number, or video device path
+- 🆔 Multiple camera identifiers: physical path, serial number, bcd_device, vid_pid, or video device path
 - ⚙️ Configurable resolution and frame rate
 - 🚀 Efficient frame handling using a triple ring buffer
 
@@ -111,72 +111,35 @@ teleimager-server --cf
 You will see output similar to:
 
 ```bash
-(teleimager) unitree@ubuntu:~$ python -m teleimager.image_server --cf
-10:24:35:849900 INFO     ======================= Camera Discovery Start ================================== image_server.py:216
-10:24:35:851008 INFO     Found video devices: ['/dev/video0', '/dev/video1', '/dev/video2', '/dev/video3', image_server.py:217
-                         '/dev/video4', '/dev/video5']                                                                        
-10:24:35:852089 INFO     Found RGB video devices: ['/dev/video0', '/dev/video2', '/dev/video4']            image_server.py:218
-10:24:35:852280 INFO     ------------------------- UVC Camera 1 ------------------------------------       image_server.py:227
-10:24:35:852575 INFO     video_path    : /dev/video0                                                       image_server.py:228
-10:24:35:852759 INFO     video_id      : 0                                                                 image_server.py:229
-10:24:35:852844 INFO     serial_number : 200901010002                                                      image_server.py:230
-10:24:35:852919 INFO     physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-5/1-5:1.0             image_server.py:231
-10:24:35:852989 INFO     extra_info:                                                                       image_server.py:232
-10:24:35:853062 INFO         name: USB HDR Camera                                                          image_server.py:239
-10:24:35:853133 INFO         manufacturer: Generic                                                         image_server.py:239
-10:24:35:853198 INFO         serialNumber: 200901010002                                                    image_server.py:239
-10:24:35:853261 INFO         idProduct: 8272                                                               image_server.py:239
-10:24:35:853336 INFO         idVendor: 7749                                                                image_server.py:239
-10:24:35:853399 INFO         device_address: 4                                                             image_server.py:239
-10:24:35:853735 INFO         bus_number: 1                                                                 image_server.py:239
-10:24:35:853829 INFO         uid: 1:4                                                                      image_server.py:239
-...
-10:24:36:033234 INFO         format: 480x640@30 MJPG                                                       image_server.py:243
-10:24:36:033249 INFO         format: 480x640@60 MJPG                                                       image_server.py:243
-...
-10:24:36:034519 INFO     ------------------------- UVC Camera 2 ------------------------------------       image_server.py:227
-10:24:36:034551 INFO     video_path    : /dev/video2                                                       image_server.py:228
-10:24:36:034567 INFO     video_id      : 2                                                                 image_server.py:229
-10:24:36:034582 INFO     serial_number : 01.00.00                                                          image_server.py:230
-10:24:36:034595 INFO     physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-11/1-11.1/1-11.1:1.0  image_server.py:231
-10:24:36:034608 INFO     extra_info:                                                                       image_server.py:232
-10:24:36:034622 INFO         name: Cherry Dual Camera                                                      image_server.py:239
-10:24:36:034635 INFO         manufacturer: DECXIN                                                          image_server.py:239
-10:24:36:034647 INFO         serialNumber: 01.00.00                                                        image_server.py:239
-10:24:36:034658 INFO         idProduct: 11599                                                              image_server.py:239
-10:24:36:034670 INFO         idVendor: 7119                                                                image_server.py:239
-10:24:36:034683 INFO         device_address: 9                                                             image_server.py:239
-10:24:36:034695 INFO         bus_number: 1                                                                 image_server.py:239
-10:24:36:034710 INFO         uid: 1:9                                                                      image_server.py:239
-...
-10:24:36:435928 INFO         format: 480x1280@10 MJPG                                                      image_server.py:243
-10:24:36:435988 INFO         format: 480x1280@15 MJPG                                                      image_server.py:243
-10:24:36:436047 INFO         format: 480x1280@20 MJPG                                                      image_server.py:243
-10:24:36:436108 INFO         format: 480x1280@25 MJPG                                                      image_server.py:243
-10:24:36:436168 INFO         format: 480x1280@30 MJPG                                                      image_server.py:243
-10:24:36:436227 INFO         format: 480x1280@60 MJPG                                                      image_server.py:243
-10:24:36:436286 INFO         format: 480x1280@120 MJPG                                                     image_server.py:243
-...
-10:24:36:524038 INFO     ------------------------- UVC Camera 3 ------------------------------------       image_server.py:227
-10:24:36:524203 INFO     video_path    : /dev/video4                                                       image_server.py:228
-10:24:36:524282 INFO     video_id      : 4                                                                 image_server.py:229
-10:24:36:524345 INFO     serial_number : 200901010001                                                      image_server.py:230
-10:24:36:524398 INFO     physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-11/1-11.2/1-11.2:1.0  image_server.py:231
-10:24:36:524449 INFO     extra_info:                                                                       image_server.py:232
-10:24:36:524531 INFO         name: USB HDR Camera                                                          image_server.py:239
-10:24:36:524672 INFO         manufacturer: Generic                                                         image_server.py:239
-10:24:36:524734 INFO         serialNumber: 200901010001                                                    image_server.py:239
-10:24:36:524789 INFO         idProduct: 8272                                                               image_server.py:239
-10:24:36:524843 INFO         idVendor: 7749                                                                image_server.py:239
-10:24:36:524893 INFO         device_address: 10                                                            image_server.py:239
-10:24:36:524942 INFO         bus_number: 1                                                                 image_server.py:239
-10:24:36:524989 INFO         uid: 1:10                                                                     image_server.py:239
-10:24:36:688311 INFO         format: 240x320@30 MJPG                                                       image_server.py:243
-...
-10:24:36:689031 INFO         format: 480x640@30 MJPG                                                       image_server.py:243
-10:24:36:689089 INFO         format: 480x640@60 MJPG                                                       image_server.py:243
-...
-10:24:36:714374 INFO     =========================== Camera Discovery End ================================
+(teleimager) unitree@ubuntu:~$ teleimager-server --cf
+============================ Camera Discovery ============================
+Found video devices: ['/dev/video0', '/dev/video1', '/dev/video2']
+Found RGB video devices: ['/dev/video0', '/dev/video2']
+
+══════ Camera 1/2: Cherry Dual Camera (DECXIN) ══════
+  physical_path : /sys/devices/pci.../usb1/1-3/1-3.1/1-3.1:1.0
+  serial_number : 01.00.00
+  bcdDevice     : 0217 (v2.17)   (USB device release number)
+  vid : pid     : 1bcf:2d4f        (VendorID : ProductID)
+  video_id      : 0
+  uid           : 1:71           (USB bus:device address)
+  Supported modes (MJPG)  [width x height @ fps]:
+    640x480 @ [10, 15, 20, 25, 30, 60, 120] fps
+    1280x720 @ [10, 15, 20, 25, 30, 60] fps
+    ...
+
+══════ Camera 2/2: Abham Image (HHWei Technology Co., Ltd.) ══════
+  physical_path : /sys/devices/pci.../usb1/1-1/1-1:1.0
+  serial_number : HHW001
+  bcdDevice     : 0200 (v2.00)   (USB device release number)
+  vid : pid     : 1c45:6200        (VendorID : ProductID)
+  video_id      : 2
+  uid           : 1:79           (USB bus:device address)
+  Supported modes (MJPG)  [width x height @ fps]:
+    640x480 @ [5, 10, 15, 20, 25, 30] fps
+    1920x1080 @ [5, 10, 15, 20, 25, 30] fps
+    ...
+================================================================
 ```
 
 > If RealSense cameras exist, add the `--rs` argument to see RealSense discovery results.
@@ -238,7 +201,7 @@ https://<host_ip>:<webrtc_port>
 https://192.168.123.164:60001
 ```
 
-And please press `start` button  top-right.
+And please press the `start` button in the center of the page.
 
 
 
@@ -258,57 +221,82 @@ Follow the prompts to complete configuration.
 
 ### 4.1 Why Support Multiple Camera Identifiers?
 
-Linux cameras can be identified in multiple ways:
+When multiple cameras are connected, the system needs a reliable way to tell them apart.
+Tele Imager supports five identifiers, resolved in priority order:
+`physical_path > serial_number > bcd_device > vid_pid > video_id`.
 
-- **Physical path (physical_path)**
-- **Serial number (serial_number)**
-- **Video device path (video_id → /dev/videoX)**
+Each identifier has different trade-offs. More importantly, manufacturers use these fields
+in inconsistent ways — the "meaning" of a field in the USB spec often differs from how a
+vendor actually programs it. The descriptions below reflect real-world behavior, not just
+specification intent.
 
-Each has pros and cons. Tele Imager supports all three for stable and flexible identification.
+**1. Physical path (physical_path)** — highest priority
 
-**1. Physical path**
-
-🎯 Advantages:
-
-- Not affected by reboot or plug order
-- Works even if cameras share serial numbers
-- Ideal for fixed multi-camera deployments (robot head + wrists)
-
-⚠️ Disadvantages:
-
-- Not flexible: changing USB port requires config update
-
-**2. Serial number**
+This is the USB topology path assigned by the Linux kernel. It uniquely identifies
+which physical port a camera is plugged into.
 
 🎯 Advantages:
-
-- Remains constant across USB ports
-- High identification accuracy
-- Simple configuration
-- Recommended for RealSense
+- Stable as long as the camera stays in the same USB port
+- Works regardless of what the manufacturer wrote into the firmware
+- Ideal for fixed deployments (e.g. robot head + left wrist + right wrist)
 
 ⚠️ Disadvantages:
+- Must update config if the camera is moved to a different USB port
 
-- Low-cost cameras may reuse serial numbers
-- Some serial numbers are unstable or malformed
+**2. Serial number (serial_number)**
 
-**3. Video device path (/dev/videoX)**
+A string stored in the camera's USB device descriptor, intended to be unique per unit.
 
 🎯 Advantages:
-
-- Direct usage: just specify `video_id: X`
-- Good for single camera or temporary testing
+- Portable: same value regardless of which USB port is used
+- Canonically the right way to identify a specific device
 
 ⚠️ Disadvantages:
+- Some low-cost cameras reuse the same serial across all units, or leave it empty
+- Some cameras report malformed or unstable strings
 
-- Changes with plug order or reboot
-- Unreliable for multi-camera setups
+**3. USB device release number (bcd_device)**
 
-| Identifier    | Stability | Flexibility | Recommended Use                            |
-| ------------- | --------- | ----------- | ------------------------------------------ |
-| Physical path | ⭐⭐⭐⭐⭐     | ⭐           | Multi-camera fixed setup, low-cost cameras |
-| Serial number | ⭐⭐⭐⭐      | ⭐⭐⭐         | RealSense, unique serial cameras           |
-| video_id      | ⭐⭐        | ⭐⭐⭐⭐⭐       | Single camera, temporary testing           |
+A BCD-encoded number in the USB device descriptor, nominally a firmware revision.
+In practice, some manufacturers intentionally assign different values to otherwise
+identical cameras — for example, to distinguish left-wrist from right-wrist units
+in a stereo pair.
+
+🎯 Advantages:
+- Hardcoded in firmware, survives reboots and port changes
+- Can serve as a per-unit identifier when the vendor programs it that way
+
+⚠️ Disadvantages:
+- Many vendors treat it purely as a firmware version — same value across all units
+- Cannot be relied upon for uniqueness without checking the specific hardware
+
+**4. Vendor:Product ID (vid_pid)**
+
+Two 16-bit numbers assigned by the USB-IF (vid) and the vendor (pid).
+Nominally identifies the chip or product model. Some vendors assign different
+pid values to individual units, effectively using it as a serial number.
+
+🎯 Advantages:
+- Extremely stable — same chip always reports the same vid
+- Can distinguish different camera models at a glance
+
+⚠️ Disadvantages:
+- Same-model cameras usually share the same vid_pid
+- Whether it identifies a model or an individual unit is entirely up to the vendor
+
+**5. Video device path (video_id → /dev/videoX)**
+
+The V4L2 device node assigned by the kernel at enumeration time.
+
+🎯 Advantages:
+- Simplest to use: just specify the number X from `/dev/videoX`
+
+⚠️ Disadvantages:
+- Changes with plug order, reboot, or kernel enumeration order
+- Unreliable for any setup with more than one camera
+
+> **Note:** The granularity of bcd_device and vid_pid depends entirely on the manufacturer.
+> Always check `teleimager-server --cf` output to see what values your specific cameras report.
 
 
 
