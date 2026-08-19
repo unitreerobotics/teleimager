@@ -13,7 +13,7 @@
 
 ## 1. Image Server
 
-This repository provides an image server that captures video streams from multiple cameras (UVC, OpenCV, and RealSense) and publishes them over the network using ZeroMQ or WebRTC.
+This repository provides an image server that captures video streams from multiple cameras (UVC, V4L2, GStreamer, and RealSense) and publishes them over the network using ZeroMQ or WebRTC.
 
 Currently, **Tele Imager** is used in the [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate) project to provide teleoperation video streams.
 
@@ -23,7 +23,7 @@ Currently, **Tele Imager** is used in the [xr_teleoperate](https://github.com/un
 
 ### 1.0 ✨ Features
 
-- 📸 Supports multiple UVC, OpenCV, and Intel RealSense cameras
+- 📸 Supports multiple UVC, V4L2, GStreamer, and Intel RealSense cameras
 - 📢 Publishes video frames using **ZeroMQ PUB-SUB**
 - 📢 Publishes video frames using **WebRTC**
 - 💬 Responds to image configuration commands via **ZeroMQ REQ-REP**

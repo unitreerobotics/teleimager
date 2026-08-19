@@ -17,7 +17,7 @@ logger_mp = logging_mp.getLogger(__name__)
 import os
 import argparse
 import glob
-import cv2
+from turbojpeg import TurboJPEG
 import numpy as np
 # uvc will be imported when needed
 import yaml
@@ -44,15 +44,13 @@ import queue
 import fractions
 from typing import Dict, Optional, Tuple, Any
 
+# Shared JPEG codec (libturbojpeg): encode(BGR)->jpeg bytes, decode(jpeg)->BGR.
+_turbojpeg = TurboJPEG()
+
 # ========================================================
 # cam_config_server.yaml path
 # ========================================================
-from pathlib import Path
-CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "cam_config_server.yaml"
-)
-CONFIG_PATH = os.path.normpath(CONFIG_PATH)
+CONFIG_PATH = str(Path(__file__).resolve().parents[2] / "cam_config_server.yaml")
 
 # ========================================================
 # certificate and key paths
@@ -629,324 +627,91 @@ def reload_uvc_driver():
 class CameraFinder:
     """
     Discover connected cameras and their properties.
-    vpath: /dev/videoX
-    ppath: physical path in /sys/class/video4linux, e.g. /sys/devices/pci0000:00/0000:00:14.0/usb1/1-11/1-11.2/1-11.2:1.0
-    uid: USB unique ID, e.g. "001:002"
-    dev_info: extra info from uvc
-    sn: serial number of the camera
     """
     def __init__(self, realsense_enable=False, verbose=False):
-        self.verbose = verbose
-        # uvc
-        reload_uvc_driver()
-        import uvc
-        self.uvc_devices = uvc.device_list()
-        self.uid_map = {dev["uid"]: dev for dev in self.uvc_devices}
-        # all video devices
-        self.video_paths = self._list_video_paths()
-        # realsense
-        if realsense_enable:
-            self.rs_serial_numbers = self._list_realsense_serial_numbers()
-            self.rs_video_paths = self._list_realsense_video_paths()
-            self.rs_rgb_video_paths = [p for p in self.rs_video_paths if self._is_like_rgb(p)]
-        else:
-            self.rs_serial_numbers = []
-            self.rs_video_paths = []
-            self.rs_rgb_video_paths = []
-        # rgb & uvc
-        self.uvc_rgb_video_paths = self._list_uvc_rgb_video_paths()
-        self.uvc_rgb_video_ids = [int(v.replace("/dev/video", "")) for v in self.uvc_rgb_video_paths]
-        self.uvc_rgb_physical_paths = [self._get_ppath_from_vpath(v) for v in self.uvc_rgb_video_paths]
-        self.uvc_rgb_uids = [self._get_uid_from_ppath(p) for p in self.uvc_rgb_physical_paths]
-        self.uvc_rgb_dev_info = [self.uid_map.get(uid) for uid in self.uvc_rgb_uids]
-        self.uvc_rgb_serial_numbers = [dev_info.get("serialNumber") if dev_info else None for dev_info in self.uvc_rgb_dev_info]
-        self.uvc_rgb_bcd_devices = [self._get_bcddevice_from_ppath(p) for p in self.uvc_rgb_physical_paths]
-        # all uvc cameras
-        self.uvc_rgb_cameras = {}
-        for vpath, vid, ppath, uid, dev_info, sn, bcd in zip(
-            self.uvc_rgb_video_paths,
-            self.uvc_rgb_video_ids,
-            self.uvc_rgb_physical_paths,
-            self.uvc_rgb_uids,
-            self.uvc_rgb_dev_info,
-            self.uvc_rgb_serial_numbers,
-            self.uvc_rgb_bcd_devices,
-        ):
-            self.uvc_rgb_cameras[vpath] = {
-                "video_id": vid,
-                "physical_path": ppath,
-                "uid": uid,
-                "dev_info": dev_info,
-                "serial_number": sn,
-                "bcd_device": bcd,
-            }
-        if self.verbose:
+        self.realsense_enable = realsense_enable
+        if verbose:
             self.info()
 
-    # utils
-    def _list_video_paths(self):
-        base = "/sys/class/video4linux/"
-        if not os.path.exists(base):
-            return []
-        return [f"/dev/{x}" for x in sorted(os.listdir(base)) if x.startswith("video")]
-
-    def _list_uvc_rgb_video_paths(self):
-        return [p for p in self.video_paths if self._is_like_rgb(p) and p not in self.rs_video_paths]
-
-    def _list_realsense_video_paths(self):
-        def _read_text(path):
-            try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    return f.read().strip()
-            except Exception:
-                return None
-
-        def _parent_usb_device_sysdir(video_sysdir):
-            d = os.path.realpath(os.path.join(video_sysdir, "device"))
-            for _ in range(10):
-                if d is None or d == "/" or not os.path.isdir(d):
-                    break
-                id_vendor = _read_text(os.path.join(d, "idVendor"))
-                id_product = _read_text(os.path.join(d, "idProduct"))
-                if id_vendor and id_product:
-                    return d
-                d_next = os.path.dirname(d)
-                if d_next == d:
-                    break
-                d = d_next
-            return None
-
-        ports = []
-        for devnode in sorted(glob.glob("/dev/video*")):
-            sysdir = f"/sys/class/video4linux/{os.path.basename(devnode)}"
-            name = _read_text(os.path.join(sysdir, "name"))
-            usb_dir = _parent_usb_device_sysdir(sysdir)
-            vendor_id = _read_text(os.path.join(usb_dir, "idVendor")) if usb_dir else None
-
-            # Match RealSense by name and Intel vendor ID
-            if name and "realsense" in name.lower() and (vendor_id or "").lower() in ("8086", "32902"):
-                ports.append(devnode)
-
-        return ports
-    
-    def get_realsense_module(self) -> object:
-        try:
-            import pyrealsense2 as rs
-            return rs
-        except ImportError:
-            arch = platform.machine()
-            system = platform.system()
-            print(f"[RealSense] Platform: {system} / {arch}")
-
-            if system == "Linux" and arch.startswith("aarch64"):
-                # Jetson NX / arm64
-                msg = (
-                    "[RealSense] pyrealsense2 not installed. please build from source:\n"
-                    "    cd ~\n"
-                    "    git clone https://github.com/IntelRealSense/librealsense.git\n"
-                    "    cd librealsense\n"
-                    "    git checkout v2.50.0\n"
-                    "    mkdir build && cd build\n"
-                    "    cmake .. -DBUILD_PYTHON_BINDINGS=ON -DPYTHON_EXECUTABLE=$(which python3)\n"
-                    "    make -j$(nproc)\n"
-                    "    sudo make install\n"
-                )
-            else:
-                # x86/x64
-                msg = (
-                    "[RealSense] pyrealsense2 not installed. You can try:\n"
-                    "    pip install pyrealsense2\n"
-                )
-            raise RuntimeError(msg)
-
-    def _list_realsense_serial_numbers(self):
-        rs = self.get_realsense_module()
-        ctx = rs.context()
-        devices = ctx.query_devices()
-        serials = []
-        for dev in devices:
-            try:
-                serials.append(dev.get_info(rs.camera_info.serial_number))
-            except Exception:
-                continue
-        return serials
-
-    def _get_ppath_from_vpath(self, video_path):
-        sysfs_path = f"/sys/class/video4linux/{os.path.basename(video_path)}/device"
-        return os.path.realpath(sysfs_path)
-
-    def _get_uid_from_ppath(self, physical_path):
-        def read_file(path):
-            return open(path).read().strip() if os.path.exists(path) else None
-
-        busnum_file = os.path.join(physical_path, "busnum")
-        devnum_file = os.path.join(physical_path, "devnum")
-
-        if not (os.path.exists(busnum_file) and os.path.exists(devnum_file)):
-            parent = os.path.dirname(physical_path)
-            busnum_file = os.path.join(parent, "busnum")
-            devnum_file = os.path.join(parent, "devnum")
-
-        if os.path.exists(busnum_file) and os.path.exists(devnum_file):
-            bus = read_file(busnum_file)
-            dev = read_file(devnum_file)
-            return f"{bus}:{dev}"
-        return None
-
-    def _get_bcddevice_from_ppath(self, physical_path):
-        def read_file(path):
-            return open(path).read().strip() if os.path.exists(path) else None
-
-        bcd_file = os.path.join(physical_path, "bcdDevice")
-
-        if not os.path.exists(bcd_file):
-            parent = os.path.dirname(physical_path)
-            bcd_file = os.path.join(parent, "bcdDevice")
-
-        if os.path.exists(bcd_file):
-            bcd = read_file(bcd_file)
-            return bcd
-        return None
-
-    def _is_like_rgb(self, video_path):
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return False
-        ret, frame = cap.read()
-        cap.release()
-        return ret and frame is not None and frame.ndim == 3 and frame.shape[2] == 3
-
-    # --------------------------------------------------------
-    # public api
-    # --------------------------------------------------------
-    def is_rs_serial_exist(self, serial_number):
-        return str(serial_number) in self.rs_serial_numbers
-
-    def is_vpath_exist(self, vpath):
-        return vpath in self.video_paths
-    
-    def is_ppath_exist(self, physical_path):
-        for cam in self.uvc_rgb_cameras.values():
-            if cam.get("physical_path") == physical_path:
-                return True
-        return False
-    
-    def get_uid_by_sn(self, serial_number):
-        matches = [
-            cam for cam in self.uvc_rgb_cameras.values()
-            if cam.get("serial_number") == str(serial_number)
-        ]
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValueError(f"Multiple cameras found with serial number {serial_number}")
-        return matches[0].get("uid")
-
-    def get_uid_by_ppath(self, physical_path):
-        for cam in self.uvc_rgb_cameras.values():
-            if cam.get("physical_path") == physical_path:
-                return cam.get("uid")
-        return None
-    
-    def get_uid_by_vpath(self, video_path):
-        cam = self.uvc_rgb_cameras.get(video_path)
-        if cam:
-            return cam.get("uid")
-        return None
-    
-    def get_vpath_by_sn(self, serial_number):
-        matches = []
-        for cam in self.uvc_rgb_cameras.values():
-            if cam.get("serial_number") == str(serial_number):
-                vpath = f"/dev/video{cam.get('video_id')}"
-                matches.append(vpath)
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValueError(f"Multiple video devices found for serial number {serial_number}: {matches}. ")
-        return matches[0]
-
-    def get_uid_by_bcddevice(self, bcd_device):
-        matches = [
-            cam for cam in self.uvc_rgb_cameras.values()
-            if cam.get("bcd_device") == str(bcd_device)
-        ]
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValueError(f"Multiple cameras found with bcdDevice {bcd_device}")
-        return matches[0].get("uid")
-
-    def get_vpath_by_bcddevice(self, bcd_device):
-        matches = []
-        for cam in self.uvc_rgb_cameras.values():
-            if cam.get("bcd_device") == str(bcd_device):
-                vpath = f"/dev/video{cam.get('video_id')}"
-                matches.append(vpath)
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValueError(f"Multiple video devices found for bcdDevice {bcd_device}: {matches}. ")
-        return matches[0]
-
-    def get_uid_by_vidpid(self, vid_pid):
-        matches = []
-        for cam in self.uvc_rgb_cameras.values():
-            dev_info = cam.get("dev_info") or {}
-            vid = dev_info.get("idVendor")
-            pid = dev_info.get("idProduct")
-            if vid is not None and pid is not None:
-                if f"{vid:04x}:{pid:04x}" == str(vid_pid):
-                    matches.append(cam)
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValueError(f"Multiple cameras found with vid:pid {vid_pid}")
-        return matches[0].get("uid")
-
-    def get_vpath_by_vidpid(self, vid_pid):
-        matches = []
-        for cam in self.uvc_rgb_cameras.values():
-            dev_info = cam.get("dev_info") or {}
-            vid = dev_info.get("idVendor")
-            pid = dev_info.get("idProduct")
-            if vid is not None and pid is not None:
-                if f"{vid:04x}:{pid:04x}" == str(vid_pid):
-                    vpath = f"/dev/video{cam.get('video_id')}"
-                    matches.append(vpath)
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValueError(f"Multiple video devices found for vid:pid {vid_pid}: {matches}. ")
-        return matches[0]
-
-    def get_vpath_by_ppath(self, physical_path):
-        base = "/sys/class/video4linux/"
-        matches = []
-        for v in os.listdir(base):
-            sys_path = os.path.realpath(os.path.join(base, v, "device"))
-            if sys_path == physical_path:
-                vpath = f"/dev/{v}"
-                if self._is_like_rgb(vpath):
-                    matches.append(vpath)
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValueError(f"Multiple video devices found for physical path {physical_path}: {matches}. ")
-        return matches[0]
-    
-
     def info(self):
-        logger_mp.info("============================ Camera Discovery ============================")
-        logger_mp.info("Found video devices: %s", self.video_paths)
-        logger_mp.info("Found RGB video devices: %s", self.uvc_rgb_video_paths)
+        # Pure reporter: scan every driver, reconcile cross-driver overlaps, and
+        # print one discovery tree. No lookup tables are kept — each camera driver
+        # resolves its own device in from_config(), so the finder only reports.
+        reload_uvc_driver()
 
-        if self.rs_serial_numbers:
-            logger_mp.info("--- Realsense Cameras ---")
-            logger_mp.info("  serial numbers : %s", self.rs_serial_numbers)
-            logger_mp.info("  video paths    : %s", self.rs_video_paths)
+        rs_cards = RealSenseCamera.scan() if self.realsense_enable else []
+        rs_all_paths = set(RealSenseCamera._list_video_paths())
+        rs_depth_ir = set(RealSenseCamera._list_depth_ir_video_paths())
 
-        for idx, (vpath, cam) in enumerate(self.uvc_rgb_cameras.items(), start=1):
+        # UVC report drops ALL RealSense-owned nodes (libuvc cannot open the
+        # multi-interface UVC composite → "Operation not supported"). V4L2 /
+        # GStreamer reports drop only depth/IR nodes — the kernel uvcvideo driver
+        # CAN drive the RealSense COLOR node as an ordinary RGB camera. Depth/IR
+        # classification is pure sysfs + v4l2-ctl (no SDK), so it works even when
+        # --rs is off.
+        uvc_rgb = {c["video_path"]: c for c in UVCCamera.scan()
+                   if c["video_path"] not in rs_all_paths}
+        v4l2_cards = [c for c in V4L2Camera.scan()
+                      if c["video_path"] not in rs_depth_ir]
+        gst_cards = [c for c in GStreamerCamera.scan()
+                     if c.get("device") not in rs_depth_ir]
+
+        branches = [
+            self._report_realsense(rs_cards),
+            self._report_uvc(uvc_rgb),
+            self._report_v4l2(v4l2_cards),               # report-only heavy probe (v4l2-ctl)
+            self._report_gstreamer(gst_cards),           # registration-based hints
+        ]
+        branches = [b for b in branches if b is not None]
+
+        logger_mp.info("Camera Discovery")
+        self._print_children(branches, "")
+
+    @staticmethod
+    def _print_children(children, prefix):
+        """Render a tree. Each node is a (label, children) tuple; a leaf has []."""
+        n = len(children)
+        for i, (label, sub) in enumerate(children):
+            last = i == n - 1
+            logger_mp.info("%s%s%s", prefix, "└─ " if last else "├─ ", label)
+            if sub:
+                CameraFinder._print_children(sub, prefix + ("   " if last else "│  "))
+
+    @staticmethod
+    def _leaf(text):
+        return (text, [])
+
+    def _report_realsense(self, cards):
+        if not cards:
+            return None
+        cams = []
+        for c in cards:
+            sn = c.get("serial_number") or "(none)"
+            fields = [self._leaf("serial_number : %s" % sn)]
+            modes = c.get("modes") or []
+            if modes:
+                # group by stream (Depth / Color / Infrared ...), then list each mode
+                from collections import defaultdict
+                by_stream = defaultdict(list)
+                for m in modes:
+                    by_stream[m["stream"]].append(m)
+                stream_kids = []
+                for stream in sorted(by_stream):
+                    mode_kids = []
+                    for m in sorted(by_stream[stream], key=lambda x: (x["format"], x["width"], x["height"])):
+                        fps_str = ", ".join(str(f) for f in m["fps"])
+                        mode_kids.append(self._leaf("%-6s %dx%d @ [%s]" % (
+                            m["format"], m["width"], m["height"], fps_str)))
+                    stream_kids.append((stream, mode_kids))
+                fields.append(("modes  [format  width x height @ fps]:", stream_kids))
+            cams.append(("RealSense", fields))
+        return ("RealSenseCamera (%d)   [type: realsense]" % len(cams), cams)
+
+    def _report_uvc(self, cameras):
+        if not cameras:
+            return None
+        cams = []
+        for vpath, cam in cameras.items():
             dev_info = cam.get("dev_info") or {}
             uid = cam.get("uid") or "?"
             vid = dev_info.get("idVendor", "?")
@@ -960,19 +725,18 @@ class CameraFinder:
             bcd_display = bcd
             if bcd and bcd != "?" and len(bcd) == 4:
                 bcd_display = f"{bcd} (v{int(bcd[:2])}.{bcd[2:]})"
-
-            total = len(self.uvc_rgb_cameras)
-            logger_mp.info("═════════ Camera %d/%d: %s (%s) ═════════", idx, total, name, mfr)
             if isinstance(vid, int) and isinstance(pid, int):
                 vidpid_str = f"{vid:04x}:{pid:04x}"
             else:
                 vidpid_str = f"{vid}:{pid}"
-            logger_mp.info("  %-14s: %s", "physical_path", cam.get("physical_path"))
-            logger_mp.info("  %-14s: %s", "serial_number", sn)
-            logger_mp.info("  %-14s: %-15s(USB device release number)", "bcdDevice", bcd_display)
-            logger_mp.info("  %-14s: %-15s(VendorID : ProductID)", "vid : pid", vidpid_str)
-            logger_mp.info("  %-14s: %s", "video_id", cam.get("video_id"))
-            logger_mp.info("  %-14s: %-15s(USB bus:device address)", "uid", uid)
+
+            fields = [
+                self._leaf("%-14s: %s" % ("physical_path", cam.get("physical_path"))),
+                self._leaf("%-14s: %s" % ("serial_number", sn)),
+                self._leaf("%-14s: %-15s(USB device release number)" % ("bcdDevice", bcd_display)),
+                self._leaf("%-14s: %-15s(VendorID : ProductID)" % ("vid : pid", vidpid_str)),
+                self._leaf("%-14s: %-15s(/dev/video%s)" % ("video_id", cam.get("video_id"), cam.get("video_id"))),
+            ]
 
             # Supported modes: group by resolution, collapse identical fps lists
             try:
@@ -986,15 +750,60 @@ class CameraFinder:
                     fmt_names.add(m.format_name)
                 cap.close()
 
-                fmt_str = ", ".join(sorted(fmt_names))
-                logger_mp.info("  Supported modes (%s)  [width x height @ fps]:", fmt_str)
+                mode_kids = []
                 for (w, h), fps_list in sorted(by_res.items()):
                     fps_str = ", ".join(str(f) for f in sorted(fps_list))
-                    logger_mp.info("    %dx%d @ [%s]", w, h, fps_str)
+                    mode_kids.append(self._leaf("%dx%d @ [%s]" % (w, h, fps_str)))
+                fmt_str = ", ".join(sorted(fmt_names))
+                fields.append(("modes (%s)  [width x height @ fps]:" % fmt_str, mode_kids))
             except Exception:
                 pass
 
-        logger_mp.info("==========================================================================")
+            cams.append(("%s (%s)" % (name, mfr), fields))
+        return ("UVCCamera (%d)   [type: uvc]" % len(cams), cams)
+
+    def _report_v4l2(self, cards):
+        if not cards:
+            return None
+        cams = []
+        for c in cards:
+            bcd = c.get("bcd_device") or "?"
+            # format bcdDevice from "0200" → "2.00"
+            bcd_display = bcd
+            if bcd and bcd != "?" and len(bcd) == 4:
+                bcd_display = f"{bcd} (v{int(bcd[:2])}.{bcd[2:]})"
+
+            fields = [
+                self._leaf("%-14s: %s" % ("physical_path", c.get("physical_path"))),
+                self._leaf("%-14s: %s" % ("serial_number", c.get("serial_number") or "(none)")),
+                self._leaf("%-14s: %-15s(USB device release number)" % ("bcdDevice", bcd_display)),
+                self._leaf("%-14s: %-15s(VendorID : ProductID)" % ("vid : pid", c.get("vid_pid") or "(none)")),
+                self._leaf("%-14s: %-15s(/dev/video%s)" % ("video_id", c.get("video_id"), c.get("video_id"))),
+            ]
+            modes = c.get("modes") or []
+            if modes:
+                mode_kids = []
+                for m in modes:
+                    fps_str = ", ".join(str(f) for f in m.get("fps", []))
+                    mode_kids.append(self._leaf("%-6s %dx%d @ [%s]" % (
+                        m.get("format"), m.get("width"), m.get("height"), fps_str)))
+                fields.append(("modes  [width x height @ fps]:", mode_kids))
+
+            name = c.get("name") or c["video_path"]
+            mfr = c.get("manufacturer") or "?"
+            cams.append(("%s (%s)" % (name, mfr), fields))
+        return ("V4L2Camera (%d)   [type: v4l2]" % len(cams), cams)
+
+    def _report_gstreamer(self, cards):
+        if not cards:
+            return None
+        cams = []
+        for c in cards:
+            cams.append((c.get("name"), [
+                self._leaf("type: gstreamer"),
+                self._leaf('gst_pipeline: "%s"' % c.get("gst_pipeline")),
+            ]))
+        return ("GStreamerCamera (%d)   [type: gstreamer]" % len(cams), cams)
 
 class BaseCamera:
     def __init__(self, cam_topic, img_shape, fps, 
@@ -1074,7 +883,7 @@ class BaseCamera:
 class RealSenseCamera(BaseCamera):
     def __init__(self, cam_topic, serial_number, img_shape, fps, 
                  enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None, enable_depth=False):
-        rs = self.check_pyrealsense2_install()
+        rs = self._check_pyrealsense2_install()
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._serial_number = serial_number
         self._enable_depth = enable_depth
@@ -1117,7 +926,7 @@ class RealSenseCamera(BaseCamera):
             f"WebRTC: {'enabled, webrtc_port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
         )
 
-    def check_pyrealsense2_install(self):
+    def _check_pyrealsense2_install(self):
         try:
             import pyrealsense2 as rs
             return rs
@@ -1146,13 +955,11 @@ class RealSenseCamera(BaseCamera):
             self._webrtc_buffer.write(bgr_numpy)
 
         if self._enable_zmq:
-            ok, buf = cv2.imencode(".jpg", bgr_numpy)
-            if ok:
-                self._zmq_buffer.write(buf.tobytes())
-        
+            self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
+
         if not self._ready.is_set():
             self._ready.set()
-    
+
     def get_depth_frame(self):
         if self._latest_depth is None:
             return None
@@ -1169,6 +976,198 @@ class RealSenseCamera(BaseCamera):
             pass
         self.pipeline = None
         logger_mp.info(f"[RealSenseCamera] Released {self._cam_topic}")
+
+    @staticmethod
+    def get_realsense_module():
+        try:
+            import pyrealsense2 as rs
+            return rs
+        except ImportError:
+            arch = platform.machine()
+            system = platform.system()
+            print(f"[RealSense] Platform: {system} / {arch}")
+
+            if system == "Linux" and arch.startswith("aarch64"):
+                msg = (
+                    "[RealSense] pyrealsense2 not installed. please build from source:\n"
+                    "    cd ~\n"
+                    "    git clone https://github.com/IntelRealSense/librealsense.git\n"
+                    "    cd librealsense\n"
+                    "    git checkout v2.50.0\n"
+                    "    mkdir build && cd build\n"
+                    "    cmake .. -DBUILD_PYTHON_BINDINGS=ON -DPYTHON_EXECUTABLE=$(which python3)\n"
+                    "    make -j$(nproc)\n"
+                    "    sudo make install\n"
+                )
+            else:
+                msg = (
+                    "[RealSense] pyrealsense2 not installed. You can try:\n"
+                    "    pip install pyrealsense2\n"
+                )
+            raise RuntimeError(msg)
+
+    @classmethod
+    def _list_serial_numbers(cls):
+        rs = cls.get_realsense_module()
+        ctx = rs.context()
+        serials = []
+        for dev in ctx.query_devices():
+            try:
+                serials.append(dev.get_info(rs.camera_info.serial_number))
+            except Exception:
+                continue
+        return serials
+
+    @staticmethod
+    def _list_video_paths():
+        def _read_text(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read().strip()
+            except Exception:
+                return None
+
+        def _parent_usb_device_sysdir(video_sysdir):
+            d = os.path.realpath(os.path.join(video_sysdir, "device"))
+            for _ in range(10):
+                if d is None or d == "/" or not os.path.isdir(d):
+                    break
+                id_vendor = _read_text(os.path.join(d, "idVendor"))
+                id_product = _read_text(os.path.join(d, "idProduct"))
+                if id_vendor and id_product:
+                    return d
+                d_next = os.path.dirname(d)
+                if d_next == d:
+                    break
+                d = d_next
+            return None
+
+        ports = []
+        for devnode in sorted(glob.glob("/dev/video*")):
+            sysdir = f"/sys/class/video4linux/{os.path.basename(devnode)}"
+            name = _read_text(os.path.join(sysdir, "name"))
+            usb_dir = _parent_usb_device_sysdir(sysdir)
+            vendor_id = _read_text(os.path.join(usb_dir, "idVendor")) if usb_dir else None
+
+            # Match RealSense by name and Intel vendor ID
+            if name and "realsense" in name.lower() and (vendor_id or "").lower() in ("8086", "32902"):
+                ports.append(devnode)
+
+        return ports
+
+    # Depth + infrared v4l2 fourccs. The color sensor node advertises none of
+    # these (only YUYV/MJPG/UYVY color formats); every depth/IR node carries at
+    # least one. Used to keep the RealSense RGB node available to UVC/V4L2 while
+    # still routing its depth/IR nodes to the realsense driver only.
+    _DEPTH_IR_FMTS = {"Z16", "GREY", "Y8", "Y8I", "Y12I", "Y16", "Y10",
+                      "RW16", "W10", "CONFIDENCE"}
+
+    @staticmethod
+    def _list_pixel_formats(video_path):
+        """Fourcc set a node advertises (self-contained v4l2-ctl crawl)."""
+        try:
+            r = subprocess.run(["v4l2-ctl", "-d", video_path, "--list-formats"],
+                               capture_output=True, text=True, timeout=5)
+            out = r.stdout or ""
+        except Exception:
+            return set()
+        return {m.group(1) for m in re.finditer(r"\[\d+\]:\s*'(\w+)", out)}
+
+    @classmethod
+    def _classify_video_nodes(cls):
+        """
+        Split this RealSense's /dev/video* nodes into (color, depth_ir) by each
+        node's advertised pixel formats. The color (RGB) sensor node exposes
+        only color formats; depth/IR nodes expose at least one depth/mono
+        format. Nodes with no capture format (metadata siblings) are ignored.
+        """
+        color, depth_ir = [], []
+        for vpath in cls._list_video_paths():
+            fmts = cls._list_pixel_formats(vpath)
+            if not fmts:
+                continue
+            if fmts & cls._DEPTH_IR_FMTS:
+                depth_ir.append(vpath)
+            else:
+                color.append(vpath)
+        return color, depth_ir
+
+    @classmethod
+    def _list_depth_ir_video_paths(cls):
+        """RealSense depth/IR nodes only — the ones UVC/V4L2 must NOT surface."""
+        return cls._classify_video_nodes()[1]
+
+    @classmethod
+    def scan(cls):
+        """
+        Discover RealSense cameras. Serials come from the pyrealsense2 SDK; the
+        associated /dev/video* nodes come from a self-contained sysfs crawl.
+        Card field `serial_number` matches this class's yaml identifier key.
+        Raises RuntimeError (via get_realsense_module) if the SDK is missing.
+        """
+        serials = cls._list_serial_numbers()
+        video_paths = cls._list_video_paths()
+        cards = []
+        for sn in serials:
+            cards.append({"type": "realsense", "serial_number": sn,
+                          "video_paths": video_paths, "modes": cls._list_modes(sn)})
+        if not serials and video_paths:
+            # sysfs shows realsense nodes but the SDK reported no serials
+            cards.append({"type": "realsense", "serial_number": None,
+                          "video_paths": video_paths, "modes": []})
+        return cards
+
+    @classmethod
+    def _list_modes(cls, serial_number):
+        """
+        Color stream profiles the given RealSense exposes, via the pyrealsense2
+        SDK. Returns a list of {"stream", "format", "width", "height", "fps"}
+        dicts, one per (format, resolution) with its fps values collapsed.
+        Only the Color (RGB) stream is reported; depth / IR / motion streams
+        are handled by the realsense driver, not surfaced here.
+        """
+        rs = cls.get_realsense_module()
+        ctx = rs.context()
+        dev = None
+        for d in ctx.query_devices():
+            try:
+                if d.get_info(rs.camera_info.serial_number) == serial_number:
+                    dev = d
+                    break
+            except Exception:
+                continue
+        if dev is None:
+            return []
+        grouped = {}  # (stream, format, w, h) -> set(fps)
+        for sensor in dev.query_sensors():
+            for p in sensor.get_stream_profiles():
+                try:
+                    if p.stream_name() != "Color":
+                        continue
+                    vp = p.as_video_stream_profile()
+                    key = (p.stream_name(), str(p.format()).split(".")[-1],
+                           vp.width(), vp.height())
+                    grouped.setdefault(key, set()).add(p.fps())
+                except Exception:
+                    continue
+        modes = []
+        for (stream, fmt, w, h), fps_set in grouped.items():
+            modes.append({"stream": stream, "format": fmt, "width": w,
+                          "height": h, "fps": sorted(fps_set)})
+        return modes
+
+    @classmethod
+    def from_config(cls, cam_topic, cam_cfg, base_kwargs, realsense_enable):
+        serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
+        if not realsense_enable:
+            logger_mp.error(f"[Image Server] Please start image server with the '--rs' flag to support Realsense {cam_topic}.")
+            return None
+        # Self-contained resolution: RealSense runs its OWN scan (no CameraFinder).
+        serials = [c.get("serial_number") for c in cls.scan()]
+        if serial_number not in serials:
+            logger_mp.error(f"[Image Server] Cannot find RealSenseCamera for {cam_topic}")
+            return None
+        return cls(cam_topic, serial_number, **base_kwargs)
 
 class UVCCamera(BaseCamera):
     def __init__(self, cam_topic, uid, img_shape, fps, 
@@ -1234,60 +1233,676 @@ class UVCCamera(BaseCamera):
         # self.cap = None
         logger_mp.info(f"[UVCCamera] Released {self._cam_topic}")
 
-class OpenCVCamera(BaseCamera):
-    def __init__(self, cam_topic, video_path, img_shape, fps, 
+    @staticmethod
+    def _list_video_paths():
+        base = "/sys/class/video4linux/"
+        if not os.path.exists(base):
+            return []
+        return [f"/dev/{x}" for x in sorted(os.listdir(base)) if x.startswith("video")]
+
+    @staticmethod
+    def _is_like_rgb(video_path):
+        try:
+            container = av.open(video_path, format="v4l2")
+        except Exception:
+            return False
+        try:
+            for frame in container.decode(container.streams.video[0]):
+                return not frame.format.name.startswith("gray")
+            return False
+        except Exception:
+            return False
+        finally:
+            container.close()
+
+    @staticmethod
+    def _get_ppath_from_vpath(video_path):
+        sysfs_path = f"/sys/class/video4linux/{os.path.basename(video_path)}/device"
+        return os.path.realpath(sysfs_path)
+
+    @staticmethod
+    def _get_uid_from_ppath(physical_path):
+        def read_file(path):
+            return open(path).read().strip() if os.path.exists(path) else None
+
+        busnum_file = os.path.join(physical_path, "busnum")
+        devnum_file = os.path.join(physical_path, "devnum")
+        if not (os.path.exists(busnum_file) and os.path.exists(devnum_file)):
+            parent = os.path.dirname(physical_path)
+            busnum_file = os.path.join(parent, "busnum")
+            devnum_file = os.path.join(parent, "devnum")
+        if os.path.exists(busnum_file) and os.path.exists(devnum_file):
+            return f"{read_file(busnum_file)}:{read_file(devnum_file)}"
+        return None
+
+    @staticmethod
+    def _usb_attrs_from_ppath(physical_path):
+        """
+        Walk up from a video node's interface dir to the parent USB device dir
+        and read its identifier attributes straight from sysfs. Pure sysfs — no
+        libuvc, so it works even when the camera cannot be opened. Deliberately
+        duplicated from V4L2Camera (each camera class harvests its own ids).
+        Returns serial_number / bcd_device / vid_pid, plus name / manufacturer /
+        idVendor / idProduct for the discovery report.
+        """
+        def _read(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read().strip()
+            except Exception:
+                return None
+
+        d = physical_path
+        for _ in range(10):
+            if not d or d == "/" or not os.path.isdir(d):
+                break
+            vid = _read(os.path.join(d, "idVendor"))
+            pid = _read(os.path.join(d, "idProduct"))
+            if vid and pid:
+                return {
+                    "serial_number": _read(os.path.join(d, "serial")),
+                    "bcd_device": _read(os.path.join(d, "bcdDevice")),
+                    "vid_pid": f"{vid}:{pid}",
+                    "name": _read(os.path.join(d, "product")),
+                    "manufacturer": _read(os.path.join(d, "manufacturer")),
+                    "idVendor": vid,
+                    "idProduct": pid,
+                }
+            nxt = os.path.dirname(d)
+            if nxt == d:
+                break
+            d = nxt
+        return {"serial_number": None, "bcd_device": None, "vid_pid": None,
+                "name": None, "manufacturer": None, "idVendor": None, "idProduct": None}
+
+    @classmethod
+    def scan(cls):
+        """
+        Discover all UVC RGB cameras via a self-contained sysfs crawl (decoupled
+        from V4L2's; the duplication is intentional). Each card's fields map to
+        this class's yaml identifier keys (physical_path / serial_number /
+        bcd_device / vid_pid / video_id). The uid (busnum:devnum) that libuvc
+        needs to OPEN the device at runtime is likewise read from sysfs.
+        RealSense-owned nodes are NOT excluded here — that cross-driver
+        reconciliation is done by CameraFinder, which sees all drivers.
+        """
+        cards = []
+        for vpath in cls._list_video_paths():
+            if not cls._is_like_rgb(vpath):
+                continue
+            ppath = cls._get_ppath_from_vpath(vpath)
+            uid = cls._get_uid_from_ppath(ppath)
+            attrs = cls._usb_attrs_from_ppath(ppath)
+            cards.append({
+                "type": "uvc",
+                "video_path": vpath,
+                "video_id": int(vpath.replace("/dev/video", "")),
+                "physical_path": ppath,
+                "uid": uid,
+                "dev_info": {
+                    "name": attrs["name"],
+                    "manufacturer": attrs["manufacturer"],
+                    "idVendor": attrs["idVendor"],
+                    "idProduct": attrs["idProduct"],
+                },
+                "serial_number": attrs["serial_number"],
+                "bcd_device": attrs["bcd_device"],
+                "vid_pid": attrs["vid_pid"],
+            })
+        return cards
+
+    @classmethod
+    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
+        physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
+        serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
+        _bcd = cam_cfg.get("bcd_device")
+        bcd_device = f"{_bcd:04d}" if type(_bcd) is int else (str(_bcd) if _bcd else None)
+        vid_pid = str(cam_cfg.get("vid_pid")) if cam_cfg.get("vid_pid") else None
+
+        # Self-contained resolution: UVC runs its OWN scan and maps the yaml
+        # identifier to the libuvc uid needed to open the device. RealSense-owned
+        # nodes are dropped (libuvc cannot open them); this cross-driver exclusion
+        # is duplicated here on purpose so the driver needs no CameraFinder.
+        rs_paths = set(RealSenseCamera._list_video_paths())
+        cards = [c for c in cls.scan() if c["video_path"] not in rs_paths]
+
+        def _uid(key, value, unique):
+            matches = [c for c in cards if c.get(key) == value]
+            if unique and len(matches) > 1:
+                raise ValueError(f"Multiple UVCCamera found with {key} {value}")
+            return matches[0]["uid"] if matches else None
+
+        if physical_path is not None:
+            uid = _uid("physical_path", physical_path, unique=False)
+            if uid is None:
+                logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with physical path {physical_path}")
+            else:
+                return cls(cam_topic, uid, **base_kwargs)
+
+        # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
+        # ——— even if no camera matches the given path/serial.
+        if serial_number is not None:
+            uid = _uid("serial_number", serial_number, unique=True)
+            if uid is None:
+                logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with serial number {serial_number}")
+                return None
+            return cls(cam_topic, uid, **base_kwargs)
+
+        if bcd_device is not None:
+            uid = _uid("bcd_device", bcd_device, unique=True)
+            if uid is None:
+                logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with bcd_device {bcd_device}")
+                return None
+            return cls(cam_topic, uid, **base_kwargs)
+
+        if vid_pid is not None:
+            uid = _uid("vid_pid", vid_pid, unique=True)
+            if uid is None:
+                logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with vid_pid {vid_pid}")
+                return None
+            return cls(cam_topic, uid, **base_kwargs)
+
+        return None
+
+class V4L2Camera(BaseCamera):
+    def __init__(self, cam_topic, video_path, img_shape, fps,
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._video_path = video_path
 
-        self.cap = cv2.VideoCapture(self._video_path, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._img_shape[0])
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._img_shape[1])
-        self.cap.set(cv2.CAP_PROP_FPS, self._fps)
-        if not self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1):
-            logger_mp.info(f"[OpenCVCamera: {cam_topic}] CAP_PROP_BUFFERSIZE=1 not supported by backend, kernel buffer left at default")
+        # JPEG-first: default to MJPG (raw JPEG straight to ZMQ, decode lazily for
+        # WebRTC); fall back to YUYV (decode to BGR, re-encode for ZMQ) only when the
+        # device offers no MJPG. Captured through PyAV (libav v4l2 demuxer).
+        info = self._v4l2_device_info(video_path) or {}
+        formats = {m["format"] for m in info.get("modes", [])}
+        self._passthrough = "MJPG" in formats
+        input_format = "mjpeg" if self._passthrough else "yuyv422"
+
+        self.container = av.open(self._video_path, format="v4l2", options={
+            "input_format": input_format,
+            "video_size": f"{self._img_shape[1]}x{self._img_shape[0]}",
+            "framerate": str(self._fps),
+        })
+        self._demux = self.container.demux(self.container.streams.video[0])
 
         # Test if the camera can read frames
         if not self._can_read_frame():
             self.release()
-            raise RuntimeError(f"[OpenCVCamera] Camera {self._cam_topic} failed to initialize or read frames.")
+            raise RuntimeError(f"[V4L2Camera] Camera {self._cam_topic} failed to initialize or read frames.")
         else:
             logger_mp.info(str(self))
 
     def __str__(self):
         return (
-            f"[OpenCVCamera: {self._cam_topic}] initialized with "
+            f"[V4L2Camera: {self._cam_topic}] initialized with "
             f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
             f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
             f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
         )
         
     def _can_read_frame(self):
-        success, _ = self.cap.read()
-        return success
-    
-    def _update_frame(self):
-        if self.cap is not None:
-            ret, bgr_numpy = self.cap.read()
-            if ret:
-                if self._enable_webrtc:
-                    self._webrtc_buffer.write(bgr_numpy)
+        try:
+            return len(bytes(next(self._demux))) > 0
+        except StopIteration:
+            return False
 
-                if self._enable_zmq:
-                    ok, buf = cv2.imencode(".jpg", bgr_numpy)
-                    if ok:
-                        self._zmq_buffer.write(buf.tobytes())
-                
-                if not self._ready.is_set():
-                    self._ready.set()
-            else:
-                raise RuntimeError
+    def _update_frame(self):
+        if self.container is None:
+            return
+        packet = next(self._demux)
+        if self._passthrough:
+            # MJPG source: raw JPEG straight to ZMQ (no re-encode, like UVCCamera);
+            # decode to BGR lazily only when WebRTC needs it.
+            jpeg_bytes = bytes(packet)
+            if not jpeg_bytes:
+                return
+            if self._enable_zmq:
+                self._zmq_buffer.write(jpeg_bytes)
+            if self._enable_webrtc:
+                self._webrtc_buffer.write(_turbojpeg.decode(jpeg_bytes))
+        else:
+            # YUYV source: decode to BGR (libswscale); re-encode for ZMQ.
+            frames = packet.decode()
+            if not frames:
+                return
+            bgr_numpy = frames[0].to_ndarray(format="bgr24")
+            if self._enable_webrtc:
+                self._webrtc_buffer.write(bgr_numpy)
+            if self._enable_zmq:
+                self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
+
+        if not self._ready.is_set():
+            self._ready.set()
 
     def release(self):
-        self.cap.release()
-        self.cap = None
-        logger_mp.info(f"[OpenCVCamera] Released {self._cam_topic}")
+        c = getattr(self, "container", None)
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
+        self.container = None
+        logger_mp.info(f"[V4L2Camera] Released {self._cam_topic}")
+
+    @staticmethod
+    def _v4l2_device_info(video_path):
+        """
+        Query one node's capabilities + capture modes with `v4l2-ctl`.
+        Returns None when v4l2-ctl is missing or the node can't be queried.
+        """
+        def _run(extra):
+            try:
+                r = subprocess.run(["v4l2-ctl", "-d", video_path] + extra,
+                                   capture_output=True, text=True, timeout=5)
+                return r.stdout or ""
+            except Exception:
+                return ""
+
+        txt = _run(["--all"])
+        if not txt:
+            return None
+
+        modes = []
+        cur_fmt = None
+        for line in _run(["--list-formats-ext"]).splitlines():
+            mfmt = re.search(r"\[\d+\]:\s*'(\w+)'", line)
+            msize = re.search(r"Size:\s*\w+\s+(\d+)x(\d+)", line)
+            mint = re.search(r"Interval:.*\(([\d.]+)\s*fps\)", line)
+            if mfmt:
+                cur_fmt = mfmt.group(1)
+            elif msize:
+                modes.append({"format": cur_fmt, "width": int(msize.group(1)),
+                              "height": int(msize.group(2)), "fps": []})
+            elif mint and modes:
+                modes[-1]["fps"].append(float(mint.group(1)))
+
+        return {
+            "is_capture": "Video Capture" in txt,
+            "modes": modes,
+        }
+
+    @staticmethod
+    def _can_grab(video_path):
+        """
+        Definitive test that a node actually yields images. Many /dev/video*
+        nodes advertise a "Video Capture" capability but produce no frames —
+        e.g. the metadata / control sibling node that a UVC camera exposes
+        alongside its real node. Opened via PyAV (libav v4l2), like V4L2Camera.
+        """
+        try:
+            container = av.open(video_path, format="v4l2")
+        except Exception:
+            return False
+        try:
+            for packet in container.demux(container.streams.video[0]):
+                return len(bytes(packet)) > 0
+            return False
+        except Exception:
+            return False
+        finally:
+            container.close()
+
+    # --- Self-contained identifier harvest -------------------------------
+    # V4L2 owns its own sysfs crawl and does NOT reuse the UVC scan. The
+    # values it produces (physical_path / serial_number / bcd_device /
+    # vid_pid) match the UVC scan's when both drivers can see the device,
+    # but the logic is independent: a camera libuvc cannot open is still
+    # bindable here. (Duplication with UVCCamera is intentional — each
+    # camera class stays self-sufficient.)
+
+    @staticmethod
+    def _get_ppath_from_vpath(video_path):
+        sysfs_path = f"/sys/class/video4linux/{os.path.basename(video_path)}/device"
+        return os.path.realpath(sysfs_path)
+
+    @staticmethod
+    def _usb_attrs_from_ppath(physical_path):
+        """
+        Walk up from a video node's interface dir to the parent USB device
+        dir and read its identifier attributes straight from sysfs. Pure
+        sysfs — works even when libuvc cannot open the camera. Returns
+        {"serial_number", "bcd_device", "vid_pid"} (values may be None for
+        non-USB / CSI nodes). vid_pid is "xxxx:xxxx" to match the UVC scan.
+        """
+        def _read(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read().strip()
+            except Exception:
+                return None
+
+        d = physical_path
+        for _ in range(10):
+            if not d or d == "/" or not os.path.isdir(d):
+                break
+            vid = _read(os.path.join(d, "idVendor"))
+            pid = _read(os.path.join(d, "idProduct"))
+            if vid and pid:
+                return {
+                    "serial_number": _read(os.path.join(d, "serial")),
+                    "bcd_device": _read(os.path.join(d, "bcdDevice")),
+                    "vid_pid": f"{vid}:{pid}",
+                    "name": _read(os.path.join(d, "product")),
+                    "manufacturer": _read(os.path.join(d, "manufacturer")),
+                }
+            nxt = os.path.dirname(d)
+            if nxt == d:
+                break
+            d = nxt
+        return {"serial_number": None, "bcd_device": None, "vid_pid": None,
+                "name": None, "manufacturer": None}
+
+    @classmethod
+    def _list_identifiers(cls):
+        """
+        Harvest every /dev/video* node's stable identifiers via V4L2's own
+        sysfs crawl (decoupled from the UVC scan). Cheap: pure sysfs, no
+        v4l2-ctl and no cv2. Used by both scan() (report) and from_config()
+        (resolution).
+        """
+        base = "/sys/class/video4linux/"
+        if not os.path.exists(base):
+            return []
+        out = []
+        for name in sorted(os.listdir(base)):
+            if not name.startswith("video"):
+                continue
+            vpath = f"/dev/{name}"
+            ppath = cls._get_ppath_from_vpath(vpath)
+            attrs = cls._usb_attrs_from_ppath(ppath)
+            out.append({
+                "video_path": vpath,
+                "video_id": int(name.replace("video", "")),
+                "physical_path": ppath,
+                "serial_number": attrs["serial_number"],
+                "bcd_device": attrs["bcd_device"],
+                "vid_pid": attrs["vid_pid"],
+                "name": attrs["name"],
+                "manufacturer": attrs["manufacturer"],
+            })
+        return out
+
+    @classmethod
+    def _resolve_vpath(cls, ids, key, value):
+        """
+        Return the single capture node whose identifier `key` == `value`.
+        A UVC/CSI device exposes a real capture node plus metadata/control
+        siblings that share the same USB identifier, so matches are narrowed
+        to nodes that actually grab a frame; a still-ambiguous match (two
+        distinct cameras of the same model by vid_pid) raises.
+        """
+        matches = [r["video_path"] for r in ids if r.get(key) == value]
+        if not matches:
+            return None
+        grabbable = [v for v in matches if cls._can_grab(v)]
+        pool = grabbable or matches
+        if len(pool) > 1:
+            raise ValueError(f"Multiple V4L2 capture nodes match {key}={value}: {pool}")
+        return pool[0]
+
+    @classmethod
+    def scan(cls):
+        """
+        Discover V4L2 capture nodes via a self-contained `v4l2-ctl` crawl.
+        Unlike the UVC scan this also surfaces GMSL / MIPI-CSI nodes that carry
+        no USB descriptor. Card field `video_id` maps to this class's yaml
+        identifier; USB cameras can still be pinned by serial_number / bcd_device
+        / vid_pid, which are resolved through the UVC scan by CameraFinder.
+
+        A node is only reported if it (a) advertises Video Capture, (b) exposes
+        at least one capture pixel format, and (c) actually grabs a frame — so
+        metadata / control nodes that can't produce images are filtered out.
+        """
+        base = "/sys/class/video4linux/"
+        if not os.path.exists(base):
+            return []
+        id_map = {r["video_path"]: r for r in cls._list_identifiers()}
+        cards = []
+        for name in sorted(os.listdir(base)):
+            if not name.startswith("video"):
+                continue
+            vpath = f"/dev/{name}"
+            info = cls._v4l2_device_info(vpath)
+            if info is None or not info.get("is_capture"):
+                continue
+            if not info.get("modes"):        # metadata / control node: no capture formats
+                continue
+            if not cls._can_grab(vpath):      # declares capture but yields no frame
+                continue
+            ident = id_map.get(vpath, {})
+            cards.append({
+                "type": "v4l2",
+                "video_path": vpath,
+                "video_id": int(name.replace("video", "")),
+                "physical_path": ident.get("physical_path"),
+                "serial_number": ident.get("serial_number"),
+                "bcd_device": ident.get("bcd_device"),
+                "vid_pid": ident.get("vid_pid"),
+                "name": ident.get("name"),
+                "manufacturer": ident.get("manufacturer"),
+                "modes": info.get("modes", []),
+            })
+        return cards
+
+    @classmethod
+    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
+        video_id = cam_cfg.get("video_id", "0")
+        video_path = f"/dev/video{video_id}" if video_id else None
+        physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
+        serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
+        _bcd = cam_cfg.get("bcd_device")
+        bcd_device = f"{_bcd:04d}" if type(_bcd) is int else (str(_bcd) if _bcd else None)
+        vid_pid = str(cam_cfg.get("vid_pid")) if cam_cfg.get("vid_pid") else None
+
+        # Self-contained resolution: V4L2 harvests its OWN sysfs identifiers (no
+        # CameraFinder). A camera libuvc cannot open is still bindable by
+        # physical_path / serial_number / bcd_device / vid_pid.
+        ids = cls._list_identifiers()
+
+        if physical_path is not None:
+            vpath = cls._resolve_vpath(ids, "physical_path", physical_path)
+            if vpath is None:
+                logger_mp.error(f"[Image Server] Cannot find V4L2Camera for {cam_topic} with physical path {physical_path}")
+            else:
+                return cls(cam_topic, vpath, **base_kwargs)
+
+        # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
+        # ——— even if no camera matches the given path/serial.
+        if serial_number is not None:
+            vpath = cls._resolve_vpath(ids, "serial_number", serial_number)
+            if vpath is None:
+                logger_mp.error(f"[Image Server] Cannot find V4L2Camera for {cam_topic} with serial number {serial_number}")
+                return None
+            return cls(cam_topic, vpath, **base_kwargs)
+
+        if bcd_device is not None:
+            vpath = cls._resolve_vpath(ids, "bcd_device", bcd_device)
+            if vpath is None:
+                logger_mp.error(f"[Image Server] Cannot find V4L2Camera for {cam_topic} with bcd_device {bcd_device}")
+                return None
+            return cls(cam_topic, vpath, **base_kwargs)
+
+        if vid_pid is not None:
+            vpath = cls._resolve_vpath(ids, "vid_pid", vid_pid)
+            if vpath is None:
+                logger_mp.error(f"[Image Server] Cannot find V4L2Camera for {cam_topic} with vid_pid {vid_pid}")
+                return None
+            return cls(cam_topic, vpath, **base_kwargs)
+
+        if not any(r["video_path"] == video_path for r in ids):
+            logger_mp.error(f"[Image Server] Cannot find V4L2Camera for {cam_topic} with video_id {video_id}")
+            return None
+        return cls(cam_topic, video_path, **base_kwargs)
+
+class GStreamerCamera(BaseCamera):
+    def __init__(self, cam_topic, gst_pipeline, img_shape, fps,
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
+        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+        self._Gst = self.check_gi_install()
+        self._pipeline_str = gst_pipeline
+
+        # single pipeline ending in an appsink; composite (e.g. binocular) inside
+        # the pipeline itself with compositor if you need to merge multiple sources.
+        self.pipe, self.sink = self._start_pipeline(self._pipeline_str)
+
+        # Test if the camera can read frames
+        if not self._can_read_frame():
+            self.release()
+            raise RuntimeError(f"[GStreamerCamera] Camera {self._cam_topic} failed to initialize or read frames.")
+        else:
+            logger_mp.info(str(self))
+
+    def __str__(self):
+        return (
+            f"[GStreamerCamera: {self._cam_topic}] initialized with "
+            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
+            f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
+            f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
+        )
+
+    def check_gi_install(self):
+        try:
+            import gi
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+            if not Gst.is_initialized():
+                Gst.init(None)
+            return Gst
+        except Exception as e:
+            raise ImportError(
+                "PyGObject/GStreamer not installed. Install with:\n"
+                "    sudo apt install python3-gi python3-gst-1.0 "
+                "gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad"
+            ) from e
+
+    def _start_pipeline(self, pipeline_str):
+        Gst = self._Gst
+        pipe = Gst.parse_launch(pipeline_str)
+        # locate the appsink: prefer name=sink, otherwise the first appsink element
+        sink = pipe.get_by_name("sink")
+        if sink is None:
+            it = pipe.iterate_sinks()
+            while True:
+                ok, elem = it.next()
+                if ok != Gst.IteratorResult.OK:
+                    break
+                factory = elem.get_factory()
+                if factory is not None and factory.get_name() == "appsink":
+                    sink = elem
+                    break
+        if sink is None:
+            raise RuntimeError(f"[GStreamerCamera] pipeline must contain an appsink (optionally name=sink): {pipeline_str}")
+        # JPEG-first (mirrors UVCCamera): the appsink receives encoded MJPG/JPEG
+        # buffers, forwarded verbatim to ZMQ with NO decode. Decoding to BGR happens
+        # lazily in _update_frame only when WebRTC needs it. The pipeline MUST
+        # therefore deliver image/jpeg to the appsink (v4l2 MJPG source needs no
+        # decode; a raw source needs a jpegenc/nvjpegenc before the appsink).
+        sink.set_property("emit-signals", False)
+        sink.set_property("sync", False)
+        sink.set_property("max-buffers", 1)
+        sink.set_property("drop", True)
+        sink.set_property("caps", Gst.Caps.from_string("image/jpeg"))
+        pipe.set_state(Gst.State.PLAYING)
+        return pipe, sink
+
+    def _pull_jpeg(self, sink, timeout_ns=1_000_000_000):
+        """Pull one encoded JPEG buffer from the appsink and return its raw bytes."""
+        Gst = self._Gst
+        sample = sink.emit("try-pull-sample", timeout_ns)
+        if sample is None:
+            return None
+        buf = sample.get_buffer()
+        ok, mapinfo = buf.map(Gst.MapFlags.READ)
+        if not ok:
+            return None
+        try:
+            jpeg = bytes(mapinfo.data)
+        finally:
+            buf.unmap(mapinfo)
+        return jpeg
+
+    def _can_read_frame(self):
+        # first frame may need extra time for the source to warm up (e.g. CSI nvarguscamerasrc ~2s)
+        return self._pull_jpeg(self.sink, timeout_ns=5_000_000_000) is not None
+
+    def _update_frame(self):
+        jpeg_bytes = self._pull_jpeg(self.sink)
+        if jpeg_bytes is None:
+            raise RuntimeError
+
+        # ZMQ gets the raw JPEG bytes directly — no re-encode (like UVCCamera).
+        if self._enable_zmq:
+            self._zmq_buffer.write(jpeg_bytes)
+
+        # WebRTC needs raw BGR frames, so decode lazily only when it is enabled.
+        if self._enable_webrtc:
+            self._webrtc_buffer.write(_turbojpeg.decode(jpeg_bytes))
+
+        if not self._ready.is_set():
+            self._ready.set()
+
+    def release(self):
+        p = getattr(self, "pipe", None)
+        if p is not None:
+            try:
+                p.set_state(self._Gst.State.NULL)
+            except Exception:
+                pass
+        self.pipe = None
+        logger_mp.info(f"[GStreamerCamera] Released {self._cam_topic}")
+
+    @classmethod
+    def scan(cls):
+        """
+        GStreamer cameras are registration-based (登记式): the user hand-writes a
+        `gst_pipeline`, so there is nothing to auto-instantiate. As a convenience for
+        `--cf`, if `gst-device-monitor-1.0` is available we surface candidate
+        Video/Source devices as ready-to-edit pipeline hints. Self-contained probe.
+        """
+        try:
+            r = subprocess.run(["gst-device-monitor-1.0", "Video/Source"],
+                               capture_output=True, text=True, timeout=5)
+            txt = r.stdout or ""
+        except Exception:
+            return []
+        cards = []
+        name, device = None, None
+        for line in txt.splitlines():
+            s = line.strip()
+            mname = re.match(r"name\s*:\s*(.+)", s)
+            mdev = re.match(r"device\.path\s*=\s*(/dev/video\d+)", s)
+            mlaunch = re.search(r"gst-launch-1\.0\s+(.+)", s)
+            if mname:
+                name = mname.group(1).strip()
+            elif mdev:
+                device = mdev.group(1)
+            elif mlaunch:
+                # gst-device-monitor prints the source ending in a literal " ! ..."
+                # placeholder; drop it and attach a JPEG appsink tail (JPEG-first,
+                # see _start_pipeline). MJPG sources need no encoder; raw sources
+                # need a jpegenc inserted before the appsink — edit the hint to suit.
+                # The launch line omits device= for the default node (video0), so
+                # pin the src to device.path explicitly to avoid ambiguity.
+                launch = mlaunch.group(1).strip()
+                launch = re.sub(r"\s*!\s*\.\.\.\s*$", "", launch).rstrip("! ").strip()
+                if device and "device=" not in launch:
+                    launch = re.sub(r"^v4l2src\b", f"v4l2src device={device}", launch)
+                cards.append({
+                    "type": "gstreamer",
+                    "name": name,
+                    "device": device,
+                    "gst_pipeline": f"{launch} ! image/jpeg ! appsink name=sink",
+                })
+                name, device = None, None
+        return cards
+
+    @classmethod
+    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
+        gst_pipeline = cam_cfg.get("gst_pipeline")
+        if not gst_pipeline:
+            logger_mp.error(f"[Image Server] type 'gstreamer' for {cam_topic} requires a 'gst_pipeline' (must contain appsink).")
+            return None
+        return cls(cam_topic, gst_pipeline, **base_kwargs)
 
 class IsaacSimCamera(BaseCamera):
     def __init__(self, cam_topic, img_shape, fps,
@@ -1337,7 +1952,7 @@ class IsaacSimCamera(BaseCamera):
             logger_mp.debug(f"[IsaacSimCamera] {self._cam_topic} - left: {left_img is not None}, right: {right_img is not None}")
 
             if left_img is not None and right_img is not None:
-                frame_data = cv2.hconcat([left_img, right_img])
+                frame_data = np.hstack([left_img, right_img])
                 logger_mp.debug(f"[IsaacSimCamera] {self._cam_topic} - concatenated binocular frame: {frame_data.shape}")
         else:
             # For monocular cameras: use the specified source directly
@@ -1349,11 +1964,7 @@ class IsaacSimCamera(BaseCamera):
         if frame_data is not None:
             # For ZMQ: encode to JPEG bytes
             if self._enable_zmq:
-                ok, buf = cv2.imencode(".jpg", frame_data)
-                if ok:
-                    self._zmq_buffer.write(buf.tobytes())
-                else:
-                    logger_mp.warning(f"[IsaacSimCamera] Failed to encode to JPEG for {self._cam_topic}")
+                self._zmq_buffer.write(_turbojpeg.encode(frame_data))
 
             # For WebRTC: use BGR frames directly
             if self._enable_webrtc:
@@ -1371,6 +1982,32 @@ class IsaacSimCamera(BaseCamera):
             self.multi_image_reader.close()
         self.multi_image_reader = None
         logger_mp.info(f"[IsaacSimCamera] Released {self._cam_topic}")
+
+    @classmethod
+    def scan(cls):
+        """IsaacSim cameras are virtual (shared-memory / topic-convention based);
+        there is no physical device to discover."""
+        return []
+
+    @classmethod
+    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
+        # Check if binocular mode is enabled
+        binocular = cam_cfg.get("binocular", False)
+
+        # For IsaacSim cameras, determine image source based on camera topic and binocular setting
+        if binocular:
+            # Binocular cameras (like head) need to read left+right and concatenate
+            image_source = "head"  # Special marker for binocular
+        else:
+            # Monocular cameras read their specific source
+            if "left" in cam_topic.lower():
+                image_source = "left"
+            elif "right" in cam_topic.lower():
+                image_source = "right"
+            else:
+                image_source = "head"  # fallback
+
+        return cls(cam_topic, image_source=image_source, binocular=binocular, **base_kwargs)
 # ========================================================
 # image server
 # ========================================================
@@ -1383,7 +2020,13 @@ class ImageServer:
         self._stop_event = threading.Event()
         self._cameras: dict[str, BaseCamera] = {}
         if not self._isaacsim_enable:
-            self._cam_finder = CameraFinder(realsense_enable, camera_finder_verbose)
+            # UVC/V4L2 drivers resolve their own devices in from_config(); the
+            # finder is only a discovery reporter now. Still reload uvcvideo once
+            # so nodes enumerate cleanly before any camera is opened.
+            if camera_finder_verbose:
+                CameraFinder(realsense_enable, verbose=True)   # reloads uvcvideo + prints discovery
+            else:
+                reload_uvc_driver()
         self._responser = ZMQ_Responser(self._cam_config)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
@@ -1405,139 +2048,22 @@ class ImageServer:
                     cam_type = "isaacsim"
                 img_shape = cam_cfg.get("image_shape", None)
                 fps = cam_cfg.get("fps", 30)
-                video_id = cam_cfg.get("video_id", "0")
-                video_path = f"/dev/video{video_id}" if video_id else None
-                physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
-                serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
-                _bcd = cam_cfg.get("bcd_device")
-                bcd_device = f"{_bcd:04d}" if type(_bcd) is int else (str(_bcd) if _bcd else None)
-                vid_pid = str(cam_cfg.get("vid_pid")) if cam_cfg.get("vid_pid") else None
+                base_kwargs = dict(
+                    img_shape=img_shape, fps=fps,
+                    enable_zmq=enable_zmq, zmq_port=zmq_port,
+                    enable_webrtc=enable_webrtc, webrtc_port=webrtc_port, webrtc_codec=webrtc_codec,
+                )
 
-                if cam_type == "opencv":
-                    if physical_path is not None:
-                        vpath = self._cam_finder.get_vpath_by_ppath(physical_path)
-                        if vpath is None:
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with physical path {physical_path}")
-                        else:
-                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps, 
-                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                            continue
-
-                    if serial_number is not None:
-                        vpath = self._cam_finder.get_vpath_by_sn(serial_number)
-                        if vpath is None:
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with serial number {serial_number}")
-                        else:
-                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
-                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                        # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
-                        # ——— even if no camera matches the given path/serial.
-                        continue
-
-                    if bcd_device is not None:
-                        vpath = self._cam_finder.get_vpath_by_bcddevice(bcd_device)
-                        if vpath is None:
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with bcd_device {bcd_device}")
-                        else:
-                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
-                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                        continue
-
-                    if vid_pid is not None:
-                        vpath = self._cam_finder.get_vpath_by_vidpid(vid_pid)
-                        if vpath is None:
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with vid_pid {vid_pid}")
-                        else:
-                            self._cameras[cam_topic] = OpenCVCamera(cam_topic, vpath, img_shape, fps,
-                                                                    enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                        continue
-
-                    if not self._cam_finder.is_vpath_exist(video_path):
-                        self._cameras[cam_topic] = None
-                        logger_mp.error(f"[Image Server] Cannot find OpenCVCamera for {cam_topic} with video_id {video_id}")
-                    else:
-                        self._cameras[cam_topic] = OpenCVCamera(cam_topic, video_path, img_shape, fps,
-                                                                enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                        
-
+                if cam_type == "v4l2":
+                    self._cameras[cam_topic] = V4L2Camera.from_config(cam_topic, cam_cfg, base_kwargs)
                 elif cam_type == "realsense":
-                    if not self._realsense_enable:
-                        self._cameras[cam_topic] = None
-                        logger_mp.error(f"[Image Server] Please start image server with the '--rs' flag to support Realsense {cam_topic}.")
-                    elif not self._cam_finder.is_rs_serial_exist(serial_number):
-                        self._cameras[cam_topic] = None
-                        logger_mp.error(f"[Image Server] Cannot find RealSenseCamera for {cam_topic}")
-                    else:
-                        self._cameras[cam_topic] = RealSenseCamera(cam_topic, serial_number, img_shape, fps,
-                                                                   enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-
+                    self._cameras[cam_topic] = RealSenseCamera.from_config(cam_topic, cam_cfg, base_kwargs, self._realsense_enable)
                 elif cam_type == "uvc":
-                    uid = None
-                    if physical_path is not None:
-                        uid = self._cam_finder.get_uid_by_ppath(physical_path)
-                        if uid is None:
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with physical path {physical_path}")
-                        else:
-                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps, 
-                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                            continue
-
-                    if serial_number is not None:
-                        uid = self._cam_finder.get_uid_by_sn(serial_number)
-                        if uid is None:
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with serial number {serial_number}")
-                        else:
-                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
-                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                        # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
-                        # ——— even if no camera matches the given path/serial.
-                        continue
-
-                    if bcd_device is not None:
-                        uid = self._cam_finder.get_uid_by_bcddevice(bcd_device)
-                        if uid is None:
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with bcd_device {bcd_device}")
-                        else:
-                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
-                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                        continue
-
-                    if vid_pid is not None:
-                        uid = self._cam_finder.get_uid_by_vidpid(vid_pid)
-                        if uid is None:
-                            self._cameras[cam_topic] = None
-                            logger_mp.error(f"[Image Server] Cannot find UVCCamera for {cam_topic} with vid_pid {vid_pid}")
-                        else:
-                            self._cameras[cam_topic] = UVCCamera(cam_topic, uid, img_shape, fps,
-                                                                 enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-                        continue
+                    self._cameras[cam_topic] = UVCCamera.from_config(cam_topic, cam_cfg, base_kwargs)
+                elif cam_type == "gstreamer":
+                    self._cameras[cam_topic] = GStreamerCamera.from_config(cam_topic, cam_cfg, base_kwargs)
                 elif cam_type == "isaacsim":
-                    # Check if binocular mode is enabled
-                    binocular = cam_cfg.get("binocular", False)
-
-                    # For IsaacSim cameras, determine image source based on camera topic and binocular setting
-                    if binocular:
-                        # Binocular cameras (like head) need to read left+right and concatenate
-                        image_source = "head"  # Special marker for binocular
-                    else:
-                        # Monocular cameras read their specific source
-                        if "left" in cam_topic.lower():
-                            image_source = "left"
-                        elif "right" in cam_topic.lower():
-                            image_source = "right"
-                        else:
-                            image_source = "head"  # fallback
-
-                    self._cameras[cam_topic] = IsaacSimCamera(cam_topic, img_shape, fps,
-                                                                enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec,
-                                                                image_source=image_source, binocular=binocular)
+                    self._cameras[cam_topic] = IsaacSimCamera.from_config(cam_topic, cam_cfg, base_kwargs)
                 else:
                     logger_mp.error(f"[Image Server] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                     continue
@@ -1747,7 +2273,7 @@ def main():
     # command line args
     parser = argparse.ArgumentParser()
     parser.add_argument('--cf', action = 'store_true', help = 'Enable camera found mode, print all connected cameras info')
-    parser.add_argument('--rs', action = 'store_true', help = 'Enable RealSense camera mode. Otherwise only find UVC/OpenCV cameras.')
+    parser.add_argument('--rs', action = 'store_true', help = 'Enable RealSense camera mode. Otherwise only find UVC/V4L2 cameras.')
     parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Disable CPU affinity setting for performance optimization.')
     args = parser.parse_args()
 

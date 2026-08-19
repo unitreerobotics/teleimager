@@ -21,6 +21,8 @@ server = [
     "aiohttp",
     "aiortc",
     "pupil-labs-uvc",
+    "av",
+    "PyTurboJPEG",
 ]
 
 [project.urls]

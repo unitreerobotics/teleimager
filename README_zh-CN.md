@@ -14,7 +14,7 @@
 
 ## 1. 图像服务器（Image Server）
 
-该仓库提供一个图像服务器，用于从多路摄像头（UVC、OpenCV 和 RealSense）采集视频流，并使用 ZeroMQ 或 WebRTC 方式进行网络发布。
+该仓库提供一个图像服务器，用于从多路摄像头（UVC、V4L2、GStreamer 和 RealSense）采集视频流，并使用 ZeroMQ 或 WebRTC 方式进行网络发布。
 
 目前 Tele Imager 用于 [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate) 项目中提供遥操作视频流。
 
@@ -24,7 +24,7 @@
 
 ### 1.0 ✨ 特性
 
-- 📸 支持多路 UVC、OpenCV 和 Intel RealSense 摄像头
+- 📸 支持多路 UVC、V4L2、GStreamer 和 Intel RealSense 摄像头
 - 📢 使用 **ZeroMQ PUB-SUB** 方式发布视频帧
 - 📢 使用 **WebRTC** 方式发布视频帧
 - 💬 通过 **ZeroMQ REQ-REP** 方式响应图像配置指令
