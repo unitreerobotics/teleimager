@@ -19,6 +19,7 @@ import argparse
 import glob
 from turbojpeg import TurboJPEG
 import numpy as np
+import av
 # uvc will be imported when needed
 import yaml
 import time
@@ -37,7 +38,6 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.rtcrtpsender import RTCRtpSender
 from aiortc.contrib.media import MediaRelay
 from aiortc.codecs import h264
-import av
 import ssl
 from pathlib import Path
 import queue
@@ -175,7 +175,7 @@ INDEX_HTML = """
 <body>
     <h1>
         <a href="https://github.com/unitreerobotics/teleimager" target="_blank">
-            XR Teleoperation WebRTC Camera Stream
+            Teleimager · WebRTC Stream
         </a>
     </h1>
 
@@ -611,12 +611,11 @@ class WebRTC_PublisherManager:
 # ========================================================
 # UVC driver reload
 # ========================================================
-def reload_uvc_driver():
+def reload_uvcvideo_module():
     try:
         subprocess.run("sudo modprobe -r uvcvideo", shell=True, check=True)
-        time.sleep(1)
         subprocess.run("sudo modprobe uvcvideo debug=0", shell=True, check=True)
-        time.sleep(1)
+        subprocess.run("sudo udevadm settle", shell=True, check=True)
         logger_mp.info("UVC driver reloaded successfully.")
     except subprocess.CalledProcessError as e:
         logger_mp.error(f"Failed to reload driver: {e}")
@@ -628,48 +627,48 @@ class CameraFinder:
     """
     Discover connected cameras and their properties.
     """
-    def __init__(self, realsense_enable=False, verbose=False):
-        self.realsense_enable = realsense_enable
+    def __init__(self, enable_uvc=True, enable_v4l2=True, enable_gstreamer=True, enable_realsense=False, verbose=False):
+        self.enable_uvc = enable_uvc
+        self.enable_v4l2 = enable_v4l2
+        self.enable_gstreamer = enable_gstreamer
+        self.enable_realsense = enable_realsense
         if verbose:
-            self.info()
+            self.report()
 
-    def info(self):
-        # Pure reporter: scan every driver, reconcile cross-driver overlaps, and
-        # print one discovery tree. No lookup tables are kept — each camera driver
-        # resolves its own device in from_config(), so the finder only reports.
-        reload_uvc_driver()
+    def report(self):
+        reload_uvcvideo_module()
+        """
+        TeleImager image server: multi-camera capture (UVC / V4L2 / GStreamer /
+        RealSense) published over ZMQ and WebRTC.
 
-        rs_cards = RealSenseCamera.scan() if self.realsense_enable else []
-        rs_all_paths = set(RealSenseCamera._list_video_paths())
-        rs_depth_ir = set(RealSenseCamera._list_depth_ir_video_paths())
+        Path glossary (all strings, used throughout this module):
+        - video_path / vpath  — V4L2 device node /dev/videoN; open() it to grab frames
+        - color path / cpath  — a video_path advertising color formats (YUYV/MJPG)
+        - depth/IR path       — a video_path advertising depth/mono formats (Z16/GREY/...)
+        - physical_path/ppath — sysfs USB topology /sys/devices/.../1-3.1:1.0; stable per port
+        - sysfs_path          — /sys/class/video4linux/videoN; the node's sysfs dir
+        """
+        rs_cards = RealSenseCamera.scan() if self.enable_realsense else []
+        rs_video_paths = set(RealSenseCamera._list_video_paths())
+        rs_depth_ir_paths = set(RealSenseCamera._list_depth_ir_paths())
 
-        # UVC report drops ALL RealSense-owned nodes (libuvc cannot open the
-        # multi-interface UVC composite → "Operation not supported"). V4L2 /
-        # GStreamer reports drop only depth/IR nodes — the kernel uvcvideo driver
-        # CAN drive the RealSense COLOR node as an ordinary RGB camera. Depth/IR
-        # classification is pure sysfs + v4l2-ctl (no SDK), so it works even when
-        # --rs is off.
-        uvc_rgb = {c["video_path"]: c for c in UVCCamera.scan()
-                   if c["video_path"] not in rs_all_paths}
-        v4l2_cards = [c for c in V4L2Camera.scan()
-                      if c["video_path"] not in rs_depth_ir]
-        gst_cards = [c for c in GStreamerCamera.scan()
-                     if c.get("device") not in rs_depth_ir]
+        uvc_cards = [c for c in UVCCamera.scan() if c["video_path"] not in rs_video_paths] if self.enable_uvc else []
+        v4l2_cards = [c for c in V4L2Camera.scan() if c["video_path"] not in rs_depth_ir_paths] if self.enable_v4l2 else []
+        gst_cards = [c for c in GStreamerCamera.scan() if c["video_path"] not in rs_depth_ir_paths] if self.enable_gstreamer else []
 
         branches = [
             self._report_realsense(rs_cards),
-            self._report_uvc(uvc_rgb),
-            self._report_v4l2(v4l2_cards),               # report-only heavy probe (v4l2-ctl)
-            self._report_gstreamer(gst_cards),           # registration-based hints
+            self._report_uvc(uvc_cards),
+            self._report_v4l2(v4l2_cards),
+            self._report_gstreamer(gst_cards),
         ]
         branches = [b for b in branches if b is not None]
 
-        logger_mp.info("Camera Discovery")
-        self._print_children(branches, "")
+        logger_mp.info("🖼️ Camera Finder Report")
+        self._print_children(branches, "🖼️ ")
 
     @staticmethod
     def _print_children(children, prefix):
-        """Render a tree. Each node is a (label, children) tuple; a leaf has []."""
         n = len(children)
         for i, (label, sub) in enumerate(children):
             last = i == n - 1
@@ -700,31 +699,26 @@ class CameraFinder:
                     mode_kids = []
                     for m in sorted(by_stream[stream], key=lambda x: (x["format"], x["width"], x["height"])):
                         fps_str = ", ".join(str(f) for f in m["fps"])
-                        mode_kids.append(self._leaf("%-6s %dx%d @ [%s]" % (
-                            m["format"], m["width"], m["height"], fps_str)))
+                        mode_kids.append(self._leaf("%-6s %dx%d @ [%s]" % (m["format"], m["width"], m["height"], fps_str)))
                     stream_kids.append((stream, mode_kids))
                 fields.append(("modes  [format  width x height @ fps]:", stream_kids))
             cams.append(("RealSense", fields))
-        return ("RealSenseCamera (%d)   [type: realsense]" % len(cams), cams)
+        return ("RealSenseCamera (%d found)   [type: realsense]" % len(cams), cams)
 
-    def _report_uvc(self, cameras):
-        if not cameras:
+    def _report_uvc(self, cards):
+        if not cards:
             return None
         cams = []
-        for vpath, cam in cameras.items():
+        for cam in cards:
             dev_info = cam.get("dev_info") or {}
             uid = cam.get("uid") or "?"
-            vid = dev_info.get("idVendor", "?")
-            pid = dev_info.get("idProduct", "?")
+            vid = dev_info.get("idVendor") or "?"
+            pid = dev_info.get("idProduct") or "?"
             bcd = cam.get("bcd_device") or "?"
             sn = cam.get("serial_number") or "(none)"
-            name = dev_info.get("name", "?")
-            mfr = dev_info.get("manufacturer", "?")
+            name = dev_info.get("name") or "?"
+            mfr = dev_info.get("manufacturer") or "?"
 
-            # format bcdDevice from "0200" → "2.00"
-            bcd_display = bcd
-            if bcd and bcd != "?" and len(bcd) == 4:
-                bcd_display = f"{bcd} (v{int(bcd[:2])}.{bcd[2:]})"
             if isinstance(vid, int) and isinstance(pid, int):
                 vidpid_str = f"{vid:04x}:{pid:04x}"
             else:
@@ -733,12 +727,12 @@ class CameraFinder:
             fields = [
                 self._leaf("%-14s: %s" % ("physical_path", cam.get("physical_path"))),
                 self._leaf("%-14s: %s" % ("serial_number", sn)),
-                self._leaf("%-14s: %-15s(USB device release number)" % ("bcdDevice", bcd_display)),
+                self._leaf("%-14s: %-15s(USB device release number)" % ("bcdDevice", bcd)),
                 self._leaf("%-14s: %-15s(VendorID : ProductID)" % ("vid : pid", vidpid_str)),
                 self._leaf("%-14s: %-15s(/dev/video%s)" % ("video_id", cam.get("video_id"), cam.get("video_id"))),
             ]
 
-            # Supported modes: group by resolution, collapse identical fps lists
+            # group by resolution, collapse identical fps lists
             try:
                 import uvc
                 cap = uvc.Capture(uid)
@@ -760,23 +754,17 @@ class CameraFinder:
                 pass
 
             cams.append(("%s (%s)" % (name, mfr), fields))
-        return ("UVCCamera (%d)   [type: uvc]" % len(cams), cams)
+        return ("UVCCamera (%d found)   [type: uvc]" % len(cams), cams)
 
     def _report_v4l2(self, cards):
         if not cards:
             return None
         cams = []
         for c in cards:
-            bcd = c.get("bcd_device") or "?"
-            # format bcdDevice from "0200" → "2.00"
-            bcd_display = bcd
-            if bcd and bcd != "?" and len(bcd) == 4:
-                bcd_display = f"{bcd} (v{int(bcd[:2])}.{bcd[2:]})"
-
             fields = [
                 self._leaf("%-14s: %s" % ("physical_path", c.get("physical_path"))),
                 self._leaf("%-14s: %s" % ("serial_number", c.get("serial_number") or "(none)")),
-                self._leaf("%-14s: %-15s(USB device release number)" % ("bcdDevice", bcd_display)),
+                self._leaf("%-14s: %-15s(USB device release number)" % ("bcdDevice", c.get("bcd_device") or "?")),
                 self._leaf("%-14s: %-15s(VendorID : ProductID)" % ("vid : pid", c.get("vid_pid") or "(none)")),
                 self._leaf("%-14s: %-15s(/dev/video%s)" % ("video_id", c.get("video_id"), c.get("video_id"))),
             ]
@@ -792,7 +780,7 @@ class CameraFinder:
             name = c.get("name") or c["video_path"]
             mfr = c.get("manufacturer") or "?"
             cams.append(("%s (%s)" % (name, mfr), fields))
-        return ("V4L2Camera (%d)   [type: v4l2]" % len(cams), cams)
+        return ("V4L2Camera (%d found)   [type: v4l2]" % len(cams), cams)
 
     def _report_gstreamer(self, cards):
         if not cards:
@@ -803,11 +791,11 @@ class CameraFinder:
                 self._leaf("type: gstreamer"),
                 self._leaf('gst_pipeline: "%s"' % c.get("gst_pipeline")),
             ]))
-        return ("GStreamerCamera (%d)   [type: gstreamer]" % len(cams), cams)
+        return ("GStreamerCamera (%d found)   [type: gstreamer]" % len(cams), cams)
 
 class BaseCamera:
     def __init__(self, cam_topic, img_shape, fps, 
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
         self._ready = threading.Event()
         self._cam_topic = cam_topic
         self._img_shape = img_shape # (H, W)
@@ -882,7 +870,7 @@ class BaseCamera:
 
 class RealSenseCamera(BaseCamera):
     def __init__(self, cam_topic, serial_number, img_shape, fps, 
-                 enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None, enable_depth=False):
+                 enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None, enable_depth=False):
         rs = self._check_pyrealsense2_install()
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._serial_number = serial_number
@@ -1059,8 +1047,7 @@ class RealSenseCamera(BaseCamera):
     # these (only YUYV/MJPG/UYVY color formats); every depth/IR node carries at
     # least one. Used to keep the RealSense RGB node available to UVC/V4L2 while
     # still routing its depth/IR nodes to the realsense driver only.
-    _DEPTH_IR_FMTS = {"Z16", "GREY", "Y8", "Y8I", "Y12I", "Y16", "Y10",
-                      "RW16", "W10", "CONFIDENCE"}
+    _DEPTH_IR_FMTS = {"Z16", "GREY", "Y8", "Y8I", "Y12I", "Y16", "Y10", "RW16", "W10", "CONFIDENCE"}
 
     @staticmethod
     def _list_pixel_formats(video_path):
@@ -1093,7 +1080,7 @@ class RealSenseCamera(BaseCamera):
         return color, depth_ir
 
     @classmethod
-    def _list_depth_ir_video_paths(cls):
+    def _list_depth_ir_paths(cls):
         """RealSense depth/IR nodes only — the ones UVC/V4L2 must NOT surface."""
         return cls._classify_video_nodes()[1]
 
@@ -1157,9 +1144,9 @@ class RealSenseCamera(BaseCamera):
         return modes
 
     @classmethod
-    def from_config(cls, cam_topic, cam_cfg, base_kwargs, realsense_enable):
+    def from_config(cls, cam_topic, cam_cfg, base_kwargs, enable_realsense):
         serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
-        if not realsense_enable:
+        if not enable_realsense:
             logger_mp.error(f"[Image Server] Please start image server with the '--rs' flag to support Realsense {cam_topic}.")
             return None
         # Self-contained resolution: RealSense runs its OWN scan (no CameraFinder).
@@ -1171,7 +1158,7 @@ class RealSenseCamera(BaseCamera):
 
 class UVCCamera(BaseCamera):
     def __init__(self, cam_topic, uid, img_shape, fps, 
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         import uvc
         self.uid = uid
@@ -1406,7 +1393,7 @@ class UVCCamera(BaseCamera):
 
 class V4L2Camera(BaseCamera):
     def __init__(self, cam_topic, video_path, img_shape, fps,
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._video_path = video_path
 
@@ -1736,7 +1723,7 @@ class V4L2Camera(BaseCamera):
 
 class GStreamerCamera(BaseCamera):
     def __init__(self, cam_topic, gst_pipeline, img_shape, fps,
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None):
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._Gst = self.check_gi_install()
         self._pipeline_str = gst_pipeline
@@ -1853,15 +1840,8 @@ class GStreamerCamera(BaseCamera):
 
     @classmethod
     def scan(cls):
-        """
-        GStreamer cameras are registration-based (登记式): the user hand-writes a
-        `gst_pipeline`, so there is nothing to auto-instantiate. As a convenience for
-        `--cf`, if `gst-device-monitor-1.0` is available we surface candidate
-        Video/Source devices as ready-to-edit pipeline hints. Self-contained probe.
-        """
         try:
-            r = subprocess.run(["gst-device-monitor-1.0", "Video/Source"],
-                               capture_output=True, text=True, timeout=5)
+            r = subprocess.run(["gst-device-monitor-1.0", "Video/Source"], capture_output=True, text=True, timeout=5)
             txt = r.stdout or ""
         except Exception:
             return []
@@ -1890,7 +1870,7 @@ class GStreamerCamera(BaseCamera):
                 cards.append({
                     "type": "gstreamer",
                     "name": name,
-                    "device": device,
+                    "video_path": device,
                     "gst_pipeline": f"{launch} ! image/jpeg ! appsink name=sink",
                 })
                 name, device = None, None
@@ -1906,7 +1886,7 @@ class GStreamerCamera(BaseCamera):
 
 class IsaacSimCamera(BaseCamera):
     def __init__(self, cam_topic, img_shape, fps,
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=66666, webrtc_codec=None,
+                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None,
                  image_source="head", binocular=False):
         """
         IsaacSim camera that reads from shared memory.
@@ -2012,21 +1992,19 @@ class IsaacSimCamera(BaseCamera):
 # image server
 # ========================================================
 class ImageServer:
-    def __init__(self, cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=False):
+    def __init__(self, cam_config, enable_realsense=False, camera_finder_verbose=False, enable_isaacsim=False):
         _apply_webrtc_config(cam_config)
         self._cam_config = cam_config
-        self._realsense_enable = realsense_enable
-        self._isaacsim_enable = isaacsim_enable
+        self._enable_realsense = enable_realsense
+        self._enable_isaacsim = enable_isaacsim
         self._stop_event = threading.Event()
         self._cameras: dict[str, BaseCamera] = {}
-        if not self._isaacsim_enable:
-            # UVC/V4L2 drivers resolve their own devices in from_config(); the
-            # finder is only a discovery reporter now. Still reload uvcvideo once
-            # so nodes enumerate cleanly before any camera is opened.
+
+        if not self._enable_isaacsim:
             if camera_finder_verbose:
-                CameraFinder(realsense_enable, verbose=True)   # reloads uvcvideo + prints discovery
+                CameraFinder(enable_realsense, verbose=True)   # reloads uvcvideo + prints discovery
             else:
-                reload_uvc_driver()
+                reload_uvcvideo_module()
         self._responser = ZMQ_Responser(self._cam_config)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
@@ -2044,7 +2022,7 @@ class ImageServer:
                 webrtc_port = cam_cfg.get("webrtc_port", None)
                 webrtc_codec = cam_cfg.get("webrtc_codec", None)
                 cam_type = cam_cfg.get("type", "uvc").lower()
-                if self._isaacsim_enable and cam_type!="isaacsim":
+                if self._enable_isaacsim and cam_type!="isaacsim":
                     cam_type = "isaacsim"
                 img_shape = cam_cfg.get("image_shape", None)
                 fps = cam_cfg.get("fps", 30)
@@ -2057,7 +2035,7 @@ class ImageServer:
                 if cam_type == "v4l2":
                     self._cameras[cam_topic] = V4L2Camera.from_config(cam_topic, cam_cfg, base_kwargs)
                 elif cam_type == "realsense":
-                    self._cameras[cam_topic] = RealSenseCamera.from_config(cam_topic, cam_cfg, base_kwargs, self._realsense_enable)
+                    self._cameras[cam_topic] = RealSenseCamera.from_config(cam_topic, cam_cfg, base_kwargs, self._enable_realsense)
                 elif cam_type == "uvc":
                     self._cameras[cam_topic] = UVCCamera.from_config(cam_topic, cam_cfg, base_kwargs)
                 elif cam_type == "gstreamer":
@@ -2181,12 +2159,12 @@ class ImageServer:
             t = threading.Thread(target=self._update_frames, args=(camera_topic, camera), daemon=True)
             t.start()
             self._publisher_threads.append(t)
-        if self._isaacsim_enable:
+        if self._enable_isaacsim:
             time.sleep(2.0)  # wait a bit for IsaacSim shared memory to be ready
 
         for camera_topic, camera in self._cameras.items():
             # Use longer timeout for IsaacSim cameras since they need to wait for shared memory data
-            if self._isaacsim_enable:
+            if self._enable_isaacsim:
                 timeout = 15.0
             else:
                 timeout = 5.0
@@ -2245,7 +2223,7 @@ def run_isaacsim_server():
         logger_mp.error(f"Failed to load configuration file at {CONFIG_PATH}: {e}")
         exit(1)
     # start image server
-    server = ImageServer(cam_config, realsense_enable=False, camera_finder_verbose=False, isaacsim_enable=True)
+    server = ImageServer(cam_config, enable_realsense=False, camera_finder_verbose=False, enable_isaacsim=True)
     server.start()
     return server
 
@@ -2282,7 +2260,7 @@ def main():
 
     # if enable camera finder mode, just print cameras info and exit
     if args.cf:
-        CameraFinder(realsense_enable=args.rs, verbose=True)
+        CameraFinder(enable_realsense=args.rs, verbose=True)
         exit(0)
 
     # Load config file, start image server
@@ -2294,7 +2272,7 @@ def main():
         exit(1)
 
     # start image server
-    server = ImageServer(cam_config, realsense_enable=args.rs, camera_finder_verbose=False)
+    server = ImageServer(cam_config, enable_realsense=args.rs, camera_finder_verbose=False)
     server.start()
 
     # graceful shutdown handling
