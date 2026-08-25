@@ -627,27 +627,19 @@ class CameraFinder:
     """
     Discover connected cameras and their properties.
     """
-    def __init__(self, enable_uvc=True, enable_v4l2=True, enable_gstreamer=True, enable_realsense=False, verbose=False):
+    def __init__(self, enable_uvc=False, enable_v4l2=False, enable_gstreamer=False, enable_realsense=False):
         self.enable_uvc = enable_uvc
         self.enable_v4l2 = enable_v4l2
         self.enable_gstreamer = enable_gstreamer
         self.enable_realsense = enable_realsense
-        if verbose:
-            self.report()
+        self.report()
+        if not any([enable_uvc, enable_v4l2, enable_gstreamer, enable_realsense]):
+            logger_mp.warning("🖼️ No camera backends enabled.")
 
     def report(self):
-        reload_uvcvideo_module()
-        """
-        TeleImager image server: multi-camera capture (UVC / V4L2 / GStreamer /
-        RealSense) published over ZMQ and WebRTC.
+        if self.enable_uvc or self.enable_v4l2 or self.enable_gstreamer:
+            reload_uvcvideo_module()
 
-        Path glossary (all strings, used throughout this module):
-        - video_path / vpath  — V4L2 device node /dev/videoN; open() it to grab frames
-        - color path / cpath  — a video_path advertising color formats (YUYV/MJPG)
-        - depth/IR path       — a video_path advertising depth/mono formats (Z16/GREY/...)
-        - physical_path/ppath — sysfs USB topology /sys/devices/.../1-3.1:1.0; stable per port
-        - sysfs_path          — /sys/class/video4linux/videoN; the node's sysfs dir
-        """
         rs_cards = RealSenseCamera.scan() if self.enable_realsense else []
         rs_video_paths = set(RealSenseCamera._list_video_paths())
         rs_depth_ir_paths = set(RealSenseCamera._list_depth_ir_paths())
@@ -734,7 +726,7 @@ class CameraFinder:
 
             # group by resolution, collapse identical fps lists
             try:
-                import uvc
+                uvc = UVCCamera.get_uvc_module()
                 cap = uvc.Capture(uid)
                 from collections import defaultdict
                 by_res = defaultdict(list)
@@ -871,7 +863,7 @@ class BaseCamera:
 class RealSenseCamera(BaseCamera):
     def __init__(self, cam_topic, serial_number, img_shape, fps, 
                  enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None, enable_depth=False):
-        rs = self._check_pyrealsense2_install()
+        rs = self.get_realsense_module()
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
         self._serial_number = serial_number
         self._enable_depth = enable_depth
@@ -914,15 +906,6 @@ class RealSenseCamera(BaseCamera):
             f"WebRTC: {'enabled, webrtc_port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
         )
 
-    def _check_pyrealsense2_install(self):
-        try:
-            import pyrealsense2 as rs
-            return rs
-        except Exception as e:
-            raise ImportError(
-                "pyrealsense2 not installed. Install Intel RealSense SDK and pyrealsense2 Python bindings."
-            ) from e
-    
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames()
         aligned_frames = self.align.process(frames)
@@ -1086,12 +1069,6 @@ class RealSenseCamera(BaseCamera):
 
     @classmethod
     def scan(cls):
-        """
-        Discover RealSense cameras. Serials come from the pyrealsense2 SDK; the
-        associated /dev/video* nodes come from a self-contained sysfs crawl.
-        Card field `serial_number` matches this class's yaml identifier key.
-        Raises RuntimeError (via get_realsense_module) if the SDK is missing.
-        """
         serials = cls._list_serial_numbers()
         video_paths = cls._list_video_paths()
         cards = []
@@ -1099,7 +1076,6 @@ class RealSenseCamera(BaseCamera):
             cards.append({"type": "realsense", "serial_number": sn,
                           "video_paths": video_paths, "modes": cls._list_modes(sn)})
         if not serials and video_paths:
-            # sysfs shows realsense nodes but the SDK reported no serials
             cards.append({"type": "realsense", "serial_number": None,
                           "video_paths": video_paths, "modes": []})
         return cards
@@ -1160,7 +1136,7 @@ class UVCCamera(BaseCamera):
     def __init__(self, cam_topic, uid, img_shape, fps, 
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-        import uvc
+        uvc = self.get_uvc_module()
         self.uid = uid
         self.cap = None
         try:
@@ -1175,6 +1151,19 @@ class UVCCamera(BaseCamera):
         except Exception as e:
             self.cap = None
             raise RuntimeError(f"[UVCCamera] Failed to set mode for {self._cam_topic}: {e}")
+
+    @staticmethod
+    def get_uvc_module():
+        try:
+            import uvc
+            return uvc
+        except ImportError:
+            msg = (
+                "[UVC] pupil-labs-uvc (import name 'uvc') not installed.  You can try:\n"
+                "    sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev\n"
+                "    pip install pupil-labs-uvc\n"
+            )
+            raise RuntimeError(msg)
 
     def __str__(self):
         return (
@@ -1725,7 +1714,7 @@ class GStreamerCamera(BaseCamera):
     def __init__(self, cam_topic, gst_pipeline, img_shape, fps,
                  enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
         super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
-        self._Gst = self.check_gi_install()
+        self._Gst = self.get_gstreamer_module()
         self._pipeline_str = gst_pipeline
 
         # single pipeline ending in an appsink; composite (e.g. binocular) inside
@@ -1747,7 +1736,8 @@ class GStreamerCamera(BaseCamera):
             f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
         )
 
-    def check_gi_install(self):
+    @staticmethod
+    def get_gstreamer_module():
         try:
             import gi
             gi.require_version("Gst", "1.0")
@@ -1756,7 +1746,7 @@ class GStreamerCamera(BaseCamera):
                 Gst.init(None)
             return Gst
         except Exception as e:
-            raise ImportError(
+            raise RuntimeError(
                 "PyGObject/GStreamer not installed. Install with:\n"
                 "    sudo apt install python3-gi python3-gst-1.0 "
                 "gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad"
@@ -1779,11 +1769,7 @@ class GStreamerCamera(BaseCamera):
                     break
         if sink is None:
             raise RuntimeError(f"[GStreamerCamera] pipeline must contain an appsink (optionally name=sink): {pipeline_str}")
-        # JPEG-first (mirrors UVCCamera): the appsink receives encoded MJPG/JPEG
-        # buffers, forwarded verbatim to ZMQ with NO decode. Decoding to BGR happens
-        # lazily in _update_frame only when WebRTC needs it. The pipeline MUST
-        # therefore deliver image/jpeg to the appsink (v4l2 MJPG source needs no
-        # decode; a raw source needs a jpegenc/nvjpegenc before the appsink).
+
         sink.set_property("emit-signals", False)
         sink.set_property("sync", False)
         sink.set_property("max-buffers", 1)
@@ -1857,12 +1843,6 @@ class GStreamerCamera(BaseCamera):
             elif mdev:
                 device = mdev.group(1)
             elif mlaunch:
-                # gst-device-monitor prints the source ending in a literal " ! ..."
-                # placeholder; drop it and attach a JPEG appsink tail (JPEG-first,
-                # see _start_pipeline). MJPG sources need no encoder; raw sources
-                # need a jpegenc inserted before the appsink — edit the hint to suit.
-                # The launch line omits device= for the default node (video0), so
-                # pin the src to device.path explicitly to avoid ambiguity.
                 launch = mlaunch.group(1).strip()
                 launch = re.sub(r"\s*!\s*\.\.\.\s*$", "", launch).rstrip("! ").strip()
                 if device and "device=" not in launch:
@@ -1992,7 +1972,7 @@ class IsaacSimCamera(BaseCamera):
 # image server
 # ========================================================
 class ImageServer:
-    def __init__(self, cam_config, enable_realsense=False, camera_finder_verbose=False, enable_isaacsim=False):
+    def __init__(self, cam_config, enable_realsense=False, enable_isaacsim=False):
         _apply_webrtc_config(cam_config)
         self._cam_config = cam_config
         self._enable_realsense = enable_realsense
@@ -2001,10 +1981,8 @@ class ImageServer:
         self._cameras: dict[str, BaseCamera] = {}
 
         if not self._enable_isaacsim:
-            if camera_finder_verbose:
-                CameraFinder(enable_realsense, verbose=True)   # reloads uvcvideo + prints discovery
-            else:
-                reload_uvcvideo_module()
+            reload_uvcvideo_module()
+
         self._responser = ZMQ_Responser(self._cam_config)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
@@ -2223,7 +2201,7 @@ def run_isaacsim_server():
         logger_mp.error(f"Failed to load configuration file at {CONFIG_PATH}: {e}")
         exit(1)
     # start image server
-    server = ImageServer(cam_config, enable_realsense=False, camera_finder_verbose=False, enable_isaacsim=True)
+    server = ImageServer(cam_config, enable_realsense=False, enable_isaacsim=True)
     server.start()
     return server
 
@@ -2250,9 +2228,13 @@ def main():
 
     # command line args
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cf', action = 'store_true', help = 'Enable camera found mode, print all connected cameras info')
-    parser.add_argument('--rs', action = 'store_true', help = 'Enable RealSense camera mode. Otherwise only find UVC/V4L2 cameras.')
-    parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Disable CPU affinity setting for performance optimization.')
+    parser.add_argument('--cf', action='store_true', help='Camera-finder mode: scan and print all connected cameras, then exit.')
+    parser.add_argument('--uvc', action='store_true', help='In --cf, include the UVC (libuvc -> pyuvc) backend in the scan.')
+    parser.add_argument('--v4l2', action='store_true', help='In --cf, include the V4L2 (PyAV) backend in the scan.')
+    parser.add_argument('--gst', action='store_true', help='In --cf, include the GStreamer backend in the scan.')
+    parser.add_argument('--rs', action='store_true', help='In --cf, include the RealSense (pyrealsense2) backend in the scan; also enables RealSense at server runtime.')
+    parser.add_argument('--isaacsim', action='store_true', help='Run the server in IsaacSim mode (frames from shared memory instead of physical cameras).')
+    parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Do not pin the process to specific CPU cores.')
     args = parser.parse_args()
 
     if args.affinity:
@@ -2260,7 +2242,11 @@ def main():
 
     # if enable camera finder mode, just print cameras info and exit
     if args.cf:
-        CameraFinder(enable_realsense=args.rs, verbose=True)
+        logger_mp.info("args:%s", args)
+        CameraFinder(enable_uvc=args.uvc,
+                     enable_v4l2=args.v4l2,
+                     enable_gstreamer=args.gst,
+                     enable_realsense=args.rs)
         exit(0)
 
     # Load config file, start image server
@@ -2272,7 +2258,7 @@ def main():
         exit(1)
 
     # start image server
-    server = ImageServer(cam_config, enable_realsense=args.rs, camera_finder_verbose=False)
+    server = ImageServer(cam_config, enable_realsense=args.rs)
     server.start()
 
     # graceful shutdown handling
