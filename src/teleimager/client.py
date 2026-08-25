@@ -363,9 +363,9 @@ class TeleImage:
 
     def __iter__(self):
         """ Allow unpacking like: jpg, bgr, fps = teleimage_instance """
-        yield self.fps
         yield self.jpg
         yield (None if self._bgr is TeleImage._NOT_SET else self._bgr)
+        yield self.fps
 
     def __repr__(self):
         """ String representation for debugging """
