@@ -1969,10 +1969,9 @@ class IsaacSimCamera(BaseCamera):
 # teleimage server
 # ========================================================
 class TeleImageServer:
-    def __init__(self, cam_config, enable_realsense=False, enable_isaacsim=False):
+    def __init__(self, cam_config, enable_isaacsim=False):
         _apply_webrtc_config(cam_config)
         self._cam_config = cam_config
-        self._enable_realsense = enable_realsense
         self._enable_isaacsim = enable_isaacsim
         self._stop_event = threading.Event()
         self._cameras: dict[str, BaseCamera] = {}
