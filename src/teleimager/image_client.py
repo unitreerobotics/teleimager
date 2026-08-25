@@ -35,28 +35,28 @@ logger_mp.setLevel(logging_mp.INFO)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
-CONFIG_CLIENT_PATH = os.path.join(PACKAGE_DIR, "cam_config_client.yaml")
-CONFIG_SERVER_PATH = os.path.join(PACKAGE_DIR, "cam_config_server.yaml")
+CLIENT_CONFIG_PATH = os.path.join(PACKAGE_DIR, "teleimager_client.yaml")
+SERVER_CONFIG_PATH = os.path.join(PACKAGE_DIR, "teleimager_server.yaml")
 
 
 def get_local_config():
     """Try to load camera config from local config files"""
     cam_config = None
 
-    if os.path.exists(CONFIG_CLIENT_PATH):
+    if os.path.exists(CLIENT_CONFIG_PATH):
         try:
-            with open(CONFIG_CLIENT_PATH, "r") as f:
+            with open(CLIENT_CONFIG_PATH, "r") as f:
                 cam_config = yaml.safe_load(f)
-            logger_mp.info(f"Loaded camera config from local {CONFIG_CLIENT_PATH}")
+            logger_mp.info(f"Loaded camera config from local {CLIENT_CONFIG_PATH}")
         except Exception as e:
-            logger_mp.warning(f"Failed to load local cam_config_client.yaml: {e}")
-    elif os.path.exists(CONFIG_SERVER_PATH):
+            logger_mp.warning(f"Failed to load local teleimager_client.yaml: {e}")
+    elif os.path.exists(SERVER_CONFIG_PATH):
         try:
-            with open(CONFIG_SERVER_PATH, "r") as f:
+            with open(SERVER_CONFIG_PATH, "r") as f:
                 cam_config = yaml.safe_load(f)
-            logger_mp.info(f"Loaded camera config from local {CONFIG_SERVER_PATH}")
+            logger_mp.info(f"Loaded camera config from local {SERVER_CONFIG_PATH}")
         except Exception as e:
-            logger_mp.warning(f"Failed to load local cam_config_server.yaml: {e}")
+            logger_mp.warning(f"Failed to load local teleimager_server.yaml: {e}")
     else:
         logger_mp.error("No camera configuration file found locally.")
     
@@ -673,7 +673,7 @@ class ZMQ_Responser:
 # ========================================================
 class ZMQ_Requester:
     """ ZMQ REQ socket to request camera configuration from server. If server is unreachable,
-        try to load from local cam_config_client.yaml or cam_config_server.yaml."""
+        try to load from local teleimager_client.yaml or teleimager_server.yaml."""
     def __init__(self, host: str, port: int):
         """
         Args:
@@ -704,9 +704,9 @@ class ZMQ_Requester:
                 cam_config = self._socket.recv_json()
                 if cam_config is not None:
                     logger_mp.info(f"Received camera config from server {self._host}:{self._port}")
-                    with open(CONFIG_CLIENT_PATH, "w") as f:
+                    with open(CLIENT_CONFIG_PATH, "w") as f:
                         yaml.safe_dump(cam_config, f, sort_keys=False, allow_unicode=True)
-                    logger_mp.info(f"Saved camera config to local {CONFIG_CLIENT_PATH}")
+                    logger_mp.info(f"Saved camera config to local {CLIENT_CONFIG_PATH}")
             else:
                 logger_mp.warning(f"Request to {self._host}:{self._port} timed out or no response, using local config.")
                 cam_config = get_local_config()
@@ -888,7 +888,7 @@ class RightWristImageClient:
 # ========================================================
 # image client
 # ========================================================
-class ImageClient:
+class TeleImageClient:
     def __init__(self, host="192.168.123.164", request_port=60000, request_bgr: bool = False):
         """
         Args:
@@ -961,7 +961,7 @@ def main():
     args = parser.parse_args()
 
     # Example usage with three camera streams
-    client = ImageClient(host=args.host, request_bgr=True)
+    client = TeleImageClient(host=args.host, request_bgr=True)
     cam_config = client.get_cam_config()
 
     running = True
