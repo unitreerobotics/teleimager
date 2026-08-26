@@ -29,7 +29,7 @@ import functools
 import re
 import subprocess
 import platform
-from .image_client import TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responser
+from .client import TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responser
 # webrtc dependencies
 import asyncio
 import json
@@ -78,9 +78,9 @@ with open(LOGO_SVG_PATH, "r", encoding="utf-8") as f:
 # ========================================================
 _GOP_LENGTH = 60  # frames between keyframes; overridden by yaml if present
 
-def _apply_webrtc_config(cam_config):
+def _apply_webrtc_config(server_config):
     global _GOP_LENGTH
-    cfg = (cam_config or {}).get("webrtc", {})
+    cfg = (server_config or {}).get("webrtc", {})
     bitrate = cfg.get("bitrate", {})
     from aiortc.codecs import vpx
     for key, attr in (("min", "MIN_BITRATE"), ("default", "DEFAULT_BITRATE"), ("max", "MAX_BITRATE")):
@@ -900,7 +900,7 @@ class RealSenseCamera(BaseCamera):
 
     def __str__(self):
         return (
-            f"[RealSenseCamera: {self._cam_topic}] initialized with "
+            f"📷[RealSenseCamera: {self._cam_topic}] initialized with "
             f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
             f"ZMQ: {'enabled, zmq_port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
             f"WebRTC: {'enabled, webrtc_port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
@@ -1164,7 +1164,7 @@ class UVCCamera(BaseCamera):
 
     def __str__(self):
         return (
-            f"[UVCCamera: {self._cam_topic}] initialized with "
+            f"📷[UVCCamera: {self._cam_topic}] initialized with "
             f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS, MJPG.\n"
             f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
             f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
@@ -1407,7 +1407,7 @@ class V4L2Camera(BaseCamera):
 
     def __str__(self):
         return (
-            f"[V4L2Camera: {self._cam_topic}] initialized with "
+            f"📷[V4L2Camera: {self._cam_topic}] initialized with "
             f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
             f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
             f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
@@ -1727,7 +1727,7 @@ class GStreamerCamera(BaseCamera):
 
     def __str__(self):
         return (
-            f"[GStreamerCamera: {self._cam_topic}] initialized with "
+            f"📷[GStreamerCamera: {self._cam_topic}] initialized with "
             f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
             f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
             f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
@@ -1893,7 +1893,7 @@ class IsaacSimCamera(BaseCamera):
     def __str__(self):
         mode = "binocular" if self._binocular else "monocular"
         return (
-            f"[IsaacSimCamera: {self._cam_topic}] initialized with "
+            f"📷[IsaacSimCamera: {self._cam_topic}] initialized with "
             f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS, source='{self._image_source}', mode='{mode}'.\n"
             f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
             f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
@@ -1969,9 +1969,9 @@ class IsaacSimCamera(BaseCamera):
 # teleimage server
 # ========================================================
 class TeleImageServer:
-    def __init__(self, cam_config, enable_isaacsim=False):
-        _apply_webrtc_config(cam_config)
-        self._cam_config = cam_config
+    def __init__(self, server_config, enable_isaacsim=False):
+        _apply_webrtc_config(server_config)
+        self._server_config = server_config
         self._enable_isaacsim = enable_isaacsim
         self._stop_event = threading.Event()
         self._cameras: dict[str, BaseCamera] = {}
@@ -1979,14 +1979,14 @@ class TeleImageServer:
         if not self._enable_isaacsim:
             reload_uvcvideo_module()
 
-        self._responser = ZMQ_Responser(self._cam_config)
+        self._responser = ZMQ_Responser(self._server_config)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
         self._publisher_threads = []  # keep references for graceful join
 
         try:
-            # Load cameras from self.cam_config
-            for cam_topic, cam_cfg in self._cam_config.items():
+            # Load cameras from self._server_config
+            for cam_topic, cam_cfg in self._server_config.items():
                 if not cam_cfg.get("enable_zmq", False) and not cam_cfg.get("enable_webrtc", False):
                     continue
 
@@ -2001,9 +2001,13 @@ class TeleImageServer:
                 img_shape = cam_cfg.get("image_shape", None)
                 fps = cam_cfg.get("fps", 30)
                 base_kwargs = dict(
-                    img_shape=img_shape, fps=fps,
-                    enable_zmq=enable_zmq, zmq_port=zmq_port,
-                    enable_webrtc=enable_webrtc, webrtc_port=webrtc_port, webrtc_codec=webrtc_codec,
+                    img_shape=img_shape,
+                    fps=fps,
+                    enable_zmq=enable_zmq,
+                    zmq_port=zmq_port,
+                    enable_webrtc=enable_webrtc,
+                    webrtc_port=webrtc_port,
+                    webrtc_codec=webrtc_codec,
                 )
 
                 if cam_type == "v4l2":
@@ -2192,12 +2196,12 @@ def run_isaacsim_server():
     # Load config file, start teleimage server
     try:
         with open(SERVER_CONFIG_PATH, "r") as f:
-            cam_config = yaml.safe_load(f)
+            server_config = yaml.safe_load(f)
     except Exception as e:
         logger_mp.error(f"Failed to load configuration file at {SERVER_CONFIG_PATH}: {e}")
         exit(1)
     # start teleimage server
-    server = TeleImageServer(cam_config, enable_realsense=False, enable_isaacsim=True)
+    server = TeleImageServer(server_config, enable_realsense=False, enable_isaacsim=True)
     server.start()
     return server
 
@@ -2247,13 +2251,13 @@ def main():
     # Load config file, start teleimage server
     try:
         with open(SERVER_CONFIG_PATH, "r") as f:
-            cam_config = yaml.safe_load(f)
+            server_config = yaml.safe_load(f)
     except Exception as e:
         logger_mp.error(f"Failed to load configuration file at {SERVER_CONFIG_PATH}: {e}")
         exit(1)
 
     # start teleimage server
-    server = TeleImageServer(cam_config, enable_realsense=args.rs)
+    server = TeleImageServer(server_config)
     server.start()
 
     # graceful shutdown handling

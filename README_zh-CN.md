@@ -103,7 +103,7 @@ bash setup_uvc.sh
 运行以下命令可以自动发现已连接摄像头：
 
 ```bash
-python -m teleimager.image_server --cf
+python -m teleimager.server --cf
 # 或
 teleimager-server --cf
 ```
@@ -153,8 +153,8 @@ teleimager-server --cf
 启动服务器：
 
 ```
-python -m teleimager.image_server
-python -m teleimager.image_server --rs   # 若使用 RealSense
+python -m teleimager.server
+python -m teleimager.server --rs   # 若使用 RealSense
 
 # 或
 teleimager-server
@@ -177,7 +177,7 @@ teleimager-server --rs
 服务器运行后，在另一个终端启动客户端：
 
 ```
-python -m teleimager.image_client
+python -m teleimager.client
 # 或
 teleimager-client --host 127.0.0.1
 ```

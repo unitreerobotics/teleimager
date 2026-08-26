@@ -19,8 +19,8 @@ head_camera:
 
   # if enable_zmq and enable_webrtc are both false, the camera will not start
   # Set to true to enable ZMQ publishing, false to disable
-  enable_zmq: false
-  # Port to publish camera stream, e.g. zmq tcp://*:55555.  image_client.py should connect to the same port
+  enable_zmq: true
+  # Port to publish camera stream, e.g. zmq tcp://*:55555.  client.py should connect to the same port
   zmq_port : 55555
   # Set to true to enable WebRTC publishing, false to disable
   enable_webrtc: true
@@ -34,7 +34,7 @@ head_camera:
   #   - "v4l2"      → PyAV (libav v4l2) JPEG-first driver: MJPG passthrough, YUYV fallback decode
   #   - "gstreamer" → GStreamer (gi) appsink driver; user supplies a full gst_pipeline (USB / GMSL / MIPI CSI)
   #   - "realsense" → pyrealsense2 driver
-  type: gstreamer
+  type: uvc
 
   # Image Format
   # image resolution: [height, width]
@@ -71,7 +71,7 @@ head_camera:
   serial_number: null
   # ---- uvc / v4l2 only (USB identifiers) ----
   physical_path: null
-  bcd_device: null
+  bcd_device: "0217"
   vid_pid: null
   video_id: null
   # ---- gstreamer only ----
@@ -86,14 +86,14 @@ left_wrist_camera:
   enable_webrtc: true
   webrtc_port : 60002
   webrtc_codec: h264
-  type: gstreamer
+  type: uvc
   image_shape: [480, 640]
   binocular: false
   fps: 30
   # identifier keys are ignored by the gstreamer type (kept null for a uniform
   # schema); the pipeline itself selects the device (/dev/video8 here).
   # ---- common identifier (uvc / v4l2 / realsense) ----
-  serial_number: null
+  serial_number: "200901010001"
   # ---- uvc / v4l2 only (USB identifiers) ----
   physical_path: null
   bcd_device: null

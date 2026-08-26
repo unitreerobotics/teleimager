@@ -39,5 +39,5 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-teleimager-server = "teleimager.image_server:main"
-teleimager-client = "teleimager.image_client:main"
+teleimager-server = "teleimager.server:main"
+teleimager-client = "teleimager.client:main"

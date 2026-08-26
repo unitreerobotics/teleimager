@@ -103,7 +103,7 @@ bash setup_uvc.sh
 Run the following command to discover connected cameras:
 
 ```bash
-python -m teleimager.image_server --cf
+python -m teleimager.server --cf
 # or
 teleimager-server --cf
 ```
@@ -151,8 +151,8 @@ Found RGB video devices: ['/dev/video0', '/dev/video2']
 After filling `cam_config_server.yaml` according to camera discovery, start the server:
 
 ```bash
-python -m teleimager.image_server
-python -m teleimager.image_server --rs   # if using RealSense
+python -m teleimager.server
+python -m teleimager.server --rs   # if using RealSense
 
 # or
 teleimager-server
@@ -174,7 +174,7 @@ All user-callable APIs are under `# public api`.
 After the server is running, start the client in another terminal:
 
 ```bash
-python -m teleimager.image_client
+python -m teleimager.client
 # or
 teleimager-client --host 127.0.0.1
 ```
