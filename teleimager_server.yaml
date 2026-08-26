@@ -11,125 +11,121 @@ webrtc:
   gop_length: 60      # frames between keyframes; lower = faster recovery from packet loss
 
 # =====================================================
-# Head camera configuration
+# Cameras. Each entry below `camera:` is one camera topic.
+# Keys are grouped: common keys first (shared by every driver), then
+# driver-specific keys after. Set unused keys to null.
+#
+# Type of camera:
+#   - "uvc"       → pyuvc driver (Python binding for libuvc; USB UVC)
+#   - "v4l2"      → PyAV (libav v4l2) JPEG-first driver: MJPG passthrough, YUYV fallback decode
+#   - "gstreamer" → GStreamer (gi) appsink driver; user supplies a full gst_pipeline (USB / GMSL / MIPI CSI)
+#   - "realsense" → pyrealsense2 driver
+#
+# Camera identifiers (choose one or more), listed in priority order:
+#   - physical_path → sysfs physical USB path (e.g. "/sys/devices/pci0000:00/.../1-11.2:1.0")
+#   - serial_number → camera's hardware serial (e.g. "141722079879")
+#   - bcd_device    → USB device release number (e.g. "0100")
+#   - vid_pid       → USB vendor:product ID (e.g. "1c45:6200")
+#   - video_id      → /dev/videoX  (e.g. 0 → /dev/video0)
+#
+# IMPORTANT: All string identifiers (serial_number, bcd_device, vid_pid, physical_path)
+#   MUST be quoted in YAML. Without quotes, values with leading zeros (e.g. 0217)
+#   are parsed as octal integers, and long digit-only serial numbers may lose
+#   precision.  Only video_id is a plain integer.
+#
+# Identifier priority:
+#   physical_path > serial_number > bcd_device > vid_pid > video_id
+#   if an identifier is not used, set it to null. The system will resolve the camera by priority.
+#   - type "realsense": uses serial_number
+#   - type "v4l2"/"uvc": use the USB identifier ladder
+#   - type "gstreamer":  ignores all identifier keys; uses gst_pipeline instead
 # =====================================================
-# camera topic
-head_camera:
-  # camera config
+camera:
 
-  # if enable_zmq and enable_webrtc are both false, the camera will not start
-  # Set to true to enable ZMQ publishing, false to disable
-  enable_zmq: true
-  # Port to publish camera stream, e.g. zmq tcp://*:55555.  client.py should connect to the same port
-  zmq_port : 55555
-  # Set to true to enable WebRTC publishing, false to disable
-  enable_webrtc: true
-  # Port for WebRTC signaling server
-  webrtc_port : 60001
-  # webrtc codec preference, options: "vp8", "h264"
-  webrtc_codec: h264
+  # =====================================================
+  # Head camera configuration
+  # =====================================================
+  head_camera:
+    # ---- common keys ----
+    # if enable_zmq and enable_webrtc are both false, the camera will not start
+    enable_zmq: true            # Set to true to enable ZMQ publishing, false to disable
+    zmq_port : 55555            # Port to publish camera stream, e.g. zmq tcp://*:55555. client.py connects to the same port
+    enable_webrtc: true         # Set to true to enable WebRTC publishing, false to disable
+    webrtc_port : 60001         # Port for WebRTC signaling server
+    webrtc_codec: h264          # webrtc codec preference, options: "vp8", "h264"
+    type: uvc
+    image_shape: [480, 1280]    # image resolution: [height, width]
+    binocular: true
+    fps: 30                     # frame per second
 
-  # Type of camera:
-  #   - "uvc"       → pyuvc driver (Python binding for libuvc; USB UVC)
-  #   - "v4l2"      → PyAV (libav v4l2) JPEG-first driver: MJPG passthrough, YUYV fallback decode
-  #   - "gstreamer" → GStreamer (gi) appsink driver; user supplies a full gst_pipeline (USB / GMSL / MIPI CSI)
-  #   - "realsense" → pyrealsense2 driver
-  type: uvc
+    # ---- driver-specific keys ----
+    # common identifier (uvc / v4l2 / realsense)
+    serial_number: null
+    # uvc / v4l2 only (USB identifiers)
+    physical_path: null
+    bcd_device: "0217"
+    vid_pid: null
+    video_id: null
+    # gstreamer only
+    gst_pipeline: "v4l2src device=/dev/video0 ! image/jpeg ! appsink name=sink"
 
-  # Image Format
-  # image resolution: [height, width]
-  image_shape: [480, 1280]
-  binocular: true
-  # frame per second
-  fps: 30
+  # =====================================================
+  # Left wrist camera configuration
+  # =====================================================
+  left_wrist_camera:
+    # ---- common keys ----
+    enable_zmq: true
+    zmq_port : 55556
+    enable_webrtc: true
+    webrtc_port : 60002
+    webrtc_codec: h264
+    type: uvc
+    image_shape: [480, 640]
+    binocular: false
+    fps: 30
 
-  # Camera identifiers (choose one or more), listed in priority order:
-  #   - physical_path → sysfs physical USB path (e.g. "/sys/devices/pci0000:00/.../1-11.2:1.0")
-  #   - serial_number → camera's hardware serial (e.g. "141722079879")
-  #   - bcd_device    → USB device release number (e.g. "0100")
-  #   - vid_pid       → USB vendor:product ID (e.g. "1c45:6200")
-  #   - video_id      → /dev/videoX  (e.g. 0 → /dev/video0)
-  #
-  # IMPORTANT: All string identifiers (serial_number, bcd_device, vid_pid, physical_path)
-  #   MUST be quoted in YAML. Without quotes, values with leading zeros (e.g. 0217)
-  #   are parsed as octal integers, and long digit-only serial numbers may lose
-  #   precision.  Only video_id is a plain integer.
-  #
-  # Identifier priority:
-  #   physical_path > serial_number > bcd_device > vid_pid > video_id
-  #   if an identifier is not used, set it to null. The system will resolve the camera by priority.
-  #
-  # Notes:
-  #   - every camera carries the SAME key schema; set unused keys to null.
-  #   - identifiers are grouped by driver below: common first, driver-specific after.
-  #   - type "realsense": uses serial_number
-  #   - type "v4l2"/"uvc": use the USB identifier ladder
-  #     (priority: physical_path > serial_number > bcd_device > vid_pid > video_id)
-  #   - type "gstreamer":  ignores all identifier keys; uses gst_pipeline instead
+    # ---- driver-specific keys ----
+    # common identifier (uvc / v4l2 / realsense)
+    serial_number: "200901010001"
+    # uvc / v4l2 only (USB identifiers)
+    physical_path: null
+    bcd_device: null
+    vid_pid: null
+    video_id: null
+    # gstreamer only
+    # gstreamer pipeline is JPEG-first: the appsink receives MJPG/JPEG buffers,
+    # forwarded to ZMQ with no re-encode; BGR is decoded lazily only when WebRTC is
+    # on. So DO NOT add jpegdec/videoconvert — deliver image/jpeg straight to the
+    # appsink. Bound to the Abham Image camera (640x480 MJPG) via its stable
+    # /dev/v4l/by-id symlink, so it survives USB re-enumeration (the raw /dev/videoN
+    # number is not stable — this camera has appeared as video8 and video10).
+    gst_pipeline: "v4l2src device=/dev/v4l/by-id/usb-HHWei_Technology_Co.__Ltd._Abham_Image_HHW001-video-index0 ! image/jpeg,width=640,height=480,framerate=30/1 ! appsink name=sink"
 
-  # ---- common identifier (uvc / v4l2 / realsense) ----
-  serial_number: null
-  # ---- uvc / v4l2 only (USB identifiers) ----
-  physical_path: null
-  bcd_device: "0217"
-  vid_pid: null
-  video_id: null
-  # ---- gstreamer only ----
-  gst_pipeline: "v4l2src device=/dev/video0 ! image/jpeg ! appsink name=sink"
+  # =====================================================
+  # Right wrist camera configuration
+  # =====================================================
+  right_wrist_camera:
+    # ---- common keys ----
+    enable_zmq: false
+    zmq_port : 55557
+    enable_webrtc: false
+    webrtc_port: 60003
+    webrtc_codec: h264
+    type: uvc
+    image_shape: [480, 640]
+    binocular: false
+    fps: 30
 
-# =====================================================
-# Left wrist camera configuration
-# =====================================================
-left_wrist_camera:
-  enable_zmq: true
-  zmq_port : 55556
-  enable_webrtc: true
-  webrtc_port : 60002
-  webrtc_codec: h264
-  type: uvc
-  image_shape: [480, 640]
-  binocular: false
-  fps: 30
-  # identifier keys are ignored by the gstreamer type (kept null for a uniform
-  # schema); the pipeline itself selects the device (/dev/video8 here).
-  # ---- common identifier (uvc / v4l2 / realsense) ----
-  serial_number: "200901010001"
-  # ---- uvc / v4l2 only (USB identifiers) ----
-  physical_path: null
-  bcd_device: null
-  vid_pid: null
-  video_id: null
-  # ---- gstreamer only ----
-  # gstreamer pipeline is JPEG-first: the appsink receives MJPG/JPEG buffers,
-  # forwarded to ZMQ with no re-encode; BGR is decoded lazily only when WebRTC is
-  # on. So DO NOT add jpegdec/videoconvert — deliver image/jpeg straight to the
-  # appsink. Bound to the Abham Image camera (640x480 MJPG) via its stable
-  # /dev/v4l/by-id symlink, so it survives USB re-enumeration (the raw /dev/videoN
-  # number is not stable — this camera has appeared as video8 and video10).
-  gst_pipeline: "v4l2src device=/dev/v4l/by-id/usb-HHWei_Technology_Co.__Ltd._Abham_Image_HHW001-video-index0 ! image/jpeg,width=640,height=480,framerate=30/1 ! appsink name=sink"
-
-# =====================================================
-# Right wrist camera configuration
-# =====================================================
-right_wrist_camera:
-  enable_zmq: false
-  zmq_port : 55557
-  enable_webrtc: false
-  webrtc_port: 60003
-  webrtc_codec: h264
-  type: uvc
-  image_shape: [480, 640]
-  binocular: false
-  fps: 30
-  # ---- common identifier (uvc / v4l2 / realsense) ----
-  serial_number: "200901010002"
-  # ---- uvc / v4l2 only (USB identifiers) ----
-  physical_path: null
-  bcd_device: null
-  vid_pid: null
-  video_id: null
-  # ---- gstreamer only ----
-  gst_pipeline: null
+    # ---- driver-specific keys ----
+    # common identifier (uvc / v4l2 / realsense)
+    serial_number: "200901010002"
+    # uvc / v4l2 only (USB identifiers)
+    physical_path: null
+    bcd_device: null
+    vid_pid: null
+    video_id: null
+    # gstreamer only
+    gst_pipeline: null
 
 # =====================================================
 # GStreamer camera example (commented out)
@@ -147,17 +143,19 @@ right_wrist_camera:
 # Requires: sudo apt install python3-gi python3-gst-1.0 \
 #           gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 #
-# head_camera_gst:
-#   enable_zmq: true
-#   zmq_port: 55555
-#   enable_webrtc: true
-#   webrtc_port: 60001
-#   webrtc_codec: h264
-#   type: gstreamer
-#   image_shape: [480, 1280]
-#   binocular: true
-#   fps: 30
-#   # USB / V4L2 MJPG source (no decode — JPEG straight to appsink):
-#   gst_pipeline: "v4l2src device=/dev/video0 ! image/jpeg,width=1280,height=480,framerate=30/1 ! appsink name=sink"
-#   # Jetson CSI (GMSL/MIPI) source example (raw → HW JPEG encode before appsink):
-#   # gst_pipeline: "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvjpegenc ! image/jpeg ! appsink name=sink"
+#   head_camera_gst:
+#     # ---- common keys ----
+#     enable_zmq: true
+#     zmq_port: 55555
+#     enable_webrtc: true
+#     webrtc_port: 60001
+#     webrtc_codec: h264
+#     type: gstreamer
+#     image_shape: [480, 1280]
+#     binocular: true
+#     fps: 30
+#     # ---- driver-specific keys ----
+#     # USB / V4L2 MJPG source (no decode — JPEG straight to appsink):
+#     gst_pipeline: "v4l2src device=/dev/video0 ! image/jpeg,width=1280,height=480,framerate=30/1 ! appsink name=sink"
+#     # Jetson CSI (GMSL/MIPI) source example (raw → HW JPEG encode before appsink):
+#     # gst_pipeline: "nvarguscamerasrc sensor-id=0 ! video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1 ! nvjpegenc ! image/jpeg ! appsink name=sink"

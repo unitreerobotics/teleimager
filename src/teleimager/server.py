@@ -786,22 +786,22 @@ class CameraFinder:
         return ("GStreamerCamera (%d found)   [type: gstreamer]" % len(cams), cams)
 
 class BaseCamera:
-    def __init__(self, cam_topic, img_shape, fps, 
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
+    def __init__(self, cam_topic, server_cfg):
         self._ready = threading.Event()
         self._cam_topic = cam_topic
-        self._img_shape = img_shape # (H, W)
-        self._fps = fps
-        self._enable_zmq = enable_zmq
-        self._zmq_port = zmq_port
+        # ---- common keys: parsed here once for every camera ----
+        self._img_shape = server_cfg.get("image_shape", None) # (H, W)
+        self._fps = server_cfg.get("fps", 30)
+        self._enable_zmq = server_cfg.get("enable_zmq", False)
+        self._zmq_port = server_cfg.get("zmq_port", None)
         if self._enable_zmq:
             self._zmq_buffer = TripleRingBuffer()
         else:
             self._zmq_buffer = None
 
-        self._enable_webrtc = enable_webrtc
-        self._webrtc_port = webrtc_port
-        self._webrtc_codec = webrtc_codec
+        self._enable_webrtc = server_cfg.get("enable_webrtc", False)
+        self._webrtc_port = server_cfg.get("webrtc_port", None)
+        self._webrtc_codec = server_cfg.get("webrtc_codec", None)
         if self._enable_webrtc:
             self._webrtc_buffer = TripleRingBuffer()
         else:
@@ -861,12 +861,11 @@ class BaseCamera:
         raise NotImplementedError
 
 class RealSenseCamera(BaseCamera):
-    def __init__(self, cam_topic, serial_number, img_shape, fps, 
-                 enable_zmq=True, zmq_port = 55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None, enable_depth=False):
+    def __init__(self, cam_topic, serial_number, server_cfg):
         rs = self.get_realsense_module()
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+        super().__init__(cam_topic, server_cfg)
         self._serial_number = serial_number
-        self._enable_depth = enable_depth
+        self._enable_depth = server_cfg.get("enable_depth", False)
         self._latest_depth = None
         try:
             align_to = rs.stream.color
@@ -1120,19 +1119,18 @@ class RealSenseCamera(BaseCamera):
         return modes
 
     @classmethod
-    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
-        serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
+    def from_config(cls, cam_topic, server_cfg):
+        serial_number = str(server_cfg.get("serial_number")) if server_cfg.get("serial_number") else None
         # Self-contained resolution: RealSense runs its OWN scan (no CameraFinder).
         serials = [c.get("serial_number") for c in cls.scan()]
         if serial_number not in serials:
             logger_mp.error(f"[Teleimage Server] Cannot find RealSenseCamera for {cam_topic}")
             return None
-        return cls(cam_topic, serial_number, **base_kwargs)
+        return cls(cam_topic, serial_number, server_cfg)
 
 class UVCCamera(BaseCamera):
-    def __init__(self, cam_topic, uid, img_shape, fps, 
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+    def __init__(self, cam_topic, uid, server_cfg):
+        super().__init__(cam_topic, server_cfg)
         uvc = self.get_uvc_module()
         self.uid = uid
         self.cap = None
@@ -1325,12 +1323,12 @@ class UVCCamera(BaseCamera):
         return cards
 
     @classmethod
-    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
-        physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
-        serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
-        _bcd = cam_cfg.get("bcd_device")
+    def from_config(cls, cam_topic, server_cfg):
+        physical_path = str(server_cfg.get("physical_path")) if server_cfg.get("physical_path") else None
+        serial_number = str(server_cfg.get("serial_number")) if server_cfg.get("serial_number") else None
+        _bcd = server_cfg.get("bcd_device")
         bcd_device = f"{_bcd:04d}" if type(_bcd) is int else (str(_bcd) if _bcd else None)
-        vid_pid = str(cam_cfg.get("vid_pid")) if cam_cfg.get("vid_pid") else None
+        vid_pid = str(server_cfg.get("vid_pid")) if server_cfg.get("vid_pid") else None
 
         # Self-contained resolution: UVC runs its OWN scan and maps the yaml
         # identifier to the libuvc uid needed to open the device. RealSense-owned
@@ -1350,7 +1348,7 @@ class UVCCamera(BaseCamera):
             if uid is None:
                 logger_mp.error(f"[Teleimage Server] Cannot find UVCCamera for {cam_topic} with physical path {physical_path}")
             else:
-                return cls(cam_topic, uid, **base_kwargs)
+                return cls(cam_topic, uid, server_cfg)
 
         # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
         # ——— even if no camera matches the given path/serial.
@@ -1359,28 +1357,27 @@ class UVCCamera(BaseCamera):
             if uid is None:
                 logger_mp.error(f"[Teleimage Server] Cannot find UVCCamera for {cam_topic} with serial number {serial_number}")
                 return None
-            return cls(cam_topic, uid, **base_kwargs)
+            return cls(cam_topic, uid, server_cfg)
 
         if bcd_device is not None:
             uid = _uid("bcd_device", bcd_device, unique=True)
             if uid is None:
                 logger_mp.error(f"[Teleimage Server] Cannot find UVCCamera for {cam_topic} with bcd_device {bcd_device}")
                 return None
-            return cls(cam_topic, uid, **base_kwargs)
+            return cls(cam_topic, uid, server_cfg)
 
         if vid_pid is not None:
             uid = _uid("vid_pid", vid_pid, unique=True)
             if uid is None:
                 logger_mp.error(f"[Teleimage Server] Cannot find UVCCamera for {cam_topic} with vid_pid {vid_pid}")
                 return None
-            return cls(cam_topic, uid, **base_kwargs)
+            return cls(cam_topic, uid, server_cfg)
 
         return None
 
 class V4L2Camera(BaseCamera):
-    def __init__(self, cam_topic, video_path, img_shape, fps,
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+    def __init__(self, cam_topic, video_path, server_cfg):
+        super().__init__(cam_topic, server_cfg)
         self._video_path = video_path
 
         # JPEG-first: default to MJPG (raw JPEG straight to ZMQ, decode lazily for
@@ -1658,14 +1655,14 @@ class V4L2Camera(BaseCamera):
         return cards
 
     @classmethod
-    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
-        video_id = cam_cfg.get("video_id", "0")
+    def from_config(cls, cam_topic, server_cfg):
+        video_id = server_cfg.get("video_id", "0")
         video_path = f"/dev/video{video_id}" if video_id else None
-        physical_path = str(cam_cfg.get("physical_path")) if cam_cfg.get("physical_path") else None
-        serial_number = str(cam_cfg.get("serial_number")) if cam_cfg.get("serial_number") else None
-        _bcd = cam_cfg.get("bcd_device")
+        physical_path = str(server_cfg.get("physical_path")) if server_cfg.get("physical_path") else None
+        serial_number = str(server_cfg.get("serial_number")) if server_cfg.get("serial_number") else None
+        _bcd = server_cfg.get("bcd_device")
         bcd_device = f"{_bcd:04d}" if type(_bcd) is int else (str(_bcd) if _bcd else None)
-        vid_pid = str(cam_cfg.get("vid_pid")) if cam_cfg.get("vid_pid") else None
+        vid_pid = str(server_cfg.get("vid_pid")) if server_cfg.get("vid_pid") else None
 
         # Self-contained resolution: V4L2 harvests its OWN sysfs identifiers (no
         # CameraFinder). A camera libuvc cannot open is still bindable by
@@ -1677,7 +1674,7 @@ class V4L2Camera(BaseCamera):
             if vpath is None:
                 logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with physical path {physical_path}")
             else:
-                return cls(cam_topic, vpath, **base_kwargs)
+                return cls(cam_topic, vpath, server_cfg)
 
         # once you specify either `physical_path` or `serial_number`, the system will no longer fall back to searching by `video_id`.
         # ——— even if no camera matches the given path/serial.
@@ -1686,31 +1683,30 @@ class V4L2Camera(BaseCamera):
             if vpath is None:
                 logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with serial number {serial_number}")
                 return None
-            return cls(cam_topic, vpath, **base_kwargs)
+            return cls(cam_topic, vpath, server_cfg)
 
         if bcd_device is not None:
             vpath = cls._resolve_vpath(ids, "bcd_device", bcd_device)
             if vpath is None:
                 logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with bcd_device {bcd_device}")
                 return None
-            return cls(cam_topic, vpath, **base_kwargs)
+            return cls(cam_topic, vpath, server_cfg)
 
         if vid_pid is not None:
             vpath = cls._resolve_vpath(ids, "vid_pid", vid_pid)
             if vpath is None:
                 logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with vid_pid {vid_pid}")
                 return None
-            return cls(cam_topic, vpath, **base_kwargs)
+            return cls(cam_topic, vpath, server_cfg)
 
         if not any(r["video_path"] == video_path for r in ids):
             logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with video_id {video_id}")
             return None
-        return cls(cam_topic, video_path, **base_kwargs)
+        return cls(cam_topic, video_path, server_cfg)
 
 class GStreamerCamera(BaseCamera):
-    def __init__(self, cam_topic, gst_pipeline, img_shape, fps,
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None):
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+    def __init__(self, cam_topic, gst_pipeline, server_cfg):
+        super().__init__(cam_topic, server_cfg)
         self._Gst = self.get_gstreamer_module()
         self._pipeline_str = gst_pipeline
 
@@ -1854,37 +1850,28 @@ class GStreamerCamera(BaseCamera):
         return cards
 
     @classmethod
-    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
-        gst_pipeline = cam_cfg.get("gst_pipeline")
+    def from_config(cls, cam_topic, server_cfg):
+        gst_pipeline = server_cfg.get("gst_pipeline")
         if not gst_pipeline:
             logger_mp.error(f"[Teleimage Server] type 'gstreamer' for {cam_topic} requires a 'gst_pipeline' (must contain appsink).")
             return None
-        return cls(cam_topic, gst_pipeline, **base_kwargs)
+        return cls(cam_topic, gst_pipeline, server_cfg)
 
 class IsaacSimCamera(BaseCamera):
-    def __init__(self, cam_topic, img_shape, fps,
-                 enable_zmq=True, zmq_port=55555, enable_webrtc=False, webrtc_port=60001, webrtc_codec=None,
-                 image_source="head", binocular=False):
+    def __init__(self, cam_topic, server_cfg, image_source="head"):
         """
         IsaacSim camera that reads from shared memory.
 
         Args:
             cam_topic: camera topic name
-            img_shape: image shape [height, width]
-            fps: frames per second
-            enable_zmq: enable ZMQ publishing
-            zmq_port: ZMQ port
-            enable_webrtc: enable WebRTC publishing
-            webrtc_port: WebRTC port
-            webrtc_codec: WebRTC codec preference
+            server_cfg: this camera's config block (common keys parsed by BaseCamera)
             image_source: which image to read from shared memory ("head", "left", "right")
-            binocular: if True and image_source=="head", concatenate left+right for binocular vision
         """
-        super().__init__(cam_topic, img_shape, fps, enable_zmq, zmq_port, enable_webrtc, webrtc_port, webrtc_codec)
+        super().__init__(cam_topic, server_cfg)
         from tools.shared_memory_utils import MultiImageReader # https://github.com/unitreerobotics/unitree_sim_isaaclab/tree/main/tools
         self.multi_image_reader = MultiImageReader()
         self._image_source = image_source  # "head", "left", or "right"
-        self._binocular = binocular
+        self._binocular = server_cfg.get("binocular", False)  # if True and image_source=="head", concatenate left+right
         # For IsaacSim cameras, set ready immediately since the camera object is initialized
         # and will wait for shared memory data in _update_frame
         self._ready.set()
@@ -1947,9 +1934,9 @@ class IsaacSimCamera(BaseCamera):
         return []
 
     @classmethod
-    def from_config(cls, cam_topic, cam_cfg, base_kwargs):
+    def from_config(cls, cam_topic, server_cfg):
         # Check if binocular mode is enabled
-        binocular = cam_cfg.get("binocular", False)
+        binocular = server_cfg.get("binocular", False)
 
         # For IsaacSim cameras, determine image source based on camera topic and binocular setting
         if binocular:
@@ -1964,7 +1951,7 @@ class IsaacSimCamera(BaseCamera):
             else:
                 image_source = "head"  # fallback
 
-        return cls(cam_topic, image_source=image_source, binocular=binocular, **base_kwargs)
+        return cls(cam_topic, server_cfg, image_source=image_source)
 # ========================================================
 # teleimage server
 # ========================================================
@@ -1985,41 +1972,25 @@ class TeleImageServer:
         self._publisher_threads = []  # keep references for graceful join
 
         try:
-            # Load cameras from self._server_config
-            for cam_topic, cam_cfg in self._server_config.items():
-                if not cam_cfg.get("enable_zmq", False) and not cam_cfg.get("enable_webrtc", False):
+            # Load cameras from self._server_config["camera"]
+            for cam_topic, server_cfg in self._server_config["camera"].items():
+                if not server_cfg.get("enable_zmq", False) and not server_cfg.get("enable_webrtc", False):
                     continue
 
-                enable_zmq = cam_cfg.get("enable_zmq", False)
-                zmq_port = cam_cfg.get("zmq_port", None)
-                enable_webrtc = cam_cfg.get("enable_webrtc", False)
-                webrtc_port = cam_cfg.get("webrtc_port", None)
-                webrtc_codec = cam_cfg.get("webrtc_codec", None)
-                cam_type = cam_cfg.get("type", "uvc").lower()
+                cam_type = server_cfg.get("type", "uvc").lower()
                 if self._enable_isaacsim and cam_type!="isaacsim":
                     cam_type = "isaacsim"
-                img_shape = cam_cfg.get("image_shape", None)
-                fps = cam_cfg.get("fps", 30)
-                base_kwargs = dict(
-                    img_shape=img_shape,
-                    fps=fps,
-                    enable_zmq=enable_zmq,
-                    zmq_port=zmq_port,
-                    enable_webrtc=enable_webrtc,
-                    webrtc_port=webrtc_port,
-                    webrtc_codec=webrtc_codec,
-                )
 
                 if cam_type == "v4l2":
-                    self._cameras[cam_topic] = V4L2Camera.from_config(cam_topic, cam_cfg, base_kwargs)
+                    self._cameras[cam_topic] = V4L2Camera.from_config(cam_topic, server_cfg)
                 elif cam_type == "realsense":
-                    self._cameras[cam_topic] = RealSenseCamera.from_config(cam_topic, cam_cfg, base_kwargs)
+                    self._cameras[cam_topic] = RealSenseCamera.from_config(cam_topic, server_cfg)
                 elif cam_type == "uvc":
-                    self._cameras[cam_topic] = UVCCamera.from_config(cam_topic, cam_cfg, base_kwargs)
+                    self._cameras[cam_topic] = UVCCamera.from_config(cam_topic, server_cfg)
                 elif cam_type == "gstreamer":
-                    self._cameras[cam_topic] = GStreamerCamera.from_config(cam_topic, cam_cfg, base_kwargs)
+                    self._cameras[cam_topic] = GStreamerCamera.from_config(cam_topic, server_cfg)
                 elif cam_type == "isaacsim":
-                    self._cameras[cam_topic] = IsaacSimCamera.from_config(cam_topic, cam_cfg, base_kwargs)
+                    self._cameras[cam_topic] = IsaacSimCamera.from_config(cam_topic, server_cfg)
                 else:
                     logger_mp.error(f"[Teleimage Server] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                     continue
