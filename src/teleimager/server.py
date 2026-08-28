@@ -50,7 +50,43 @@ _turbojpeg = TurboJPEG()
 # ========================================================
 # teleimager_server.yaml path
 # ========================================================
-SERVER_CONFIG_PATH = str(Path(__file__).resolve().parents[2] / "teleimager_server.yaml")
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "teleimager"
+SERVER_CONFIG_PATH = str(CONFIG_DIR / "teleimager_server.yaml")
+
+def load_server_config(cli_path=None):
+    """Resolve the server config path, seeding the default from the bundled
+    template if needed, then load and return the parsed yaml dict. Exits on failure."""
+    if cli_path:
+        path = Path(cli_path).expanduser().resolve()
+    elif os.environ.get("TELEIMAGER_CONFIG"):
+        path = Path(os.environ["TELEIMAGER_CONFIG"]).expanduser().resolve()
+    else:
+        path = Path(SERVER_CONFIG_PATH)
+        if not path.exists():
+            # First run: copy the bundled default template into the user config dir.
+            try:
+                from importlib import resources
+                template = resources.files("teleimager").joinpath("teleimager_server.yaml").read_text(encoding="utf-8")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(template, encoding="utf-8")
+                logger_mp.info(
+                    f"[Teleimager] Created default config at {path}\n"
+                    "  Next:\n"
+                    "    1) Discover your cameras (see 'teleimager-server --help').\n"
+                    "    2) Edit the config file above per the discovery results.\n"
+                    "    3) Start the server: teleimager-server"
+                )
+            except Exception as e:
+                logger_mp.error(f"[Teleimager] Failed to create default config at {path}: {e}")
+                exit(1)
+    try:
+        with open(path, "r") as f:
+            config = yaml.safe_load(f)
+        logger_mp.debug(f"[Teleimager] Loaded server config from {path}")
+        return config
+    except Exception as e:
+        logger_mp.error(f"[Teleimager] Failed to load configuration file at {path}: {e}")
+        exit(1)
 
 # ========================================================
 # certificate and key paths
@@ -2149,12 +2185,7 @@ def set_performance_mode(cores=[0, 1, 2]):
 
 def run_isaacsim_server():
     # Load config file, start teleimage server
-    try:
-        with open(SERVER_CONFIG_PATH, "r") as f:
-            server_config = yaml.safe_load(f)
-    except Exception as e:
-        logger_mp.error(f"[Teleimager] Failed to load configuration file at {SERVER_CONFIG_PATH}: {e}")
-        exit(1)
+    server_config = load_server_config()
     # start teleimage server
     server = TeleImageServer(server_config, enable_realsense=False, enable_isaacsim=True)
     server.start()
@@ -2177,15 +2208,19 @@ def main():
         "\n"
         f"  {head('Step 1')} — Discover connected cameras ('cf' = camera find):\n"
         f"      {cmd('teleimager-server')} {flag('--cf --uvc --v4l2 --gst --rs')}\n"
-        f"    {dim('Note: --cf scans ONLY the backends you list, so pass at least one of')}\n"
-        f"    {dim('      --uvc / --v4l2 / --gst / --rs (list several to scan them together).')}\n"
+        f"    {dim('--cf by itself scans nothing. Add one flag per camera type you want to scan:')}\n"
+        f"    {dim('  --uvc (USB UVC)  --v4l2 (V4L2)  --gst (GStreamer)  --rs (RealSense).')}\n"
+        f"    {dim('Pass as many as you like; the example above scans all four backends.')}\n"
         "    The output lists each camera's video path, serial number, physical path, etc.\n"
-        f"    Copy those values into {flag('teleimager_server.yaml')}.\n"
         "\n"
-        f"  {head('Step 2')} — Start the server (with the yaml configured):\n"
+        f"  {head('Step 2')} — Fill in the config with those values. Edit this file:\n"
+        f"      {flag('~/.config/teleimager/teleimager_server.yaml')}\n"
+        "    (the default, auto-created on first run; or use your own path via --config / $TELEIMAGER_CONFIG)\n"
+        "\n"
+        f"  {head('Step 3')} — Start the server:\n"
         f"      {cmd('teleimager-server')}\n"
         "\n"
-        f"  {head('Step 3')} — Receive the streams:\n"
+        f"  {head('Step 4')} — Receive the streams:\n"
         f"      {flag('ZMQ')}    : {cmd('teleimager-client --host <server_ip>')}\n"
         f"      {flag('WebRTC')} : open {url('https://<server_ip>:<webrtc_port>')} in a browser\n"
     )
@@ -2201,10 +2236,13 @@ def main():
     parser.add_argument('--rs', action='store_true', help='In --cf, include the RealSense (pyrealsense2) backend in the scan.')
     parser.add_argument('--isaacsim', action='store_true', help='Run the server in IsaacSim mode (frames from shared memory instead of physical cameras).')
     parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Do not pin the process to specific CPU cores.')
+    parser.add_argument('--config', default=None, metavar='PATH', help='Path to a server yaml config (overrides $TELEIMAGER_CONFIG and the default user config dir).')
     args = parser.parse_args()
 
     if args.affinity:
         set_performance_mode(cores=[0, 1, 2])
+
+    server_config = load_server_config(args.config)
 
     # if enable camera finder mode, just print cameras info and exit
     if args.cf:
@@ -2213,14 +2251,6 @@ def main():
                      enable_gstreamer=args.gst,
                      enable_realsense=args.rs)
         exit(0)
-
-    # Load config file, start teleimage server
-    try:
-        with open(SERVER_CONFIG_PATH, "r") as f:
-            server_config = yaml.safe_load(f)
-    except Exception as e:
-        logger_mp.error(f"[Teleimager] Failed to load configuration file at {SERVER_CONFIG_PATH}: {e}")
-        exit(1)
 
     # start teleimage server
     server = TeleImageServer(server_config)

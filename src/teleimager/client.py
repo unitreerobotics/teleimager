@@ -647,7 +647,7 @@ class ZMQ_Responser:
 # ========================================================
 class ZMQ_Requester:
     """ ZMQ REQ socket to request camera configuration from server. If server is unreachable,
-        try to load from local teleimager_client.yaml or teleimager_server.yaml."""
+        fall back to the locally cached teleimager_client.yaml from the last successful fetch."""
     def __init__(self, host: str, port: int):
         """
         Args:

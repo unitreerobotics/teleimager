@@ -147,19 +147,17 @@ teleimager-server --cf
 
 ### 1.3 📡 启动图像服务器
 
-根据摄像头搜索结果配置 `cam_config_server.yaml`。
- （示例配置见原文，此处不重复）
-
-启动服务器：
+首次启动时，服务器会在 `~/.config/teleimager/teleimager_server.yaml` 生成一份默认配置。
+根据上一步的摄像头搜索结果编辑该文件，然后启动服务器：
 
 ```
 python -m teleimager.server
-python -m teleimager.server --rs   # 若使用 RealSense
-
 # 或
 teleimager-server
-teleimager-server --rs
 ```
+
+> RealSense 摄像头由 yaml 中的 `type: realsense` 驱动，启动服务器时**无需**额外参数。
+> 也可用 `--config <路径>` 或环境变量 `$TELEIMAGER_CONFIG` 指定其它配置文件。
 
 
 

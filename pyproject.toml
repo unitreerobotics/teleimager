@@ -34,6 +34,11 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Bundle non-python assets into the wheel: the default server config template,
+# the WebRTC page logo, and the client web assets loaded at runtime.
+teleimager = ["teleimager_server.yaml", "unitree_logo.svg"]
+
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"

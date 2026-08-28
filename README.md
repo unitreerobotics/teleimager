@@ -148,16 +148,17 @@ Found RGB video devices: ['/dev/video0', '/dev/video2']
 
 ### 1.3 📡 Start the Image Server
 
-After filling `cam_config_server.yaml` according to camera discovery, start the server:
+On first start the server creates a default config at `~/.config/teleimager/teleimager_server.yaml`.
+Edit it to match your cameras (using the values from the discovery step above), then start the server:
 
 ```bash
 python -m teleimager.server
-python -m teleimager.server --rs   # if using RealSense
-
 # or
 teleimager-server
-teleimager-server --rs
 ```
+
+> RealSense cameras are driven by `type: realsense` in the yaml — no extra flag is needed at server start.
+> You can point the server at a different config with `--config <path>` or the `$TELEIMAGER_CONFIG` env var.
 
 
 
