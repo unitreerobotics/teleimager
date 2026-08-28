@@ -33,31 +33,11 @@ import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PACKAGE_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
-CLIENT_CONFIG_PATH = os.path.join(PACKAGE_DIR, "teleimager_client.yaml")
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "teleimager")
+CLIENT_CONFIG_PATH = os.path.join(CONFIG_DIR, "teleimager_client.yaml")
 
-
-def get_local_config():
-    """Load camera config from the local cache of the last server config received."""
-    camera_config = None
-
-    if os.path.exists(CLIENT_CONFIG_PATH):
-        try:
-            with open(CLIENT_CONFIG_PATH, "r") as f:
-                camera_config = yaml.safe_load(f)
-            logger_mp.info(f"Loaded camera config from local {CLIENT_CONFIG_PATH}")
-        except Exception as e:
-            logger_mp.warning(f"Failed to load local teleimager_client.yaml: {e}")
-    else:
-        logger_mp.error("No local camera config cache found. A server config must be received at least once.")
-
-    if camera_config is None:
-        raise RuntimeError("Failed to get camera configuration.")
-    else:
-        # Server yaml nests cameras under a top-level `camera:` block (alongside
-        # `webrtc:`); unwrap it here so downstream access stays flat (topic->cfg).
-        return camera_config["camera"]
+# Seconds of uninterrupted empty frames before the no-frame watchdog warns once.
+STALL_SECONDS = 3.0
 
 # ========================================================
 # Utility tools
@@ -157,7 +137,7 @@ class ZMQ_PublisherThread(threading.Thread):
         self._queue.put_nowait(data)
 
         if dropped_old:
-            logger_mp.debug(f"Publisher queue full for {self._host}:{self._port}, dropped old message")
+            logger_mp.debug(f"[Teleimager] Publisher queue full for {self._host}:{self._port}, dropped old message")
 
     def stop(self) -> None:
         """Stop the publisher thread gracefully."""
@@ -172,7 +152,7 @@ class ZMQ_PublisherThread(threading.Thread):
 
         self.join(timeout=1)
         if self.is_alive():
-            logger_mp.warning("Publisher thread did not stop gracefully")
+            logger_mp.warning("[Teleimager] Publisher thread did not stop gracefully")
 
     def run(self) -> None:
         """Main publisher loop with socket creation in worker thread."""
@@ -198,9 +178,9 @@ class ZMQ_PublisherThread(threading.Thread):
                     try:
                         self._socket.send(data, zmq.NOBLOCK)
                     except zmq.Again:
-                        logger_mp.warning(f"High water mark reached for at {self._host}:{self._port}, dropping message")
+                        logger_mp.warning(f"[Teleimager] High water mark reached for at {self._host}:{self._port}, dropping message")
                     except zmq.ZMQError as e:
-                        logger_mp.error(f"Failed to publish to at {self._host}:{self._port}: {e}")
+                        logger_mp.error(f"[Teleimager] Failed to publish to at {self._host}:{self._port}: {e}")
                         break
 
                 except queue.Empty:
@@ -208,18 +188,18 @@ class ZMQ_PublisherThread(threading.Thread):
                     continue
                 except Exception as e:
                     if self._running:
-                        logger_mp.error(f"Error in publisher loop: {e}")
+                        logger_mp.error(f"[Teleimager] Error in publisher loop: {e}")
                     break
 
         except Exception as e:
-            logger_mp.error(f"Failed to initialize publisher socket: {e}")
+            logger_mp.error(f"[Teleimager] Failed to initialize publisher socket: {e}")
         finally:
             # Ensure socket is closed when thread exits
             if self._socket:
                 try:
                     self._socket.close()
                 except Exception as e:
-                    logger_mp.warning(f"Error closing socket in cleanup: {e}")
+                    logger_mp.warning(f"[Teleimager] Error closing socket in cleanup: {e}")
                 self._socket = None
 
     def wait_for_start(self, timeout: float = 1.0) -> bool:
@@ -247,7 +227,7 @@ class ZMQ_PublisherManager:
 
             return publisher_thread
         except Exception as e:
-            logger_mp.error(f"Failed to create publisher thread for {host}:{port}: {e}")
+            logger_mp.error(f"[Teleimager] Failed to create publisher thread for {host}:{port}: {e}")
             raise
 
     def _get_publisher_thread(self, port: int, host: str = "0.0.0.0") -> ZMQ_PublisherThread:
@@ -263,7 +243,7 @@ class ZMQ_PublisherManager:
                 try:
                     self._publisher_threads[key].stop()
                 except Exception as e:
-                    logger_mp.error(f"Error stopping publisher at {key[0]}:{key[1]}: {e}")
+                    logger_mp.error(f"[Teleimager] Error stopping publisher at {key[0]}:{key[1]}: {e}")
                 del self._publisher_threads[key]
     
     # --------------------------------------------------------
@@ -300,7 +280,7 @@ class ZMQ_PublisherManager:
             publisher_thread = self._get_publisher_thread(port, host)
             publisher_thread.send(data)
         except Exception as e:
-            logger_mp.error(f"Unexpected error in publish: {e}")
+            logger_mp.error(f"[Teleimager] Unexpected error in publish: {e}")
             raise
 
     def close(self) -> None:
@@ -312,7 +292,7 @@ class ZMQ_PublisherManager:
                 try:
                     publisher_thread.stop()
                 except Exception as e:
-                    logger_mp.error(f"Error stopping publisher at {key[0]}:{key[1]}: {e}")
+                    logger_mp.error(f"[Teleimager] Error stopping publisher at {key[0]}:{key[1]}: {e}")
             self._publisher_threads.clear()
 
 # ========================================================
@@ -332,11 +312,11 @@ class TeleImage:
         """ Get decoded BGR image if decoding is enabled and data is available."""
         # state 1: decoding disabled
         if self._bgr is TeleImage._NOT_SET:
-            logger_mp.warning(f"[TeleImager] Accessing .bgr but decoding was DISABLED.")
+            logger_mp.warning(f"[Teleimager] Accessing .bgr but decoding was DISABLED.")
             return None
         # state 2: decoding enabled but no data
         if self._bgr is None:
-            logger_mp.debug(f"[TeleImager] Accessing .bgr but no image data received.")
+            logger_mp.debug(f"[Teleimager] Accessing .bgr but no image data received.")
             return None
         # state 3: decoding enabled and data available
         return self._bgr
@@ -402,7 +382,7 @@ class ZMQ_SubscriberThread(threading.Thread):
             np_img = np.frombuffer(jpg_bytes, dtype=np.uint8)
             return cv2.imdecode(np_img, cv2.IMREAD_COLOR)
         except Exception as e:
-            logger_mp.warning(f"[ZMQ_SubscriberThread] Failed to decode image: {e}")
+            logger_mp.warning(f"[Teleimager] Failed to decode image: {e}")
             return None
 
     def ensure_bgr_enabled(self):
@@ -451,13 +431,13 @@ class ZMQ_SubscriberThread(threading.Thread):
         self._running = False
         self.join(timeout=1.0)
         if self.is_alive():
-            logger_mp.warning("Subscriber thread did not stop gracefully")
+            logger_mp.warning("[Teleimager] Subscriber thread did not stop gracefully")
         if self._decoder_thread is not None:
             with contextlib.suppress(queue.Full):
                 self._bgr_decode_queue.put_nowait(None)
             self._decoder_thread.join(timeout=1.0)
             if self._decoder_thread.is_alive():
-                logger_mp.warning("Subscriber decoder thread did not stop gracefully")
+                logger_mp.warning("[Teleimager] Subscriber decoder thread did not stop gracefully")
 
     def run(self) -> None:
         """Main subscriber loop with socket creation in worker thread."""
@@ -496,7 +476,7 @@ class ZMQ_SubscriberThread(threading.Thread):
                         
                     except Exception as e:
                         if self._running:
-                            logger_mp.error(f"Error in subscriber loop: {e}")
+                            logger_mp.error(f"[Teleimager] Error in subscriber loop: {e}")
                         break
                 else:
                     self._jpg_3ring_buffer.write(None)
@@ -509,16 +489,16 @@ class ZMQ_SubscriberThread(threading.Thread):
                             pass
 
                     self._fps_monitor.reset()
-                    logger_mp.debug(f"No message received from {self._host}:{self._port} within timeout.")
+                    logger_mp.debug(f"[Teleimager] No message received from {self._host}:{self._port} within timeout.")
         except Exception as e:
-            logger_mp.error(f"Failed to initialize subscriber socket: {e}")
+            logger_mp.error(f"[Teleimager] Failed to initialize subscriber socket: {e}")
         finally:
             # Ensure socket is closed when thread exits
             if self._socket:
                 try:
                     self._socket.close()
                 except Exception as e:
-                    logger_mp.warning(f"Error closing socket in cleanup: {e}")
+                    logger_mp.warning(f"[Teleimager] Error closing socket in cleanup: {e}")
                 self._socket = None
 
 class ZMQ_SubscriberManager:
@@ -543,7 +523,7 @@ class ZMQ_SubscriberManager:
                 raise ConnectionError(f"Subscriber thread failed to start for {host}:{port}")
             return subscriber_thread
         except Exception as e:
-            logger_mp.error(f"Failed to create subscriber thread for {host}:{port}: {e}")
+            logger_mp.error(f"[Teleimager] Failed to create subscriber thread for {host}:{port}: {e}")
             raise 
 
     def _get_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
@@ -596,13 +576,13 @@ class ZMQ_SubscriberManager:
                 try:
                     subscriber.stop()
                 except Exception as e:
-                    logger_mp.error(f"Error stopping subscriber at {key[0]}:{key[1]}: {e}")
+                    logger_mp.error(f"[Teleimager] Error stopping subscriber at {key[0]}:{key[1]}: {e}")
             self._subscriber_threads.clear()
             type(self)._instance = None
         try:
             self._context.term()
         except Exception as e:
-            logger_mp.warning(f"Error closing SubscriberManager context: {e}")
+            logger_mp.warning(f"[Teleimager] Error closing SubscriberManager context: {e}")
 
 # ========================================================
 # ZMQ response
@@ -627,7 +607,7 @@ class ZMQ_Responser:
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        logger_mp.info(f"[Responser] Camera Config Responser initialized at {self._host}:{self._port}")
+        logger_mp.info(f"[Teleimager] Camera Config Responser initialized at {self._host}:{self._port}")
 
     def _run(self):
         poller = zmq.Poller()
@@ -641,9 +621,9 @@ class ZMQ_Responser:
             except zmq.ZMQError as e:
                 if not self._running:
                     break  # normal exit when stopping
-                logger_mp.error(f"ZMQError in Responser: {e}")
+                logger_mp.error(f"[Teleimager] ZMQError in Responser: {e}")
             except Exception as e:
-                logger_mp.error(f"Unexpected error in Responser: {e}")
+                logger_mp.error(f"[Teleimager] Unexpected error in Responser: {e}")
     # --------------------------------------------------------
     # public api
     # --------------------------------------------------------
@@ -655,12 +635,12 @@ class ZMQ_Responser:
         self._running = False
         self._thread.join(timeout=1)
         if self._thread.is_alive():
-            logger_mp.warning("Responser thread did not stop gracefully")
+            logger_mp.warning("[Teleimager] Responser thread did not stop gracefully")
         try:
             self._socket.close()
             self._context.term()
         except Exception as e:
-            logger_mp.warning(f"Error closing Responser socket: {e}")
+            logger_mp.warning(f"[Teleimager] Error closing Responser socket: {e}")
 
 # ========================================================
 # ZMQ request
@@ -684,31 +664,55 @@ class ZMQ_Requester:
         self._poller = zmq.Poller()
         self._poller.register(self._socket, zmq.POLLIN)
 
+    @staticmethod
+    def _load_local_config():
+        """Load the camera table from the local cache of the last scanned server config."""
+        camera_config = None
+        if os.path.exists(CLIENT_CONFIG_PATH):
+            try:
+                with open(CLIENT_CONFIG_PATH, "r") as f:
+                    camera_config = yaml.safe_load(f)
+                logger_mp.debug(f"[Teleimager] Loaded camera config from local {CLIENT_CONFIG_PATH}")
+            except Exception as e:
+                logger_mp.warning(f"[Teleimager] Failed to load local teleimager_client.yaml: {e}")
+        else:
+            logger_mp.error("[Teleimager] No local camera config cache found. Run 'teleimager-client' once to fetch it from the server.")
+
+        if camera_config is None:
+            raise RuntimeError("Failed to get camera configuration.")
+
+        return camera_config["camera"]
+
     # --------------------------------------------------------
     # public api
     # --------------------------------------------------------
-    def request(self) -> Optional[Dict[str, Any]]:
-        camera_config = None
+    def request(self) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """Fetch the camera config. Returns (config, from_server): from_server is
+        True only when the config came fresh off the network; on timeout/error it
+        falls back to the local cache with from_server=False."""
         try:
-            msg = b"GET_DATA"
-            self._socket.send(msg)
+            self._socket.send(b"GET_DATA")
             socks = dict(self._poller.poll(timeout=1000))
 
             if self._socket in socks and socks[self._socket] == zmq.POLLIN:
                 camera_config = self._socket.recv_json()
                 if camera_config is not None:
-                    logger_mp.info(f"Received camera config from server {self._host}:{self._port}")
+                    logger_mp.info(f"[Teleimager] Received camera config from server {self._host}:{self._port}")
+                    os.makedirs(CONFIG_DIR, exist_ok=True)
                     with open(CLIENT_CONFIG_PATH, "w") as f:
                         yaml.safe_dump(camera_config, f, sort_keys=False, allow_unicode=True)
-                    logger_mp.info(f"Saved camera config to local {CLIENT_CONFIG_PATH}")
-                    camera_config = camera_config["camera"]
+                    logger_mp.info(f"[Teleimager] Saved camera config to local {CLIENT_CONFIG_PATH}")
+                    return camera_config["camera"], True
             else:
-                logger_mp.warning(f"Request to {self._host}:{self._port} timed out or no response, using local config.")
-                camera_config = get_local_config()
-            return camera_config
+                logger_mp.warning(f"[Teleimager] Request to {self._host}:{self._port} timed out or no response.")
         except Exception as e:
-            logger_mp.error(f"Unexpected error in Requester: {e}")
-            return camera_config
+            logger_mp.error(f"[Teleimager] Unexpected error in Requester: {e}")
+
+        # Network failed: best-effort fall back to the last cached config.
+        try:
+            return self._load_local_config(), False
+        except Exception:
+            return None, False
 
     def close(self):
         """Close the requester socket and terminate context."""
@@ -716,237 +720,136 @@ class ZMQ_Requester:
             self._socket.close()
             self._context.term()
         except Exception as e:
-            logger_mp.warning(f"Error closing Requester socket: {e}")
+            logger_mp.warning(f"[Teleimager] Error closing Requester socket: {e}")
 
 # ========================================================
-# image Config Client
-# ========================================================
-class ImageConfigClient:
-    def __init__(self, host="192.168.123.164", request_port=60000):
-        """
-        Args:
-            server_address:   IP address of image host server
-            request_port:     TCP port for camera configuration request
-            request_bgr:      Whether to request BGR decoding for subscribers
-        """
-        self._host = host
-        self._request_port = request_port
-
-        # requester setup
-        self._requester  = ZMQ_Requester(self._host, self._request_port)
-        self._camera_config = self._requester.request()
-
-        if self._camera_config is None:
-            self._requester.close()
-            raise RuntimeError("Failed to get camera configuration.")
-        
-        if not self._camera_config['head_camera']['enable_zmq'] and not self._camera_config['head_camera']['enable_webrtc']:
-            logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
-
-    # --------------------------------------------------------
-    # public api
-    # --------------------------------------------------------
-    def get_cam_config(self):
-        return self._camera_config
-        
-    def close(self):
-        self._requester.close()
-        logger_mp.info("Image client has been closed.")
-
-# ========================================================
-# image Data Client
-# ========================================================
-class HeadImageClient:
-    def __init__(self, host="192.168.123.164", request_bgr: bool = False):
-        """
-        Args:
-            server_address:   IP address of image host server
-            request_port:     TCP port for camera configuration request
-            request_bgr:      Whether to request BGR decoding for subscribers
-        """
-        self._host = host
-        self._request_bgr = request_bgr
-        self._camera_config = get_local_config()
-        self._closed = False
-        self._subscriber_manager = None
-        
-        try:
-            # subscriber setup
-            self._subscriber_manager = ZMQ_SubscriberManager.get_instance()
-            
-            if self._camera_config['head_camera']['enable_zmq']:
-                self._subscriber_manager.subscribe(self._host, self._camera_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
-        except Exception:
-            if self._subscriber_manager is not None:
-                self._subscriber_manager.close()
-            raise
-
-        if not self._camera_config['head_camera']['enable_zmq'] and not self._camera_config['head_camera']['enable_webrtc']:
-            logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
-
-    # --------------------------------------------------------
-    # public api
-    # --------------------------------------------------------
-    def get_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._camera_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
-    
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        self._subscriber_manager.close()
-        logger_mp.info("Image client has been closed.")
-
-class LeftWristImageClient:
-    def __init__(self, host="192.168.123.164", request_bgr: bool = False):
-        """
-        Args:
-            server_address:   IP address of image host server
-            request_port:     TCP port for camera configuration request
-            request_bgr:      Whether to request BGR decoding for subscribers
-        """
-        self._host = host
-        self._request_bgr = request_bgr
-        self._camera_config = get_local_config()
-        self._closed = False
-        self._subscriber_manager = None
-        
-        try:
-            # subscriber setup
-            self._subscriber_manager = ZMQ_SubscriberManager.get_instance()
-
-            if self._camera_config['left_wrist_camera']['enable_zmq']:
-                self._subscriber_manager.subscribe(self._host, self._camera_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-        except Exception:
-            if self._subscriber_manager is not None:
-                self._subscriber_manager.close()
-            raise
-
-        if not self._camera_config['left_wrist_camera']['enable_zmq'] and not self._camera_config['left_wrist_camera']['enable_webrtc']:
-            logger_mp.warning("NOTICE! left wrist camera is not enabled on both ZMQ and WebRTC.")
-
-    # --------------------------------------------------------
-    # public api
-    # --------------------------------------------------------
-    def get_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._camera_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-    
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        self._subscriber_manager.close()
-        logger_mp.info("Image client has been closed.")
-
-class RightWristImageClient:
-    def __init__(self, host="192.168.123.164", request_bgr: bool = False):
-        """
-        Args:
-            server_address:   IP address of image host server
-            request_port:     TCP port for camera configuration request
-            request_bgr:      Whether to request BGR decoding for subscribers
-        """
-        self._host = host
-        self._request_bgr = request_bgr
-        self._camera_config = get_local_config()
-        self._closed = False
-        self._subscriber_manager = None
-        
-        try:
-            # subscriber setup
-            self._subscriber_manager = ZMQ_SubscriberManager.get_instance()
-
-            if self._camera_config['right_wrist_camera']['enable_zmq']:
-                self._subscriber_manager.subscribe(self._host, self._camera_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-        except Exception:
-            if self._subscriber_manager is not None:
-                self._subscriber_manager.close()
-            raise
-
-        if not self._camera_config['right_wrist_camera']['enable_zmq'] and not self._camera_config['right_wrist_camera']['enable_webrtc']:
-            logger_mp.warning("NOTICE! right wrist camera camera is not enabled on both ZMQ and WebRTC.")
-
-    # --------------------------------------------------------
-    # public api
-    # --------------------------------------------------------
-    def get_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._camera_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-        
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        self._subscriber_manager.close()
-        logger_mp.info("Image client has been closed.")
-
-
-# ========================================================
-# image client
+# teleimage client
 # ========================================================
 class TeleImageClient:
-    def __init__(self, host="192.168.123.164", request_port=60000, request_bgr: bool = False):
+    """Subscribe to a single camera stream identified by its topic.
+
+    Per-topic singleton: constructing a client for a topic that already has a
+    live client returns that existing instance (and logs a warning) instead of
+    creating a second one.
+    """
+    _instances: Dict[str, "TeleImageClient"] = {}
+    _instances_lock = threading.Lock()
+
+    def __new__(cls, topic, *args, **kwargs):
+        with cls._instances_lock:
+            existing = cls._instances.get(topic)
+            if existing is not None:
+                logger_mp.warning(f"[Teleimager] Camera '{topic}' already has a client; returning the existing instance.")
+                return existing
+            instance = super().__new__(cls)
+            cls._instances[topic] = instance
+            return instance
+
+    def __init__(self, camera_topic, server_host, zmq_port, request_bgr: bool = False):
         """
         Args:
-            server_address:   IP address of image host server
-            request_port:     TCP port for camera configuration request
+            camera_topic:     Camera name, used only as a label (window title / logs / singleton key)
+            server_host:      IP address of teleimager host server
+            zmq_port:         Server port publishing this camera's stream (see the roster printed by scan())
             request_bgr:      Whether to request BGR decoding for subscribers
         """
-        self._host = host
-        self._request_port = request_port
+        if getattr(self, "_initialized", False):
+            return  # singleton reuse: already set up, do not re-subscribe
+        self._initialized = True
+        self._camera_topic = camera_topic
+        self._server_host = server_host
+        self._zmq_port = zmq_port
         self._request_bgr = request_bgr
         self._closed = False
-        self._subscriber_manager = None
-        self._requester = None
-
-        try:
-            # subscriber and requester setup
-            self._subscriber_manager = ZMQ_SubscriberManager.get_instance()
-            self._requester  = ZMQ_Requester(self._host, self._request_port)
-            self._camera_config = self._requester.request()
-
-            if self._camera_config is None:
-                raise RuntimeError("Failed to get camera configuration.")
-            
-            if self._camera_config['head_camera']['enable_zmq']:
-                self._subscriber_manager.subscribe(self._host, self._camera_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
-
-            if self._camera_config['left_wrist_camera']['enable_zmq']:
-                self._subscriber_manager.subscribe(self._host, self._camera_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-
-            if self._camera_config['right_wrist_camera']['enable_zmq']:
-                self._subscriber_manager.subscribe(self._host, self._camera_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-        except Exception:
-            if self._requester is not None:
-                self._requester.close()
-            if self._subscriber_manager is not None:
-                self._subscriber_manager.close()
-            raise
-
-        if not self._camera_config['head_camera']['enable_zmq'] and not self._camera_config['head_camera']['enable_webrtc']:
-            logger_mp.warning("[Image Client] NOTICE! Head camera is not enabled on both ZMQ and WebRTC.")
+        self._subscriber_manager = ZMQ_SubscriberManager.get_instance()
+        self._subscriber_manager.subscribe(self._server_host, self._zmq_port, request_bgr=self._request_bgr)
+        # No-frame watchdog state (edge-triggered warning; see get_frame).
+        self._last_frame_ts = time.perf_counter()
+        self._stalled = False
+        logger_mp.info(f" 📷 Camera {self._camera_topic!r:<22} init ok (host={self._server_host}, zmq_port={self._zmq_port}, request_bgr={self._request_bgr})")
 
     # --------------------------------------------------------
     # public api
     # --------------------------------------------------------
-    def get_cam_config(self):
-        return self._camera_config
+    @classmethod
+    def scan(cls, server_host, request_port=60000):
+        requester = ZMQ_Requester(server_host, request_port)
+        try:
+            camera_config, from_server = requester.request()
+        finally:
+            requester.close()
+        if camera_config is None:
+            raise RuntimeError("Failed to get camera configuration.")
+        else:
+            if from_server:
+                logger_mp.info(f"[Teleimager] Cameras currently available on teleimager-server @ {server_host}:")
+            else:
+                logger_mp.warning(f"[Teleimager] teleimager-server @ {server_host} unreachable — showing last cached cameras (may be stale):")
 
-    def get_head_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._camera_config['head_camera']['zmq_port'], request_bgr=self._request_bgr)
-    
-    def get_left_wrist_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._camera_config['left_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-    
-    def get_right_wrist_frame(self):
-        return self._subscriber_manager.subscribe(self._host, self._camera_config['right_wrist_camera']['zmq_port'], request_bgr=self._request_bgr)
-        
+            # Print the roster as an aligned table so columns line up and scan vertically.
+            def _shape(s):
+                return f"{s[0]}x{s[1]}" if isinstance(s, (list, tuple)) and len(s) == 2 else str(s)
+            topic_w = max((len(t) for t in camera_config), default=0)
+            type_w = max((len(str(cfg.get('type'))) for cfg in camera_config.values()), default=0)
+            shape_w = max((len(_shape(cfg.get('image_shape'))) for cfg in camera_config.values()), default=0)
+            for topic, cfg in camera_config.items():
+                zmq_on = 'on' if cfg.get('enable_zmq') else 'off'
+                webrtc_on = 'on' if cfg.get('enable_webrtc') else 'off'
+                logger_mp.info(
+                    f" 📷 {topic:<{topic_w}}  {str(cfg.get('type')):<{type_w}}  {_shape(cfg.get('image_shape')):>{shape_w}}  "
+                    f"zmq={zmq_on:<3}(port={cfg.get('zmq_port')})  webrtc={webrtc_on:<3}(port={cfg.get('webrtc_port')})"
+                )
+            # Show how to stream every zmq-enabled camera, instantiating each explicitly.
+            topics = [t for t, cfg in camera_config.items() if cfg.get('enable_zmq')]
+            if topics:
+                lines = ["import cv2, time", "from teleimager.client import TeleImageClient", ""]
+                for t in topics:
+                    lines.append(f'{t} = TeleImageClient("{t}", server_host="{server_host}", zmq_port={camera_config[t]["zmq_port"]}, request_bgr=True)')
+                lines.append("try:")
+                lines.append("    while True:")
+                for t in topics:
+                    lines.append(f"        frame = {t}.get_frame()")
+                    lines.append("        if frame.bgr is not None:")
+                    lines.append(f'            cv2.imshow("{t}", frame.bgr)')
+                lines.append("        if cv2.waitKey(1) & 0xFF == ord('q'):")
+                lines.append("            break")
+                lines.append("        time.sleep(0.002)")
+                lines.append("finally:")
+                for t in topics:
+                    lines.append(f"    {t}.close()")
+                lines.append("    cv2.destroyAllWindows()")
+                logger_mp.info("[Teleimager] Copy-paste example to stream these cameras:\n```python\n" + "\n".join(lines) + "\n```")
+        return camera_config, from_server
+
+    def get_frame(self):
+        frame = self._subscriber_manager.subscribe(self._server_host, self._zmq_port, request_bgr=self._request_bgr)
+        # No-frame watchdog: edge-triggered, so a steady outage logs exactly once
+        # (and recovery once). Pure comparisons — no blocking, no network, no scan.
+        now = time.perf_counter()
+        if frame.jpg is not None:
+            self._last_frame_ts = now
+            if self._stalled:
+                self._stalled = False
+                logger_mp.info(f" 📷 Camera {self._camera_topic!r:<22} frames resumed.")
+        elif not self._stalled and now - self._last_frame_ts > STALL_SECONDS:
+            self._stalled = True
+            logger_mp.warning(f" 📷 Camera {self._camera_topic!r:<22} no frames for {STALL_SECONDS:g}s "
+                              f"@ {self._server_host}:{self._zmq_port} — is the server running and this port correct?")
+        return frame
+
     def close(self):
         if self._closed:
             return
         self._closed = True
-        self._requester.close()
         self._subscriber_manager.close()
-        logger_mp.info("Image client has been closed.")
+        with type(self)._instances_lock:
+            type(self)._instances.pop(self._camera_topic, None)
+        logger_mp.info(f" 📷 Camera {self._camera_topic!r:<22} closed.")
+
+
+# ========================================================
+# Teleimage Client
+# ========================================================
 
 def main():
     # command line args
@@ -955,42 +858,40 @@ def main():
     parser.add_argument('--host', type=str, default='192.168.123.164', help='IP address of image server')
     args = parser.parse_args()
 
-    # Example usage with three camera streams
-    client = TeleImageClient(host=args.host, request_bgr=True)
-    camera_config = client.get_cam_config()
+    # Request the server config once (network-first, cached to local on success).
+    camera_config, from_server = TeleImageClient.scan(server_host=args.host)
+    if not from_server:
+        logger_mp.error(f"[Teleimager] teleimager-server @ {args.host}:{60000} is unreachable. Check the server and retry.")
+        return
+    logger_mp.debug(f"[Teleimager] Camera config loaded: {camera_config}")
+
+    topics = [t for t, cfg in camera_config.items() if cfg.get('enable_zmq')]
+    if not topics:
+        logger_mp.warning("[Teleimager] No ZMQ-enabled cameras to stream.")
+        return
+
+    # Visualize every ZMQ-enabled camera; press 'q' to quit.
+    clients = {topic: TeleImageClient(topic, server_host=args.host, zmq_port=camera_config[topic]['zmq_port'], request_bgr=True)
+               for topic in topics}
 
     running = True
-    while running:
-        if camera_config['head_camera']['enable_zmq']:
-            head_img = client.get_head_frame()
-            if head_img.bgr is not None:
-                logger_mp.info(f"Head Camera FPS: {head_img.fps:.2f}")
-                logger_mp.debug(f"Head Camera Shape: {camera_config['head_camera']['image_shape']}")
-                logger_mp.debug(f"Head Camera Binocular: {camera_config['head_camera']['binocular']}")
-                cv2.imshow("Head Camera", head_img.bgr)
+    try:
+        while running:
+            for topic, client in clients.items():
+                frame = client.get_frame()
+                if frame.bgr is not None:
+                    cv2.putText(frame.bgr, f"fps: {frame.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.imshow(topic, frame.bgr)
 
-        if camera_config['left_wrist_camera']['enable_zmq']:
-            left_wrist_img = client.get_left_wrist_frame()
-            if left_wrist_img.bgr is not None:
-                logger_mp.info(f"Left Wrist Camera FPS: {left_wrist_img.fps:.2f}")
-                logger_mp.debug(f"Left Wrist Camera Shape: {camera_config['left_wrist_camera']['image_shape']}")
-                cv2.imshow("Left Wrist Camera", left_wrist_img.bgr)
-
-        if camera_config['right_wrist_camera']['enable_zmq']:
-            right_wrist_img = client.get_right_wrist_frame()
-            if right_wrist_img.bgr is not None:
-                logger_mp.info(f"Right Wrist Camera FPS: {right_wrist_img.fps:.2f}")
-                logger_mp.debug(f"Right Wrist Camera Shape: {camera_config['right_wrist_camera']['image_shape']}")
-                cv2.imshow("Right Wrist Camera", right_wrist_img.bgr)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            logger_mp.info("Exiting image client on user request.")
-            running = False
-            # clean up
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                running = False
+            # Small delay to prevent excessive CPU usage
+            time.sleep(0.002)
+    finally:
+        for client in clients.values():
             client.close()
-            cv2.destroyAllWindows()
-        # Small delay to prevent excessive CPU usage
-        time.sleep(0.002)
+        cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

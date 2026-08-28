@@ -111,7 +111,7 @@ camera:
     enable_webrtc: false
     webrtc_port: 60003
     webrtc_codec: h264
-    type: uvc
+    type: v4l2
     image_shape: [480, 640]
     binocular: false
     fps: 30

@@ -13,7 +13,7 @@
 
 ## 1. Image Server
 
-This repository provides an image server that captures video streams from multiple cameras (UVC, V4L2, GStreamer, and RealSense) and publishes them over the network using ZeroMQ or WebRTC.
+[**TeleImager**](https://github.com/unitreerobotics/teleimager) is Unitree's image server that captures video streams from multiple cameras (UVC, V4L2, GStreamer, and RealSense) and publishes them over the network using ZeroMQ or WebRTC.
 
 Currently, **Tele Imager** is used in the [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate) project to provide teleoperation video streams.
 

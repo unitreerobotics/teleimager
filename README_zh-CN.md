@@ -14,7 +14,7 @@
 
 ## 1. 图像服务器（Image Server）
 
-该仓库提供一个图像服务器，用于从多路摄像头（UVC、V4L2、GStreamer 和 RealSense）采集视频流，并使用 ZeroMQ 或 WebRTC 方式进行网络发布。
+[**TeleImager**](https://github.com/unitreerobotics/teleimager) 是宇树（Unitree）的图像服务器，用于从多路摄像头（UVC、V4L2、GStreamer 和 RealSense）采集视频流，并使用 ZeroMQ 或 WebRTC 方式进行网络发布。
 
 目前 Tele Imager 用于 [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate) 项目中提供遥操作视频流。
 

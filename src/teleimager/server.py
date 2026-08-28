@@ -89,7 +89,7 @@ def _apply_webrtc_config(server_config):
             setattr(vpx, attr, int(bitrate[key]))
     if "gop_length" in cfg and int(cfg["gop_length"]) > 0:
         _GOP_LENGTH = int(cfg["gop_length"])
-    logger_mp.info(f"[WebRTC] bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}")
+    logger_mp.info(f"[Teleimager] bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}")
 
 # ========================================================
 # libx264 for Jetson (Patch h264 Encoder)
@@ -117,7 +117,7 @@ def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: boo
             self.frame_count = 0
             force_keyframe = True
         except Exception as e:
-            logger_mp.error(f"[H264 Patch] Initialization failed: {e}")
+            logger_mp.error(f"[Teleimager] Initialization failed: {e}")
             return
 
     if not force_keyframe and hasattr(self, "frame_count") and self.frame_count % _GOP_LENGTH == 0:
@@ -132,7 +132,7 @@ def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: boo
             if data:
                 yield from self._split_bitstream(data)
     except Exception as e:
-        logger_mp.warning(f"[H264 Patch] Encode error: {e}")
+        logger_mp.warning(f"[Teleimager] Encode error: {e}")
 
 h264.H264Encoder._encode_frame = jetson_software_encode_frame
 
@@ -325,7 +325,7 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
             video_frame.time_base = fractions.Fraction(1, 90000)
             
         except Exception as e:
-            logger_mp.debug(f"Conversion failed: {e}")
+            logger_mp.debug(f"[Teleimager] Conversion failed: {e}")
             return
 
         # 2. Push to queue thread-safely
@@ -412,7 +412,7 @@ class WebRTC_PublisherThread(threading.Thread):
         # Reject malformed offers (e.g. scanners or non-conforming clients)
         # instead of letting them raise unhandled exceptions and spam logs.
         if not isinstance(params, dict) or "sdp" not in params or "type" not in params:
-            logger_mp.warning(f"[WebRTC] Rejected malformed offer (missing sdp/type) for port:{self._port}")
+            logger_mp.warning(f"[Teleimager] Rejected malformed offer (missing sdp/type) for port:{self._port}")
             return self._error_response(400, "Missing 'sdp' or 'type'")
 
         user_agent = request.headers.get("User-Agent", "").lower()
@@ -441,28 +441,28 @@ class WebRTC_PublisherThread(threading.Thread):
                     h264_codecs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
                     if h264_codecs:
                         transceiver.setCodecPreferences(h264_codecs)
-                        logger_mp.info(f"[WebRTC] Preferred H264 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred H264 for port:{self._port}")
                     else:
-                        logger_mp.warning(f"[WebRTC] H264 preferred but not found, using auto-negotiation for port:{self._port}")
+                        logger_mp.warning(f"[Teleimager] H264 preferred but not found, using auto-negotiation for port:{self._port}")
                         
                 elif pref == "vp8":
                     vp8_codecs = [c for c in capabilities.codecs if c.mimeType == "video/VP8"]
                     if vp8_codecs:
                         transceiver.setCodecPreferences(vp8_codecs)
-                        logger_mp.info(f"[WebRTC] Preferred VP8 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred VP8 for port:{self._port}")
                     else:
-                        logger_mp.warning(f"[WebRTC] VP8 preferred but not found, using auto-negotiation for port:{self._port}")
+                        logger_mp.warning(f"[Teleimager] VP8 preferred but not found, using auto-negotiation for port:{self._port}")
                 
                 else:
                     h264_codecs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
                     if h264_codecs:
                         transceiver.setCodecPreferences(h264_codecs)
-                        logger_mp.info(f"[WebRTC] Preferred codec '{pref}' not found, falling back to H264 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred codec '{pref}' not found, falling back to H264 for port:{self._port}")
                     else:
-                        logger_mp.warning(f"[WebRTC] Preferred codec '{pref}' not found, using auto-negotiation for port:{self._port}")
+                        logger_mp.warning(f"[Teleimager] Preferred codec '{pref}' not found, using auto-negotiation for port:{self._port}")
                     
             except Exception as e:
-                logger_mp.error(f"Relay subscription failed: {e}")
+                logger_mp.error(f"[Teleimager] Relay subscription failed: {e}")
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
@@ -476,7 +476,7 @@ class WebRTC_PublisherThread(threading.Thread):
         except Exception as e:
             # Malformed SDP (missing ICE ufrag/pwd) or codec negotiation failure
             # (e.g. client offers no codec compatible with our H264 preference).
-            logger_mp.warning(f"[WebRTC] Negotiation failed for port:{self._port}: {e}")
+            logger_mp.warning(f"[Teleimager] Negotiation failed for port:{self._port}: {e}")
             await self._cleanup_pc(pc)
             return self._error_response(400, f"Negotiation failed: {e}")
 
@@ -535,7 +535,7 @@ class WebRTC_PublisherThread(threading.Thread):
         try:
             self._loop.run_until_complete(_main())
         except Exception as e:
-            logger_mp.error(f"WebRTC Thread Error: {e}")
+            logger_mp.error(f"[Teleimager] WebRTC Thread Error: {e}")
         finally:
             if self._loop: self._loop.close()
 
@@ -596,7 +596,7 @@ class WebRTC_PublisherManager:
             pub = self._get_publisher(port, host, codec_pref)
             pub.send(data)
         except Exception as e:
-            logger_mp.error(f"Unexpected error in publish: {e}")
+            logger_mp.error(f"[Teleimager] Unexpected error in publish: {e}")
             pass
 
     def close(self) -> None:
@@ -616,9 +616,9 @@ def reload_uvcvideo_module():
         subprocess.run("sudo modprobe -r uvcvideo", shell=True, check=True)
         subprocess.run("sudo modprobe uvcvideo debug=0", shell=True, check=True)
         subprocess.run("sudo udevadm settle", shell=True, check=True)
-        logger_mp.info("UVC driver reloaded successfully.")
+        logger_mp.info("[Teleimager] UVC driver reloaded successfully.")
     except subprocess.CalledProcessError as e:
-        logger_mp.error(f"Failed to reload driver: {e}")
+        logger_mp.error(f"[Teleimager] Failed to reload driver: {e}")
 
 # ========================================================
 # camera finder and cameras
@@ -634,7 +634,7 @@ class CameraFinder:
         self.enable_realsense = enable_realsense
         self.report()
         if not any([enable_uvc, enable_v4l2, enable_gstreamer, enable_realsense]):
-            logger_mp.warning("🖼️ No camera backends enabled.")
+            logger_mp.warning("[Teleimager] 🖼️ No camera backends enabled.")
 
     def report(self):
         if self.enable_uvc or self.enable_v4l2 or self.enable_gstreamer:
@@ -656,7 +656,7 @@ class CameraFinder:
         ]
         branches = [b for b in branches if b is not None]
 
-        logger_mp.info("🎯 Camera Finder Report")
+        logger_mp.info("[Teleimager] 🎯 Camera Finder Report")
         self._print_children(branches, "")
 
     @staticmethod
@@ -881,7 +881,7 @@ class RealSenseCamera(BaseCamera):
             profile = self.pipeline.start(config)
             self._device = profile.get_device()
             if self._device is None:
-                logger_mp.error('[RealSenseCamera] pipe_profile.get_device() is None .')
+                logger_mp.error('[Teleimager] pipe_profile.get_device() is None .')
             if self._enable_depth:
                 assert self._device is not None
                 depth_sensor = self._device.first_depth_sensor()
@@ -898,12 +898,9 @@ class RealSenseCamera(BaseCamera):
             raise RuntimeError(f"[RealSenseCamera] Failed to initialize RealSense camera {self._serial_number}: {e}")
 
     def __str__(self):
-        return (
-            f"📷[RealSenseCamera: {self._cam_topic}] initialized with "
-            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
-            f"ZMQ: {'enabled, zmq_port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
-            f"WebRTC: {'enabled, webrtc_port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
-        )
+        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
+        return f" 📷 Camera {self._cam_topic!r:<22} realsense, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
 
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames()
@@ -941,11 +938,11 @@ class RealSenseCamera(BaseCamera):
                 try:
                     self.pipeline.stop()
                 except Exception as e:
-                    logger_mp.warning(f"[RealSenseCamera] pipeline.stop() failed: {e}")
+                    logger_mp.warning(f"[Teleimager] pipeline.stop() failed: {e}")
         except Exception:
             pass
         self.pipeline = None
-        logger_mp.info(f"[RealSenseCamera] Released {self._cam_topic}")
+        logger_mp.info(f"[Teleimager] Released {self._cam_topic}")
 
     @staticmethod
     def get_realsense_module():
@@ -1124,7 +1121,7 @@ class RealSenseCamera(BaseCamera):
         # Self-contained resolution: RealSense runs its OWN scan (no CameraFinder).
         serials = [c.get("serial_number") for c in cls.scan()]
         if serial_number not in serials:
-            logger_mp.error(f"[Teleimage Server] Cannot find RealSenseCamera for {cam_topic}")
+            logger_mp.error(f"[Teleimager] Cannot find RealSenseCamera for {cam_topic}")
             return None
         return cls(cam_topic, serial_number, server_cfg)
 
@@ -1161,12 +1158,9 @@ class UVCCamera(BaseCamera):
             raise RuntimeError(msg)
 
     def __str__(self):
-        return (
-            f"📷[UVCCamera: {self._cam_topic}] initialized with "
-            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS, MJPG.\n"
-            f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
-            f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
-        )
+        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
+        return f" 📷 Camera {self._cam_topic!r:<22} uvc, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, MJPG, {zmq}, {webrtc}"
 
     def _choose_mode(self, cap, width=None, height=None, fps=None):
         for m in cap.available_modes:
@@ -1202,7 +1196,7 @@ class UVCCamera(BaseCamera):
         # except Exception:
         #     pass
         # self.cap = None
-        logger_mp.info(f"[UVCCamera] Released {self._cam_topic}")
+        logger_mp.info(f"[Teleimager] Released {self._cam_topic}")
 
     @staticmethod
     def _list_video_paths():
@@ -1346,7 +1340,7 @@ class UVCCamera(BaseCamera):
         if physical_path is not None:
             uid = _uid("physical_path", physical_path, unique=False)
             if uid is None:
-                logger_mp.error(f"[Teleimage Server] Cannot find UVCCamera for {cam_topic} with physical path {physical_path}")
+                logger_mp.error(f"[Teleimager] Cannot find UVCCamera for {cam_topic} with physical path {physical_path}")
             else:
                 return cls(cam_topic, uid, server_cfg)
 
@@ -1355,21 +1349,21 @@ class UVCCamera(BaseCamera):
         if serial_number is not None:
             uid = _uid("serial_number", serial_number, unique=True)
             if uid is None:
-                logger_mp.error(f"[Teleimage Server] Cannot find UVCCamera for {cam_topic} with serial number {serial_number}")
+                logger_mp.error(f"[Teleimager] Cannot find UVCCamera for {cam_topic} with serial number {serial_number}")
                 return None
             return cls(cam_topic, uid, server_cfg)
 
         if bcd_device is not None:
             uid = _uid("bcd_device", bcd_device, unique=True)
             if uid is None:
-                logger_mp.error(f"[Teleimage Server] Cannot find UVCCamera for {cam_topic} with bcd_device {bcd_device}")
+                logger_mp.error(f"[Teleimager] Cannot find UVCCamera for {cam_topic} with bcd_device {bcd_device}")
                 return None
             return cls(cam_topic, uid, server_cfg)
 
         if vid_pid is not None:
             uid = _uid("vid_pid", vid_pid, unique=True)
             if uid is None:
-                logger_mp.error(f"[Teleimage Server] Cannot find UVCCamera for {cam_topic} with vid_pid {vid_pid}")
+                logger_mp.error(f"[Teleimager] Cannot find UVCCamera for {cam_topic} with vid_pid {vid_pid}")
                 return None
             return cls(cam_topic, uid, server_cfg)
 
@@ -1403,13 +1397,10 @@ class V4L2Camera(BaseCamera):
             logger_mp.info(str(self))
 
     def __str__(self):
-        return (
-            f"📷[V4L2Camera: {self._cam_topic}] initialized with "
-            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
-            f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
-            f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
-        )
-        
+        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
+        return f" 📷 Camera {self._cam_topic!r:<22} v4l2, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
+
     def _can_read_frame(self):
         try:
             return len(bytes(next(self._demux))) > 0
@@ -1452,7 +1443,7 @@ class V4L2Camera(BaseCamera):
             except Exception:
                 pass
         self.container = None
-        logger_mp.info(f"[V4L2Camera] Released {self._cam_topic}")
+        logger_mp.info(f"[Teleimager] Released {self._cam_topic}")
 
     @staticmethod
     def _v4l2_device_info(video_path):
@@ -1672,7 +1663,7 @@ class V4L2Camera(BaseCamera):
         if physical_path is not None:
             vpath = cls._resolve_vpath(ids, "physical_path", physical_path)
             if vpath is None:
-                logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with physical path {physical_path}")
+                logger_mp.error(f"[Teleimager] Cannot find V4L2Camera for {cam_topic} with physical path {physical_path}")
             else:
                 return cls(cam_topic, vpath, server_cfg)
 
@@ -1681,26 +1672,26 @@ class V4L2Camera(BaseCamera):
         if serial_number is not None:
             vpath = cls._resolve_vpath(ids, "serial_number", serial_number)
             if vpath is None:
-                logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with serial number {serial_number}")
+                logger_mp.error(f"[Teleimager] Cannot find V4L2Camera for {cam_topic} with serial number {serial_number}")
                 return None
             return cls(cam_topic, vpath, server_cfg)
 
         if bcd_device is not None:
             vpath = cls._resolve_vpath(ids, "bcd_device", bcd_device)
             if vpath is None:
-                logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with bcd_device {bcd_device}")
+                logger_mp.error(f"[Teleimager] Cannot find V4L2Camera for {cam_topic} with bcd_device {bcd_device}")
                 return None
             return cls(cam_topic, vpath, server_cfg)
 
         if vid_pid is not None:
             vpath = cls._resolve_vpath(ids, "vid_pid", vid_pid)
             if vpath is None:
-                logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with vid_pid {vid_pid}")
+                logger_mp.error(f"[Teleimager] Cannot find V4L2Camera for {cam_topic} with vid_pid {vid_pid}")
                 return None
             return cls(cam_topic, vpath, server_cfg)
 
         if not any(r["video_path"] == video_path for r in ids):
-            logger_mp.error(f"[Teleimage Server] Cannot find V4L2Camera for {cam_topic} with video_id {video_id}")
+            logger_mp.error(f"[Teleimager] Cannot find V4L2Camera for {cam_topic} with video_id {video_id}")
             return None
         return cls(cam_topic, video_path, server_cfg)
 
@@ -1722,12 +1713,9 @@ class GStreamerCamera(BaseCamera):
             logger_mp.info(str(self))
 
     def __str__(self):
-        return (
-            f"📷[GStreamerCamera: {self._cam_topic}] initialized with "
-            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS.\n"
-            f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
-            f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
-        )
+        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
+        return f" 📷 Camera {self._cam_topic!r:<22} gstreamer, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
 
     @staticmethod
     def get_gstreamer_module():
@@ -1815,7 +1803,7 @@ class GStreamerCamera(BaseCamera):
             except Exception:
                 pass
         self.pipe = None
-        logger_mp.info(f"[GStreamerCamera] Released {self._cam_topic}")
+        logger_mp.info(f"[Teleimager] Released {self._cam_topic}")
 
     @classmethod
     def scan(cls):
@@ -1853,7 +1841,7 @@ class GStreamerCamera(BaseCamera):
     def from_config(cls, cam_topic, server_cfg):
         gst_pipeline = server_cfg.get("gst_pipeline")
         if not gst_pipeline:
-            logger_mp.error(f"[Teleimage Server] type 'gstreamer' for {cam_topic} requires a 'gst_pipeline' (must contain appsink).")
+            logger_mp.error(f"[Teleimager] type 'gstreamer' for {cam_topic} requires a 'gst_pipeline' (must contain appsink).")
             return None
         return cls(cam_topic, gst_pipeline, server_cfg)
 
@@ -1878,13 +1866,10 @@ class IsaacSimCamera(BaseCamera):
         logger_mp.info(str(self))
 
     def __str__(self):
-        mode = "binocular" if self._binocular else "monocular"
-        return (
-            f"📷[IsaacSimCamera: {self._cam_topic}] initialized with "
-            f"{self._img_shape[0]}x{self._img_shape[1]} @ {self._fps} FPS, source='{self._image_source}', mode='{mode}'.\n"
-            f"ZMQ: {'enabled, zmq port=' + str(self._zmq_port) if self._enable_zmq else 'disabled'}; "
-            f"WebRTC: {'enabled, webrtc port=' + str(self._webrtc_port) if self._enable_webrtc else 'disabled'}"
-        )
+        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
+        extra = f"source={self._image_source!r}, {'binocular' if self._binocular else 'monocular'}"
+        return f" 📷 Camera {self._cam_topic!r:<22} isaacsim, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {extra}, {zmq}, {webrtc}"
 
     def _update_frame(self):
         # Get the image data based on source and binocular settings
@@ -1893,16 +1878,16 @@ class IsaacSimCamera(BaseCamera):
             # For binocular cameras: concatenate left + right images
             left_img = self.multi_image_reader.read_single_image('left')
             right_img = self.multi_image_reader.read_single_image('right')
-            logger_mp.debug(f"[IsaacSimCamera] {self._cam_topic} - left: {left_img is not None}, right: {right_img is not None}")
+            logger_mp.debug(f"[Teleimager] {self._cam_topic} - left: {left_img is not None}, right: {right_img is not None}")
 
             if left_img is not None and right_img is not None:
                 frame_data = np.hstack([left_img, right_img])
-                logger_mp.debug(f"[IsaacSimCamera] {self._cam_topic} - concatenated binocular frame: {frame_data.shape}")
+                logger_mp.debug(f"[Teleimager] {self._cam_topic} - concatenated binocular frame: {frame_data.shape}")
         else:
             # For monocular cameras: use the specified source directly
             frame_data = self.multi_image_reader.read_single_image(self._image_source)
             if frame_data is None:
-                logger_mp.debug(f"[IsaacSimCamera] {self._cam_topic} - no data for source '{self._image_source}'")
+                logger_mp.debug(f"[Teleimager] {self._cam_topic} - no data for source '{self._image_source}'")
 
         # Publish the frame data only if we have valid data
         if frame_data is not None:
@@ -1914,18 +1899,18 @@ class IsaacSimCamera(BaseCamera):
             if self._enable_webrtc:
                 self._webrtc_buffer.write(frame_data)
             else:
-                logger_mp.warning(f"[IsaacSimCamera] Failed to encode to WebRTC for {self._cam_topic}")
+                logger_mp.warning(f"[Teleimager] Failed to encode to WebRTC for {self._cam_topic}")
             if not self._ready.is_set():
                 self._ready.set()
         else:
-            logger_mp.debug(f"[IsaacSimCamera] No data available for {self._cam_topic}, frame_data is None")
+            logger_mp.debug(f"[Teleimager] No data available for {self._cam_topic}, frame_data is None")
         # If no data is available, just return silently and wait for next frame
 
     def release(self):
         if hasattr(self, 'multi_image_reader') and self.multi_image_reader is not None:
             self.multi_image_reader.close()
         self.multi_image_reader = None
-        logger_mp.info(f"[IsaacSimCamera] Released {self._cam_topic}")
+        logger_mp.info(f"[Teleimager] Released {self._cam_topic}")
 
     @classmethod
     def scan(cls):
@@ -1992,14 +1977,14 @@ class TeleImageServer:
                 elif cam_type == "isaacsim":
                     self._cameras[cam_topic] = IsaacSimCamera.from_config(cam_topic, server_cfg)
                 else:
-                    logger_mp.error(f"[Teleimage Server] Unknown camera type {cam_type} for {cam_topic}, skipping...")
+                    logger_mp.error(f"[Teleimager] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                     continue
         except Exception as e:
-            logger_mp.error(f"[Teleimage Server] Initialization failed: {e}")
+            logger_mp.error(f"[Teleimager] Initialization failed: {e}")
             self._clean_up()
             raise
 
-        logger_mp.info("[Teleimage Server] Image server has started, waiting for client connections...")
+        logger_mp.info("[Teleimager] has started, waiting for client connections...")
 
     def _update_frames(self, cam_topic: str, camera: BaseCamera):
         try:
@@ -2009,7 +1994,7 @@ class TeleImageServer:
                 try:
                     camera._update_frame()
                 except Exception as e:
-                    logger_mp.error(f"[Teleimage Server] Error updating frame for {cam_topic} camera")
+                    logger_mp.error(f"[Teleimager] Error updating frame for {cam_topic} camera")
                     self._stop_event.set()
                     break
                 next_frame_time += interval
@@ -2019,7 +2004,7 @@ class TeleImageServer:
                 else:
                     next_frame_time = time.monotonic()
         except Exception as e:
-            logger_mp.error(f"[Teleimage Server] Failed to update frames for {cam_topic} camera: {e}")
+            logger_mp.error(f"[Teleimager] Failed to update frames for {cam_topic} camera: {e}")
             self._stop_event.set()
 
     def _zmq_pub(self, cam_topic: str, camera: BaseCamera):
@@ -2032,7 +2017,7 @@ class TeleImageServer:
                 if jpeg_bytes is not None:
                     self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_zmq_port())
                 else:
-                    logger_mp.warning(f"[Teleimage Server] {cam_topic} returned no frame.")
+                    logger_mp.warning(f"[Teleimager] {cam_topic} returned no frame.")
                     self._stop_event.set()
                     break
 
@@ -2043,7 +2028,7 @@ class TeleImageServer:
                 else:
                     next_frame_time = time.monotonic()
         except Exception as e:
-            logger_mp.error(f"[Teleimage Server] Failed to publish zmq frame from {cam_topic} camera.")
+            logger_mp.error(f"[Teleimager] Failed to publish zmq frame from {cam_topic} camera.")
             self._stop_event.set()
     
     def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
@@ -2057,7 +2042,7 @@ class TeleImageServer:
                 if bgr_frame is not None:
                     self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
                 else:
-                    logger_mp.info(f"[Teleimage Server] {cam_topic} returned no frame.")
+                    logger_mp.info(f"[Teleimager] {cam_topic} returned no frame.")
                     self._stop_event.set()
                     break
 
@@ -2068,7 +2053,7 @@ class TeleImageServer:
                 else:
                     next_frame_time = time.monotonic()
         except Exception as e:
-            logger_mp.error(f"[Teleimage Server] Failed to publish rtc frame from {cam_topic} camera.")
+            logger_mp.error(f"[Teleimager] Failed to publish rtc frame from {cam_topic} camera.")
             self._stop_event.set()
 
     def _clean_up(self):
@@ -2092,8 +2077,8 @@ class TeleImageServer:
                 try:
                     cam.release()
                 except Exception as e:
-                    logger_mp.error(f"[Teleimage Server] Error releasing camera {cam._cam_topic}: {e}")
-        logger_mp.info("[Teleimage Server] Clean up completed. Server stopped.")
+                    logger_mp.error(f"[Teleimager] Error releasing camera {cam._cam_topic}: {e}")
+        logger_mp.info("[Teleimager] Clean up completed. Server stopped.")
 
     # --------------------------------------------------------
     # public api
@@ -2101,7 +2086,7 @@ class TeleImageServer:
     def start(self):
         for camera_topic, camera in self._cameras.items():
             if camera is None:
-                logger_mp.error(f"[Teleimage Server] Camera {camera_topic} failed to initialize previously, cannot start.")
+                logger_mp.error(f"[Teleimager] Camera {camera_topic} failed to initialize previously, cannot start.")
                 self._stop_event.set()
                 self._clean_up()
                 return
@@ -2119,10 +2104,9 @@ class TeleImageServer:
                 timeout = 5.0
             ready = camera.wait_until_ready(timeout=timeout)
             if not ready:
-                logger_mp.error(f"[Teleimage Server] {camera_topic} ready timeout after {timeout}s.")
+                logger_mp.error(f"[Teleimager] {camera_topic} ready timeout after {timeout}s.")
                 self._stop_event.set()
                 self._clean_up()
-            logger_mp.info(f"[Teleimage Server] {camera_topic} is ready.")
         
         for camera_topic, camera in self._cameras.items():
             if camera.enable_webrtc():
@@ -2146,7 +2130,7 @@ class TeleImageServer:
 # utility functions
 # ========================================================
 def signal_handler(server, signum, frame):
-    logger_mp.info(f"[Teleimage Server] Received signal {signum}, initiating graceful shutdown...")
+    logger_mp.info(f"[Teleimager] Received signal {signum}, initiating graceful shutdown...")
     server.stop()
 
 def set_performance_mode(cores=[0, 1, 2]):
@@ -2156,12 +2140,12 @@ def set_performance_mode(cores=[0, 1, 2]):
         
         # Set CPU affinity for the process and all its threads
         p.cpu_affinity(cores)
-        logger_mp.info(f"[Performance] CPU Affinity locked to: {cores}")
+        logger_mp.info(f"[Teleimager] CPU Affinity locked to: {cores}")
 
     except psutil.AccessDenied:
-        logger_mp.warning("[Performance] Access Denied: Run as sudo for full optimization")
+        logger_mp.warning("[Teleimager] Access Denied: Run as sudo for full optimization")
     except Exception as e:
-        logger_mp.error(f"[Performance] Error: {e}")
+        logger_mp.error(f"[Teleimager] Error: {e}")
 
 def run_isaacsim_server():
     # Load config file, start teleimage server
@@ -2169,7 +2153,7 @@ def run_isaacsim_server():
         with open(SERVER_CONFIG_PATH, "r") as f:
             server_config = yaml.safe_load(f)
     except Exception as e:
-        logger_mp.error(f"Failed to load configuration file at {SERVER_CONFIG_PATH}: {e}")
+        logger_mp.error(f"[Teleimager] Failed to load configuration file at {SERVER_CONFIG_PATH}: {e}")
         exit(1)
     # start teleimage server
     server = TeleImageServer(server_config, enable_realsense=False, enable_isaacsim=True)
@@ -2177,33 +2161,44 @@ def run_isaacsim_server():
     return server
 
 def main():
-    logger_mp.info(
-        "\n====================== Teleimage Server Startup Guide ======================\n"
-        "Please first read this repo's README.md to learn how to configure and use the teleimager.\n"
-        "To discover connected cameras, run the following command:\n"
-        "\n"
-        "    teleimager-server --cf\n"
-        "\n"
-        "The '--cf' flag means 'camera find'.\n"
-        "This will list all detected cameras and their details (video paths, serial numbers and physical path etc.).\n"
-        "Use that information to fill in your 'teleimager_server.yaml' file.\n"
-        "Once configured, you can start the teleimage server with:\n"
-        "\n"
-        "    teleimager-server\n"
-        "\n"
-        "Note:\n"
-        " - If you have RealSense cameras, add the '--rs' flag to enable RealSense support.\n"
-        " - Make sure you have proper permissions to access the camera devices (e.g., run with sudo or set udev rules).\n"
-        "=========================================================================="
-    )
+    # ANSI colors for --help, only when stdout is a real terminal (skipped when piped/redirected).
+    import sys
+    _tty = sys.stdout.isatty()
+    C = (lambda s, code: f"\033[{code}m{s}\033[0m" if _tty else s)
+    head = lambda s: C(s, "1;36")   # bold cyan  — section / step titles
+    cmd  = lambda s: C(s, "1;32")   # bold green — runnable commands
+    flag = lambda s: C(s, "33")     # yellow     — flags / params
+    dim  = lambda s: C(s, "2")      # dim        — notes / hints
+    url  = lambda s: C(s, "4;34")   # underline blue — links
 
-    # command line args
-    parser = argparse.ArgumentParser()
+    guide = (
+        f"{head('Getting started:')}\n"
+        f"  Read the README first: {url('https://github.com/unitreerobotics/teleimager')}\n"
+        "\n"
+        f"  {head('Step 1')} — Discover connected cameras ('cf' = camera find):\n"
+        f"      {cmd('teleimager-server')} {flag('--cf --uvc --v4l2 --gst --rs')}\n"
+        f"    {dim('Note: --cf scans ONLY the backends you list, so pass at least one of')}\n"
+        f"    {dim('      --uvc / --v4l2 / --gst / --rs (list several to scan them together).')}\n"
+        "    The output lists each camera's video path, serial number, physical path, etc.\n"
+        f"    Copy those values into {flag('teleimager_server.yaml')}.\n"
+        "\n"
+        f"  {head('Step 2')} — Start the server (with the yaml configured):\n"
+        f"      {cmd('teleimager-server')}\n"
+        "\n"
+        f"  {head('Step 3')} — Receive the streams:\n"
+        f"      {flag('ZMQ')}    : {cmd('teleimager-client --host <server_ip>')}\n"
+        f"      {flag('WebRTC')} : open {url('https://<server_ip>:<webrtc_port>')} in a browser\n"
+    )
+    parser = argparse.ArgumentParser(
+        description="TeleImager: Unitree multi-camera image streaming service.",
+        epilog=guide,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument('--cf', action='store_true', help='Camera-finder mode: scan and print all connected cameras, then exit.')
     parser.add_argument('--uvc', action='store_true', help='In --cf, include the UVC (libuvc -> pyuvc) backend in the scan.')
     parser.add_argument('--v4l2', action='store_true', help='In --cf, include the V4L2 (PyAV) backend in the scan.')
     parser.add_argument('--gst', action='store_true', help='In --cf, include the GStreamer backend in the scan.')
-    parser.add_argument('--rs', action='store_true', help='In --cf, include the RealSense (pyrealsense2) backend in the scan; also enables RealSense at server runtime.')
+    parser.add_argument('--rs', action='store_true', help='In --cf, include the RealSense (pyrealsense2) backend in the scan.')
     parser.add_argument('--isaacsim', action='store_true', help='Run the server in IsaacSim mode (frames from shared memory instead of physical cameras).')
     parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Do not pin the process to specific CPU cores.')
     args = parser.parse_args()
@@ -2224,7 +2219,7 @@ def main():
         with open(SERVER_CONFIG_PATH, "r") as f:
             server_config = yaml.safe_load(f)
     except Exception as e:
-        logger_mp.error(f"Failed to load configuration file at {SERVER_CONFIG_PATH}: {e}")
+        logger_mp.error(f"[Teleimager] Failed to load configuration file at {SERVER_CONFIG_PATH}: {e}")
         exit(1)
 
     # start teleimage server
@@ -2235,7 +2230,7 @@ def main():
     signal.signal(signal.SIGINT, functools.partial(signal_handler, server))
     signal.signal(signal.SIGTERM, functools.partial(signal_handler, server))
 
-    logger_mp.info("[Teleimage Server] Running... Press Ctrl+C to exit.")
+    logger_mp.info("[Teleimager] Running... Press Ctrl+C to exit.")
     server.wait()
 
     # usbhub plugout may cause block process exit, no better solution for now
