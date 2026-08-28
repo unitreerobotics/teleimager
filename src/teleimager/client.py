@@ -18,7 +18,6 @@
 # which is licensed under the MIT License.
 # ------------------------------------------------------------------------------
 
-import cv2
 import time
 import contextlib
 import queue
@@ -38,6 +37,27 @@ CLIENT_CONFIG_PATH = os.path.join(CONFIG_DIR, "teleimager_client.yaml")
 
 # Seconds of uninterrupted empty frames before the no-frame watchdog warns once.
 STALL_SECONDS = 3.0
+
+# Shared JPEG decoder (jpeg bytes -> BGR ndarray).
+try:
+    from turbojpeg import TurboJPEG
+    _turbojpeg = TurboJPEG()
+except Exception as e:
+    raise RuntimeError(
+        "\n"
+        "  [Teleimager] libturbojpeg not found. Please install the native TurboJPEG library:\n"
+        "\n"
+        "  [Recommended] Using conda (works on all platforms):\n"
+        "      conda install -c conda-forge libjpeg-turbo\n"
+        "\n"
+        "  [Ubuntu/Debian 20.04+] Using apt:\n"
+        "      sudo apt install -y libturbojpeg\n"
+        "\n"
+        "  [macOS] Using Homebrew:\n"
+        "      brew install jpeg-turbo\n"
+        "\n"
+        f"Original error: {e}"
+    ) from e
 
 # ========================================================
 # Utility tools
@@ -375,12 +395,11 @@ class ZMQ_SubscriberThread(threading.Thread):
         self._decoder_thread.start()
 
     def _decode_image(self, jpg_bytes):
-        """Decode JPEG bytes to OpenCV image."""
+        """Decode JPEG bytes to a BGR ndarray via libturbojpeg."""
         if jpg_bytes is None:
             return None
         try:
-            np_img = np.frombuffer(jpg_bytes, dtype=np.uint8)
-            return cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+            return _turbojpeg.decode(jpg_bytes)
         except Exception as e:
             logger_mp.warning(f"[Teleimager] Failed to decode image: {e}")
             return None
@@ -857,6 +876,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', type=str, default='192.168.123.164', help='IP address of image server')
     args = parser.parse_args()
+
+    try:
+        import cv2
+    except ImportError:
+        logger_mp.error(
+            "[Teleimager] The teleimager-client viewer needs opencv. Install it with:\n"
+            "    pip install \"teleimager[viewer]\""
+        )
+        return
 
     # Request the server config once (network-first, cached to local on success).
     camera_config, from_server = TeleImageClient.scan(server_host=args.host)

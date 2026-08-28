@@ -17,7 +17,6 @@ logger_mp = logging_mp.getLogger(__name__)
 import os
 import argparse
 import glob
-from turbojpeg import TurboJPEG
 import numpy as np
 import av
 # uvc will be imported when needed
@@ -30,6 +29,9 @@ import re
 import subprocess
 import platform
 from .client import TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responser
+# Shared JPEG codec (libturbojpeg): encode(BGR)->jpeg bytes, decode(jpeg)->BGR.
+from turbojpeg import TurboJPEG
+_turbojpeg = TurboJPEG()
 # webrtc dependencies
 import asyncio
 import json
@@ -44,8 +46,6 @@ import queue
 import fractions
 from typing import Dict, Optional, Tuple, Any
 
-# Shared JPEG codec (libturbojpeg): encode(BGR)->jpeg bytes, decode(jpeg)->BGR.
-_turbojpeg = TurboJPEG()
 
 # ========================================================
 # teleimager_server.yaml path
@@ -1189,7 +1189,7 @@ class UVCCamera(BaseCamera):
             msg = (
                 "[UVC] pupil-labs-uvc (import name 'uvc') not installed.  You can try:\n"
                 "    sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev\n"
-                "    pip install pupil-labs-uvc\n"
+                "    pip install \"teleimager[uvc]\"\n"
             )
             raise RuntimeError(msg)
 

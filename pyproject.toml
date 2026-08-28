@@ -1,32 +1,59 @@
 [project]
 name = "teleimager"
-version = "1.6.0"
+version = "2.0.0"
 description = "TeleImager: Unitree multi-camera image streaming service"
 authors = [
     { name = "silencht", email = "silencht@qq.com" }
 ]
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.8,<3.12"
+requires-python = ">=3.10,<3.12"
+keywords = ["camera", "streaming", "webrtc", "zeromq", "robotics", "teleoperation", "uvc", "v4l2", "realsense", "gstreamer"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Topic :: Scientific/Engineering",
+]
+# Core = a working headless client: messaging + arrays + JPEG decode (subscribe and
+# hand back BGR ndarrays). PyTurboJPEG is a thin ctypes binding, so it also needs the
+# system lib: `apt install libturbojpeg`. No GUI / libGL is pulled in at this level.
 dependencies = [
     "logging_mp",
-    "opencv-python",
     "numpy>=1.21,<2",
     "pyyaml",
     "pyzmq",
+    "PyTurboJPEG",
 ]
 [project.optional-dependencies]
-# execute pip install -e ".[server]" to install server dependencies
+# CLI viewer: on-screen windows (opencv pulls in the GUI stack). Decode already in core.
+# execute: pip install -e ".[viewer]"
+viewer = ["opencv-python"]
+# Server base: v4l2 + WebRTC. JPEG codec (PyTurboJPEG) already in core.
+# execute: pip install -e ".[server]"
 server = [
     "aiohttp",
     "aiortc",
-    "pupil-labs-uvc",
     "av",
-    "PyTurboJPEG",
 ]
+# Optional hardware backends (lazy-imported; skip them and the server still runs).
+# execute: pip install -e ".[uvc]"  /  ".[realsense]"  /  ".[all]"
+uvc = ["teleimager[server]", "pupil-labs-uvc"]
+realsense = ["teleimager[server]", "pyrealsense2"]
+# gstreamer relies on system PyGObject (apt install python3-gi + gstreamer); no pip dep.
+all = ["teleimager[viewer,server,uvc,realsense]"]
 
 [project.urls]
 Homepage = "https://github.com/unitreerobotics/teleimager"
+Repository = "https://github.com/unitreerobotics/teleimager"
+Issues = "https://github.com/unitreerobotics/teleimager/issues"
+Documentation = "https://deepwiki.com/unitreerobotics/teleimager"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -35,12 +62,12 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-# Bundle non-python assets into the wheel: the default server config template,
-# the WebRTC page logo, and the client web assets loaded at runtime.
+# Bundle non-python assets into the wheel: the default server config template
+# (copied to the user config dir on first run) and the WebRTC page logo.
 teleimager = ["teleimager_server.yaml", "unitree_logo.svg"]
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
