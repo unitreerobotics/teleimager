@@ -41,6 +41,7 @@ server = [
     "aiohttp",
     "aiortc",
     "av",
+    "psutil",
 ]
 # Optional hardware backends (lazy-imported; skip them and the server still runs).
 # execute: pip install -e ".[uvc]"  /  ".[realsense]"  /  ".[all]"
