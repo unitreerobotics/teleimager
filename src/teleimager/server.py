@@ -990,22 +990,20 @@ class RealSenseCamera(BaseCamera):
             system = platform.system()
             print(f"[RealSense] Platform: {system} / {arch}")
 
+            msg = (
+                "[RealSense] pyrealsense2 not installed. Try pip first:\n"
+                "    pip install pyrealsense2\n"
+            )
+
             if system == "Linux" and arch.startswith("aarch64"):
-                msg = (
-                    "[RealSense] pyrealsense2 not installed. please build from source:\n"
-                    "    cd ~\n"
+                msg += (
+                    "  On ARM/Jetson a matching wheel isn't guaranteed for every Python version.\n"
+                    "  If pip reports no matching wheel, build from source instead:\n"
                     "    git clone https://github.com/IntelRealSense/librealsense.git\n"
-                    "    cd librealsense\n"
-                    "    git checkout v2.50.0\n"
+                    "    cd librealsense && git checkout v2.50.0   # or a tag matching your firmware\n"
                     "    mkdir build && cd build\n"
                     "    cmake .. -DBUILD_PYTHON_BINDINGS=ON -DPYTHON_EXECUTABLE=$(which python3)\n"
-                    "    make -j$(nproc)\n"
-                    "    sudo make install\n"
-                )
-            else:
-                msg = (
-                    "[RealSense] pyrealsense2 not installed. You can try:\n"
-                    "    pip install pyrealsense2\n"
+                    "    make -j$(nproc) && sudo make install\n"
                 )
             raise RuntimeError(msg)
 
