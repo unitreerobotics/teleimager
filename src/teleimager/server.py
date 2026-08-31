@@ -1031,26 +1031,25 @@ class RealSenseCamera(BaseCamera):
                 return None
 
         def _parent_usb_device_sysdir(video_sysdir):
-            d = os.path.realpath(os.path.join(video_sysdir, "device"))
+            d = (Path(video_sysdir) / "device").resolve()
             for _ in range(10):
-                if d is None or d == "/" or not os.path.isdir(d):
+                if not d.is_dir():
                     break
-                id_vendor = _read_text(os.path.join(d, "idVendor"))
-                id_product = _read_text(os.path.join(d, "idProduct"))
+                id_vendor = _read_text(d / "idVendor")
+                id_product = _read_text(d / "idProduct")
                 if id_vendor and id_product:
-                    return d
-                d_next = os.path.dirname(d)
-                if d_next == d:
+                    return str(d)
+                if d.parent == d:
                     break
-                d = d_next
+                d = d.parent
             return None
 
         ports = []
         for devnode in sorted(glob.glob("/dev/video*")):
-            sysdir = f"/sys/class/video4linux/{os.path.basename(devnode)}"
-            name = _read_text(os.path.join(sysdir, "name"))
+            sysdir = Path("/sys/class/video4linux") / Path(devnode).name
+            name = _read_text(sysdir / "name")
             usb_dir = _parent_usb_device_sysdir(sysdir)
-            vendor_id = _read_text(os.path.join(usb_dir, "idVendor")) if usb_dir else None
+            vendor_id = _read_text(Path(usb_dir) / "idVendor") if usb_dir else None
 
             # Match RealSense by name and Intel vendor ID
             if name and "realsense" in name.lower() and (vendor_id or "").lower() in ("8086", "32902"):
@@ -1236,10 +1235,10 @@ class UVCCamera(BaseCamera):
 
     @staticmethod
     def _list_video_paths():
-        base = "/sys/class/video4linux/"
-        if not os.path.exists(base):
+        base = Path("/sys/class/video4linux")
+        if not base.exists():
             return []
-        return [f"/dev/{x}" for x in sorted(os.listdir(base)) if x.startswith("video")]
+        return [f"/dev/{name}" for name in sorted(p.name for p in base.iterdir()) if name.startswith("video")]
 
     @staticmethod
     def _is_like_rgb(video_path):
@@ -1258,21 +1257,22 @@ class UVCCamera(BaseCamera):
 
     @staticmethod
     def _get_ppath_from_vpath(video_path):
-        sysfs_path = f"/sys/class/video4linux/{os.path.basename(video_path)}/device"
-        return os.path.realpath(sysfs_path)
+        sysfs_path = Path("/sys/class/video4linux") / Path(video_path).name / "device"
+        return str(sysfs_path.resolve())
 
     @staticmethod
     def _get_uid_from_ppath(physical_path):
         def read_file(path):
-            return open(path).read().strip() if os.path.exists(path) else None
+            return path.read_text().strip() if path.exists() else None
 
-        busnum_file = os.path.join(physical_path, "busnum")
-        devnum_file = os.path.join(physical_path, "devnum")
-        if not (os.path.exists(busnum_file) and os.path.exists(devnum_file)):
-            parent = os.path.dirname(physical_path)
-            busnum_file = os.path.join(parent, "busnum")
-            devnum_file = os.path.join(parent, "devnum")
-        if os.path.exists(busnum_file) and os.path.exists(devnum_file):
+        pdir = Path(physical_path)
+        busnum_file = pdir / "busnum"
+        devnum_file = pdir / "devnum"
+        if not (busnum_file.exists() and devnum_file.exists()):
+            pdir = pdir.parent
+            busnum_file = pdir / "busnum"
+            devnum_file = pdir / "devnum"
+        if busnum_file.exists() and devnum_file.exists():
             return f"{read_file(busnum_file)}:{read_file(devnum_file)}"
         return None
 
@@ -1293,26 +1293,25 @@ class UVCCamera(BaseCamera):
             except Exception:
                 return None
 
-        d = physical_path
+        d = Path(physical_path) if physical_path else None
         for _ in range(10):
-            if not d or d == "/" or not os.path.isdir(d):
+            if d is None or not d.is_dir():
                 break
-            vid = _read(os.path.join(d, "idVendor"))
-            pid = _read(os.path.join(d, "idProduct"))
+            vid = _read(d / "idVendor")
+            pid = _read(d / "idProduct")
             if vid and pid:
                 return {
-                    "serial_number": _read(os.path.join(d, "serial")),
-                    "bcd_device": _read(os.path.join(d, "bcdDevice")),
+                    "serial_number": _read(d / "serial"),
+                    "bcd_device": _read(d / "bcdDevice"),
                     "vid_pid": f"{vid}:{pid}",
-                    "name": _read(os.path.join(d, "product")),
-                    "manufacturer": _read(os.path.join(d, "manufacturer")),
+                    "name": _read(d / "product"),
+                    "manufacturer": _read(d / "manufacturer"),
                     "idVendor": vid,
                     "idProduct": pid,
                 }
-            nxt = os.path.dirname(d)
-            if nxt == d:
+            if d.parent == d:
                 break
-            d = nxt
+            d = d.parent
         return {"serial_number": None, "bcd_device": None, "vid_pid": None,
                 "name": None, "manufacturer": None, "idVendor": None, "idProduct": None}
 
@@ -1549,8 +1548,8 @@ class V4L2Camera(BaseCamera):
 
     @staticmethod
     def _get_ppath_from_vpath(video_path):
-        sysfs_path = f"/sys/class/video4linux/{os.path.basename(video_path)}/device"
-        return os.path.realpath(sysfs_path)
+        sysfs_path = Path("/sys/class/video4linux") / Path(video_path).name / "device"
+        return str(sysfs_path.resolve())
 
     @staticmethod
     def _usb_attrs_from_ppath(physical_path):
@@ -1568,24 +1567,23 @@ class V4L2Camera(BaseCamera):
             except Exception:
                 return None
 
-        d = physical_path
+        d = Path(physical_path) if physical_path else None
         for _ in range(10):
-            if not d or d == "/" or not os.path.isdir(d):
+            if d is None or not d.is_dir():
                 break
-            vid = _read(os.path.join(d, "idVendor"))
-            pid = _read(os.path.join(d, "idProduct"))
+            vid = _read(d / "idVendor")
+            pid = _read(d / "idProduct")
             if vid and pid:
                 return {
-                    "serial_number": _read(os.path.join(d, "serial")),
-                    "bcd_device": _read(os.path.join(d, "bcdDevice")),
+                    "serial_number": _read(d / "serial"),
+                    "bcd_device": _read(d / "bcdDevice"),
                     "vid_pid": f"{vid}:{pid}",
-                    "name": _read(os.path.join(d, "product")),
-                    "manufacturer": _read(os.path.join(d, "manufacturer")),
+                    "name": _read(d / "product"),
+                    "manufacturer": _read(d / "manufacturer"),
                 }
-            nxt = os.path.dirname(d)
-            if nxt == d:
+            if d.parent == d:
                 break
-            d = nxt
+            d = d.parent
         return {"serial_number": None, "bcd_device": None, "vid_pid": None,
                 "name": None, "manufacturer": None}
 
@@ -1597,11 +1595,11 @@ class V4L2Camera(BaseCamera):
         v4l2-ctl and no cv2. Used by both scan() (report) and from_config()
         (resolution).
         """
-        base = "/sys/class/video4linux/"
-        if not os.path.exists(base):
+        base = Path("/sys/class/video4linux")
+        if not base.exists():
             return []
         out = []
-        for name in sorted(os.listdir(base)):
+        for name in sorted(p.name for p in base.iterdir()):
             if not name.startswith("video"):
                 continue
             vpath = f"/dev/{name}"
@@ -1650,12 +1648,12 @@ class V4L2Camera(BaseCamera):
         at least one capture pixel format, and (c) actually grabs a frame — so
         metadata / control nodes that can't produce images are filtered out.
         """
-        base = "/sys/class/video4linux/"
-        if not os.path.exists(base):
+        base = Path("/sys/class/video4linux")
+        if not base.exists():
             return []
         id_map = {r["video_path"]: r for r in cls._list_identifiers()}
         cards = []
-        for name in sorted(os.listdir(base)):
+        for name in sorted(p.name for p in base.iterdir()):
             if not name.startswith("video"):
                 continue
             vpath = f"/dev/{name}"

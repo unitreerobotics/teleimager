@@ -27,13 +27,14 @@ import zmq
 import numpy as np
 import yaml
 import os
+from pathlib import Path
 from collections import deque
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
 
-CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "teleimager")
-CLIENT_CONFIG_PATH = os.path.join(CONFIG_DIR, "teleimager_client.yaml")
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "teleimager"
+CLIENT_CONFIG_PATH = str(CONFIG_DIR / "teleimager_client.yaml")
 
 # Seconds of uninterrupted empty frames before the no-frame watchdog warns once.
 STALL_SECONDS = 3.0
@@ -700,7 +701,7 @@ class ZMQ_Requester:
     def _load_local_config():
         """Load the camera table from the local cache of the last scanned server config."""
         camera_config = None
-        if os.path.exists(CLIENT_CONFIG_PATH):
+        if Path(CLIENT_CONFIG_PATH).exists():
             try:
                 with open(CLIENT_CONFIG_PATH, "r") as f:
                     camera_config = yaml.safe_load(f)
@@ -730,7 +731,7 @@ class ZMQ_Requester:
                 camera_config = self._socket.recv_json()
                 if camera_config is not None:
                     logger_mp.info(f"[Teleimager] Received camera config from server {self._host}:{self._port}")
-                    os.makedirs(CONFIG_DIR, exist_ok=True)
+                    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
                     with open(CLIENT_CONFIG_PATH, "w") as f:
                         yaml.safe_dump(camera_config, f, sort_keys=False, allow_unicode=True)
                     logger_mp.info(f"[Teleimager] Saved camera config to local {CLIENT_CONFIG_PATH}")
