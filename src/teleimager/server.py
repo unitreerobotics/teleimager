@@ -84,7 +84,7 @@ def load_server_config(cli_path=None):
     try:
         with open(path, "r") as f:
             config = yaml.safe_load(f)
-        logger_mp.debug(f"[Teleimager] Loaded server config from {path}")
+        logger_mp.info(f"[Teleimager] Loaded server config from {path}")
         return config
     except Exception as e:
         logger_mp.error(f"[Teleimager] Failed to load configuration file at {path}: {e}")

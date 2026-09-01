@@ -1,6 +1,13 @@
 # =====================================================
+# TeleImager server configuration Default Template
+#
+# On first run the server copies this file to ~/.config/teleimager/teleimager_server.yaml;
+# fill in that copy according to your camera discovery results (teleimager-server --cf).
+# The server reads from that path by default; override it with --config <path>.
+# =====================================================
+
+# =====================================================
 # Global WebRTC encoder config (applies to ALL cameras).
-# aiortc bitrate caps are module-level, so this is shared by every track.
 # Tune by network: WiFi6 5GHz dedicated -> max ~12M; WiFi5 shared -> max ~8M; public -> max ~4M.
 # =====================================================
 webrtc:
@@ -12,9 +19,6 @@ webrtc:
 
 # =====================================================
 # Cameras. Each entry below `camera:` is one camera topic.
-# Keys are grouped: common keys first (shared by every driver), then
-# driver-specific keys after. Set unused keys to null.
-#
 # Type of camera:
 #   - "uvc"       → pyuvc driver (Python binding for libuvc; USB UVC)
 #   - "v4l2"      → PyAV (libav v4l2) JPEG-first driver: MJPG passthrough, YUYV fallback decode
@@ -53,7 +57,7 @@ camera:
     enable_webrtc: true         # Set to true to enable WebRTC publishing, false to disable
     webrtc_port : 60001         # Port for WebRTC signaling server
     webrtc_codec: h264          # webrtc codec preference, options: "vp8", "h264"
-    type: gstreamer             # camera driver type: "uvc", "v4l2", "gstreamer", "realsense"
+    type: v4l2                  # camera driver type: "uvc", "v4l2", "gstreamer", "realsense"
     image_shape: [480, 1280]    # image resolution: [height, width]
     binocular: true             # if true, the camera is binocular (side-by-side stereo), false if monocular
     fps: 30                     # frame per second
@@ -63,11 +67,11 @@ camera:
     serial_number: null
     # uvc / v4l2 only (USB identifiers)
     physical_path: null
-    bcd_device: null
+    bcd_device: "0217"
     vid_pid: null
     video_id: null
     # gstreamer only
-    gst_pipeline: "v4l2src device=/dev/video0 ! image/jpeg ! appsink name=sink"
+    gst_pipeline: null
 
   # =====================================================
   # Left wrist camera configuration
@@ -105,7 +109,7 @@ camera:
     enable_webrtc: false
     webrtc_port: 60003
     webrtc_codec: h264
-    type: v4l2
+    type: gstreamer
     image_shape: [480, 640]
     binocular: false
     fps: 30
@@ -115,8 +119,8 @@ camera:
     serial_number: null
     # uvc / v4l2 only (USB identifiers)
     physical_path: null
-    bcd_device: "0217"
+    bcd_device: null
     vid_pid: null
     video_id: null
     # gstreamer only
-    gst_pipeline: null
+    gst_pipeline: "v4l2src device=/dev/video0 ! image/jpeg ! appsink name=sink"
