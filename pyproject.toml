@@ -37,10 +37,16 @@ dependencies = [
 viewer = ["opencv-python"]
 # Server base: v4l2 + WebRTC. JPEG codec (PyTurboJPEG) already in core.
 # execute: pip install -e ".[server]"
+# Version pins: server.py monkey-patches aiortc *internal* APIs not covered by
+# semver — the h264/vpx module-level bitrate constants and H264Encoder._encode_frame
+# (relying on _split_bitstream / target_bitrate). aiortc also couples tightly to a
+# specific PyAV major per minor (1.14.x ⇒ PyAV 15.x/16.x), and 1.12.0 reworked the
+# vpx module. So we pin to the verified-compatible window; bump deliberately after
+# re-testing WebRTC encode against a new aiortc/av pair.
 server = [
-    "aiohttp",
-    "aiortc",
-    "av",
+    "aiohttp>=3.9,<4.0",
+    "aiortc>=1.14.0,<1.15.0",
+    "av>=15.0.0,<17.0.0",
     "psutil",
 ]
 # Optional hardware backends (lazy-imported; skip them and the server still runs).

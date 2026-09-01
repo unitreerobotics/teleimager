@@ -7,385 +7,330 @@
     <a href="README.md"> English</a> | <a>中文</a>
   </p>
   <p align="center">
-  <p align="center">
     <a href="https://github.com/unitreerobotics/xr_teleoperate/wiki" target="_blank"> <img src="https://img.shields.io/badge/GitHub-Wiki-181717?logo=github" alt="Unitree LOGO"></a> <a href="https://discord.gg/ZwcVwxv5rq" target="_blank"><img src="https://img.shields.io/badge/-Discord-5865F2?style=flat&logo=Discord&logoColor=white" alt="Unitree LOGO"> <a href="https://deepwiki.com/unitreerobotics/teleimager"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a> </a>
   </p>
 </div>
+[**TeleImager**](https://github.com/unitreerobotics/teleimager) 是宇树（Unitree）的图像服务：**服务端**从多路摄像头（UVC、V4L2、GStreamer、RealSense）采集视频，并通过 **ZeroMQ** 或 **WebRTC** 发布到网络；**客户端**订阅并解码这些视频流。它为 [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate) 提供遥操作视频链路。
 
-## 1. 图像服务器（Image Server）
+## ✨ 特性
 
-[**TeleImager**](https://github.com/unitreerobotics/teleimager) 是宇树（Unitree）的图像服务器，用于从多路摄像头（UVC、V4L2、GStreamer 和 RealSense）采集视频流，并使用 ZeroMQ 或 WebRTC 方式进行网络发布。
+- 📸 支持多路 UVC / V4L2 / GStreamer / Intel RealSense 摄像头
+- 📢 通过 **ZeroMQ PUB-SUB**（局域网高质量）与 **WebRTC**（低延迟、浏览器）发布视频帧
+- 💬 通过 **ZeroMQ REQ-REP** 响应图像配置指令
+- 🆔 五种摄像头识别方式：物理路径、序列号、bcd_device、vid_pid、video 路径
+- ⚙️ 可配置分辨率与帧率
+- 🚀 使用三重环形缓冲区实现高效帧传递
 
-目前 Tele Imager 用于 [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate) 项目中提供遥操作视频流。
+---
 
-> 所有可供用户调用的 API 都在代码中的 `# public api` 注释下面。
+## 1. 📦 安装
 
+TeleImager 分为**两种角色**，按需安装即可：
 
+| 角色 | 作用 | 运行位置 |
+|------|------|---------|
+| **客户端（Client）** | 订阅并解码视频流（遥操作、数据录制、自定义 CV 代码） | 工作站 / 机器人主机 |
+| **服务端（Server）** | 从摄像头采集并通过 ZMQ/WebRTC 发布 | 摄像头所连接的机器人设备 |
 
-### 1.0 ✨ 特性
+### 1.0 系统前置依赖（两种角色都需要）
 
-- 📸 支持多路 UVC、V4L2、GStreamer 和 Intel RealSense 摄像头
-- 📢 使用 **ZeroMQ PUB-SUB** 方式发布视频帧
-- 📢 使用 **WebRTC** 方式发布视频帧
-- 💬 通过 **ZeroMQ REQ-REP** 方式响应图像配置指令
-- 🆔 多种摄像头识别方式：物理路径、序列号、bcd_device、vid_pid、video 设备路径
-- ⚙️ 可配置分辨率和帧率
-- 🚀 使用三重环形缓冲区实现高效帧处理
+两种角色都通过 **PyTurboJPEG** 做 JPEG 编解码。它是一个 ctypes 绑定,在 import 时加载系统库 **libjpeg-turbo(要求 3.0+)**。这个原生库 pip 无法安装,每台机器安装一次即可。三选一:
 
-
-
-### 1.1 📥 环境配置
-
-1. 安装 miniconda3
-
-```
-# for jetson orin nx (ARM architecture)
-unitree@ubuntu:~$ mkdir -p ~/miniconda3
-unitree@ubuntu:~$ wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh -O ~/miniconda3/miniconda.sh
-unitree@ubuntu:~$ bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
-unitree@ubuntu:~$ rm ~/miniconda3/miniconda.sh
-unitree@ubuntu:~$ source ~/miniconda3/bin/activate
-(base) unitree@ubuntu:~$ conda init --all
-```
-
-2. 创建并激活 conda 环境：
-
-```
-(base) unitree@ubuntu:~$ conda create -n teleimager python=3.10 -y
-(base) unitree@ubuntu:~$ conda activate teleimager
-```
-
-3. 安装项目与依赖：
-
-```
-(teleimager) unitree@ubuntu:~$ sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev
-(teleimager) unitree@ubuntu:~$ git clone https://github.com/unitreerobotics/teleimager.git
-(teleimager) unitree@ubuntu:~$ cd teleimager
-# 假如您只使用客户端
-(teleimager) unitree@ubuntu:~/teleimager$ pip install -e .
-# 假如您还使用服务端
-(teleimager) unitree@ubuntu:~/teleimager$ pip install -e ".[server]"
-```
-
-4. 添加 video 权限（非 root 用户运行）：
-
-```
-bash setup_uvc.sh
-```
-
-5. 配置证书路径（WebRTC 模式需要）
-    证书通常由 [televuer](https://github.com/unitreerobotics/televuer) 仓库生成。
-
-   你可以通过 **用户配置目录** 或 **环境变量** 两种方式指定证书路径。
-
-   方法 1：用户配置目录（推荐）
-
-   ```bash
-   mkdir -p ~/.config/xr_teleoperate/
-   cp cert.pem key.pem ~/.config/xr_teleoperate/
-   ```
-
-   方法 2：环境变量方式
-
-   ```bash
-   echo 'export XR_TELEOP_CERT="your_file_path/cert.pem"' >> ~/.bashrc
-   echo 'export XR_TELEOP_KEY="your_file_path/key.pem"' >> ~/.bashrc
-   source ~/.bashrc
-   ```
-
-   方法 3：默认行为
-    若不配置，Tele Imager 会从默认模块路径查找证书。
-
-
-
-### 1.2 🔍 查找已连接的摄像头
-
-运行以下命令可以自动发现已连接摄像头：
+**方法 1 —— Conda(推荐,跨平台)**
 
 ```bash
-python -m teleimager.server --cf
-# 或
-teleimager-server --cf
+conda install -c conda-forge libjpeg-turbo
 ```
 
-你将看到类似下面的输出：
- ```bash
- (teleimager) unitree@ubuntu:~$ teleimager-server --cf
- ============================ Camera Discovery ============================
- Found video devices: ['/dev/video0', '/dev/video1', '/dev/video2']
- Found RGB video devices: ['/dev/video0', '/dev/video2']
+**方法 2 —— Homebrew(macOS)**
 
- ══════ Camera 1/2: Cherry Dual Camera (DECXIN) ══════
-   physical_path : /sys/devices/pci.../usb1/1-3/1-3.1/1-3.1:1.0
-   serial_number : 01.00.00
-   bcdDevice     : 0217 (v2.17)   (USB device release number)
-   vid : pid     : 1bcf:2d4f        (VendorID : ProductID)
-   video_id      : 0
-   uid           : 1:71           (USB bus:device address)
-   Supported modes (MJPG)  [width x height @ fps]:
-     640x480 @ [10, 15, 20, 25, 30, 60, 120] fps
-     1280x720 @ [10, 15, 20, 25, 30, 60] fps
-     ...
-
- ══════ Camera 2/2: Abham Image (HHWei Technology Co., Ltd.) ══════
-   physical_path : /sys/devices/pci.../usb1/1-1/1-1:1.0
-   serial_number : HHW001
-   bcdDevice     : 0200 (v2.00)   (USB device release number)
-   vid : pid     : 1c45:6200        (VendorID : ProductID)
-   video_id      : 2
-   uid           : 1:79           (USB bus:device address)
-   Supported modes (MJPG)  [width x height @ fps]:
-     640x480 @ [5, 10, 15, 20, 25, 30] fps
-     1920x1080 @ [5, 10, 15, 20, 25, 30] fps
-     ...
- ================================================================
- ```
-
-如果存在 RealSense 设备并加上 `--rs` 参数，也会看到 RealSense 摄像头的搜索结果。
-
-------
-
-### 1.3 📡 启动图像服务器
-
-首次启动时，服务器会在 `~/.config/teleimager/teleimager_server.yaml` 生成一份默认配置。
-根据上一步的摄像头搜索结果编辑该文件，然后启动服务器：
-
+```bash
+brew install jpeg-turbo
 ```
-python -m teleimager.server
-# 或
+
+<details>
+<summary><b>方法 3 —— 从源码编译(Ubuntu/Debian)</b></summary>
+```bash
+git clone https://github.com/libjpeg-turbo/libjpeg-turbo.git
+cd libjpeg-turbo && mkdir build && cd build
+cmake -DCMAKE_INSTALL_PREFIX=/opt/libjpeg-turbo ..
+make -j$(nproc) && sudo make install
+echo 'export LD_LIBRARY_PATH=/opt/libjpeg-turbo/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+source ~/.bashrc
+```
+
+</details>
+
+> ⚠️ **不要**用 PyPI 上那个名为 `turbojpeg` 的包——它是另一个不兼容的库；本项目用的是 `PyTurboJPEG`(已随 `pip install teleimager` 装好)。
+> Ubuntu 的 `sudo apt install libturbojpeg` 版本常低于 3.0,因此不推荐。若该库缺失,TeleImager 会在首次 import 时抛出与上面等价的详细安装提示。
+
+### 1.1 环境准备（conda）
+
+```bash
+# 安装 Miniconda（已装可跳过）。Jetson/ARM 请用 aarch64 安装包。
+mkdir -p ~/miniconda3
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3 && rm ~/miniconda3/miniconda.sh
+source ~/miniconda3/bin/activate && conda init --all
+
+# 创建并激活项目环境
+conda create -n teleimager python=3.10 -y
+conda activate teleimager
+```
+
+### 1.2 客户端安装
+
+| 需求 | 命令 |
+|------|------|
+| **无界面（headless）** —— 订阅 ZMQ → BGR `ndarray`（喂给你自己的代码） | `pip install teleimager` |
+| **+ 可视化窗口** —— OpenCV 开窗显示 | `pip install "teleimager[viewer]"` |
+
+> 可视化会拉入 `opencv-python`
+
+### 1.3 服务端安装
+
+先按需选后端，再执行下面的安装命令（用 WebRTC 的话最后配一次证书）。
+
+#### 1.3.1 选择后端（摄像头驱动）
+
+「后端」就是 TeleImager 采集某类摄像头所用的驱动，按需叠加：
+
+| 后端（摄像头驱动） | pip 选项 | 说明 |
+|------|---------|------|
+| 基座（V4L2） | `[server]` | 始终包含，无需额外选项 |
+| + UVC | `[uvc]` | 需 USB 权限——执行 [setup_uvc.sh](https://github.com/unitreerobotics/teleimager/blob/main/setup_uvc.sh)；wheel 已自带 `libturbojpeg`、`libusb`，无需 apt |
+| + RealSense | `[realsense]` |  |
+| + 全部（不含 GStreamer） | `[all]` | 等价于 UVC + RealSense |
+| + GStreamer | 无 pip 包 | `sudo apt install python3-gi python3-gst-1.0 gstreamer1.0-plugins-{base,good,bad}` |
+
+#### 1.3.2 安装
+
+选好后端（把下面的 `[server]` 换成对应选项），二选一执行安装：
+
+```bash
+# 方式一：从源码（推荐）——顺带获得辅助脚本 setup_uvc.sh / setup_autostart.sh 与 WebRTC 资源
+git clone https://github.com/unitreerobotics/teleimager.git
+cd teleimager
+pip install -e ".[server]"        # 如 ".[uvc]"、".[all]"
+
+# 方式二：从 PyPI（不需要辅助脚本时）
+pip install "teleimager[server]"  # 如 "teleimager[uvc]"、"teleimager[all]"
+```
+
+#### 1.3.3 配置 TLS 证书（仅 WebRTC）
+
+详情参见 [CA 说明](https://github.com/unitreerobotics/xr_teleoperate/wiki/CA)。也可用 openssl 快速生成一份自签名证书：
+
+```bash
+# 生成一份有效期 365 天的自签名证书（cert.pem / key.pem）
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout key.pem -out cert.pem -subj "/CN=teleimager"
+```
+
+生成后，用以下任一方式让 TeleImager 找到它：
+
+```bash
+# 方式 A —— 用户配置目录（推荐）
+mkdir -p ~/.config/xr_teleoperate/
+cp cert.pem key.pem ~/.config/xr_teleoperate/
+
+# 方式 B —— 环境变量
+echo 'export XR_TELEOP_CERT="/路径/cert.pem"' >> ~/.bashrc
+echo 'export XR_TELEOP_KEY="/路径/key.pem"'   >> ~/.bashrc
+source ~/.bashrc
+```
+
+> 若两者都未设置，TeleImager 会回退到模块自带的默认证书路径。
+
+---
+
+## 2. 🚀 运行服务端
+
+### 2.1 查找已连接的摄像头
+
+按你拥有的摄像头加上对应后端标志扫描（`--uvc`、`--v4l2`、`--gst`、`--rs`，可自由组合）：
+
+```bash
+teleimager-server --cf --uvc --v4l2        # RealSense 加 --rs，GStreamer 加 --gst
+```
+
+输出示例：
+
+```text
+[Teleimager] 🎯 Camera Finder Report
+├─ UVCCamera (3 found)   [type: uvc]
+│  ├─ 📷 USB HDR Camera (Generic)
+│  │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.1/1-3.1:1.0
+│  │  ├─ serial_number : 200901010001
+│  │  ├─ bcdDevice     : 0200           (USB device release number)
+│  │  ├─ vid : pid     : 1e45:2050      (VendorID : ProductID)
+│  │  ├─ video_id      : 0              (/dev/video0)
+│  │  └─ modes (MJPG)  [width x height @ fps]:
+│  │     ├─ 320x240 @ [30, 60]
+│  │     ...
+│  │     └─ 1920x1080 @ [30, 60]
+│  ├─ 📷 Abham Image (HHWei Technology Co., Ltd.)
+│  │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0
+│  │  ├─ serial_number : HHW001
+│  │  ├─ bcdDevice     : 0200           (USB device release number)
+│  │  ├─ vid : pid     : 1c45:6200      (VendorID : ProductID)
+│  │  ├─ video_id      : 10             (/dev/video10)
+│  │  └─ modes (MJPG)  [width x height @ fps]:
+│  │     ├─ 640x480 @ [5, 10, 15, 20, 25, 30]
+│  │     ...
+│  │     └─ 2688x1520 @ [5, 10, 15, 20, 25, 30]
+│  └─ 📷 Cherry Dual Camera (DECXIN)
+│     ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.2/1-3.2:1.0
+│     ├─ serial_number : 01.00.00
+│     ├─ bcdDevice     : 0217           (USB device release number)
+│     ├─ vid : pid     : 1bcf:2d4f      (VendorID : ProductID)
+│     ├─ video_id      : 2              (/dev/video2)
+│     └─ modes (MJPG)  [width x height @ fps]:
+│        ├─ 320x232 @ [10, 15, 20, 25, 30, 60, 120]
+│        ├─ 640x240 @ [10, 15, 20, 25, 30, 60, 120]
+│        ├─ 800x592 @ [10, 15, 20, 25, 30, 60, 120]
+│        ├─ 800x600 @ [10, 15, 20, 25, 30, 60, 120]
+│        ├─ 1280x480 @ [10, 15, 20, 25, 30, 60, 120]
+|        ...
+│        └─ 3200x1296 @ [10, 15, 20, 25, 30, 60]
+└─ V4L2Camera (4 found)   [type: v4l2]
+   ├─ 📷 USB HDR Camera (Generic)
+   │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.1/1-3.1:1.0
+   │  ├─ serial_number : 200901010001
+   │  ├─ bcdDevice     : 0200           (USB device release number)
+   │  ├─ vid : pid     : 1e45:2050      (VendorID : ProductID)
+   │  ├─ video_id      : 0              (/dev/video0)
+   │  └─ modes  [width x height @ fps]:
+   │     ├─ MJPG   1920x1080 @ [60.0, 30.0]
+   ...
+   │     └─ YUYV   640x480 @ [30.0]
+   ├─ 📷 Abham Image (HHWei Technology Co., Ltd.)
+   │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0
+   │  ├─ serial_number : HHW001
+   │  ├─ bcdDevice     : 0200           (USB device release number)
+   │  ├─ vid : pid     : 1c45:6200      (VendorID : ProductID)
+   │  ├─ video_id      : 10             (/dev/video10)
+   │  └─ modes  [width x height @ fps]:
+   │     ├─ MJPG   2688x1520 @ [30.0, 25.0, 20.0, 15.0, 10.0, 5.0]
+   ...
+   │     └─ YUYV   640x480 @ [30.0]
+   ├─ 📷 Cherry Dual Camera (DECXIN)
+   │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.2/1-3.2:1.0
+   │  ├─ serial_number : 01.00.00
+   │  ├─ bcdDevice     : 0217           (USB device release number)
+   │  ├─ vid : pid     : 1bcf:2d4f      (VendorID : ProductID)
+   │  ├─ video_id      : 2              (/dev/video2)
+   │  └─ modes  [width x height @ fps]:
+   │     ├─ MJPG   3200x1296 @ [60.0, 30.0, 25.0, 20.0, 15.0, 10.0]
+   ...
+   │     ├─ YUYV   640x240 @ [60.0, 30.0, 25.0, 20.0, 15.0, 10.0]
+   │     └─ YUYV   320x232 @ [120.0, 60.0, 30.0, 25.0, 20.0, 15.0, 10.0]
+   └─ 📷 Intel(R) RealSense(TM) Depth Camera 435i (Intel(R) RealSense(TM) Depth Camera 435i)
+      ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-11/1-11.2/1-11.2:1.3
+      ├─ serial_number : (none)
+      ├─ bcdDevice     : 50d0           (USB device release number)
+      ├─ vid : pid     : 8086:0b3a      (VendorID : ProductID)
+      ├─ video_id      : 8              (/dev/video8)
+      └─ modes  [width x height @ fps]:
+         ├─ YUYV   424x240 @ [60.0, 30.0, 15.0, 6.0]
+         ├─ YUYV   640x480 @ [30.0, 15.0, 6.0]
+         ├─ YUYV   1280x720 @ [15.0, 10.0, 6.0]
+         └─ YUYV   1920x1080 @ [8.0]
+```
+
+### 2.2 启动服务端
+
+首次启动时，服务器会在 `~/.config/teleimager/teleimager_server.yaml` 生成默认配置。
+
+根据2.1节的相机搜索报告结果编辑该文件，然后启动服务：
+
+```bash
 teleimager-server
 ```
 
-> RealSense 摄像头由 yaml 中的 `type: realsense` 驱动，启动服务器时**无需**额外参数。
-> 也可用 `--config <路径>` 或环境变量 `$TELEIMAGER_CONFIG` 指定其它配置文件。
+常用参数：`--config <路径>`（或环境变量 `$TELEIMAGER_CONFIG`）指定其它配置文件；`--no-affinity` 跳过 CPU 核心绑定；`--isaacsim` 以 IsaacSim 模式运行（帧来自共享内存）。
 
+### 2.3 开机自启动
 
+一切验证无误后，如有需要，可安装为[开机启动服务](https://github.com/unitreerobotics/teleimager/blob/main/setup_autostart.sh)：
 
-## 2. 图像客户端（Image Client）
-
-该模块提供图像客户端，用于连接图像服务器并接收显示多路视频流。
- 专为远程操作场景设计，与图像服务器配合使用。
-
-所有可调用 API 都在 `# public api` 注释下。
-
-------
-
-### 2.1 🌀  ZMQ 使用方式
-
-服务器运行后，在另一个终端启动客户端：
-
-```
-python -m teleimager.client
-# 或
-teleimager-client --host 127.0.0.1
+```bash
+bash setup_autostart.sh        # 按提示完成配置
 ```
 
-若服务器运行在例如 `192.168.123.164` 的 G1 Jetson 上，则：
+---
 
-```
-teleimager-client --host 192.168.123.164
-```
+## 3. 📺 运行客户端
 
-然后你将看到各路 ZMQ 摄像头的视频窗口。
+### 3.1 ZMQ 方式
 
-> 需要确保环境中安装了 opencv-python
+服务端运行后，在另一个终端（或另一台机器）启动客户端，指向服务端 IP：
 
-### 2.2  🌀 WebRTC 使用方式
-
-若使用 WebRTC，可通过浏览器访问：
-
-```
-https://<host_ip>:<webrtc_port>
-# 例如
-https://192.168.123.164:60001
+```bash
+teleimager-client --host 192.168.123.164        # 默认：192.168.123.164
 ```
 
-点击页面中间的 `start` 按钮
+每路摄像头会各自弹出一个 OpenCV 窗口（需要 `teleimager[viewer]`）。
 
+若做无界面订阅，请参照 [`client.py`](src/teleimager/client.py) 中`TeleImageClient` 的 `# public api` 从自己的代码里订阅。
 
+### 3.2 WebRTC 方式
 
-## 3. 🚀🚀🚀 自动启动服务
+在浏览器打开服务端的 WebRTC 页面，点击页面中央的 **start** 按钮：
 
-完成上述配置并测试成功后，可以通过以下脚本配置系统自动启动：
-
+```text
+https://<host_ip>:<webrtc_port>        # 例如 https://192.168.123.164:60001
 ```
-bash setup_autostart.sh
-```
 
-根据提示完成配置即可。
-
-
+---
 
 ## 4. 🧠 设计原理
 
+### 4.1 为什么需要五种摄像头识别方式？
 
+当多个摄像头同时接入时，系统需要可靠的方式区分它们。TeleImager 支持五种标识，按优先级查找：
 
-### 4.1 为什么需要多种摄像头识别方式？
+`physical_path > serial_number > bcd_device > vid_pid > video_id`
 
-当多个摄像头同时接入时，系统需要可靠的方式区分它们。Tele Imager 支持五种标识，
-按优先级查找：`physical_path > serial_number > bcd_device > vid_pid > video_id`。
+每种各有优劣，且厂商对这些字段的使用往往与 USB 规范不一致——字段在规范里的"标准含义"和厂商固件实际写入的值可能完全不同。下表基于实际场景。
 
-每种方式各有优劣。更重要的是，厂商对这些字段的实际使用方式往往与 USB 规范不一致
-——某一字段在规范里的”标准含义”和厂商固件中实际写入的值可能完全不同。以下描述基于
-实际场景，而非单纯的规范定义。
+| 标识 | 含义 | 🎯 优点 | ⚠️ 缺点 |
+|------|------|--------|--------|
+| **physical_path** | 内核分配的 USB 拓扑路径——插在哪个物理口 | 只要不换口就稳定；不依赖固件；适合固定部署（头部 + 左右腕） | 换 USB 口就要改配置 |
+| **serial_number** | USB 描述符中的字符串，规范上每台唯一 | 换口不变，可移植；规范上就是用来区分单台设备的 | 低成本摄像头可能共用、留空或格式异常 |
+| **bcd_device** | BCD 固件版本号；部分厂商按单台设备变化 | 固化在固件中，重启/换口不变；厂商有意时可当序列号用 | 很多厂商同型号所有设备取值相同 |
+| **vid_pid** | 16 位 供应商:产品 ID | 极稳定；可一眼区分不同型号 | 同型号通常共享同一 vid_pid |
+| **video_id** → `/dev/videoX` | 内核枚举的 V4L2 节点编号 | 最直接：填编号 `X` 即可 | 插拔顺序/重启/枚举顺序都会变——多摄像头下不可靠 |
 
-------
+> `bcd_device` 与 `vid_pid` 的粒度完全取决于厂商做法。请先运行 `teleimager-server --cf` 查看实际值再决定用哪个字段。
 
-#### 1. 物理路径（physical_path）—— 最高优先级
+### 4.2 为什么需要两种传输方式？
 
-Linux 内核分配的 USB 拓扑路径，能唯一确定摄像头插在哪个物理口上。
+服务端有两大用途，对延迟/带宽的要求不同：
 
-🎯 优点
+- **ZeroMQ PUB–SUB** —— 通过局域网传输。高质量帧、低开销、高吞吐，在不牺牲画质的前提下保持低延迟。适合**录制训练数据**。
+- **WebRTC** —— **实时预览**、VR 遥操作、UI 调试。自动码率控制下的低延迟，H.264（默认）/ VP8，兼容浏览器与 VR 设备。
 
-- 只要不换口，始终稳定
-- 不依赖厂商固件写了什么
-- 非常适合固定部署（如机器人头部 + 左腕 + 右腕）
+### 4.3 三重环形缓冲区的好处
 
-⚠️ 缺点
+- **消除画面撕裂** —— 读写永远不落在同一槽位，因此读取者不会读到"写了一半"的帧。
+- **始终最新** —— 与 FIFO 队列不同，旧帧会被覆盖，读取者永远拿到最新一帧。对实时性至关重要。
 
-- 换 USB 口就必须修改配置
-
-------
-
-#### 2. 序列号（serial_number）
-
-存储在摄像头 USB 设备描述符中的字符串，规范上应是每台设备唯一的。
-
-🎯 优点
-
-- 换口也不变，可移植性好
-- 规范上就是用来区分单台设备的
-
-⚠️ 缺点
-
-- 部分低成本摄像头所有设备共用同一个序列号，或直接留空
-- 有些摄像头序列号格式异常或不稳定
-
-------
-
-#### 3. USB 设备版本号（bcd_device）
-
-USB 设备描述符中的 BCD 编码数字，规范上是固件版本号。但实际中，有些厂商会故意给
-同一型号的不同设备分配不同的 bcd_device——例如用来区分左右手腕的一对相机。
-
-🎯 优点
-
-- 固化在固件中，不受重启或换口影响
-- 当厂商有意用它区分设备时，可以充当序列号的作用
-
-⚠️ 缺点
-
-- 很多厂商仅把它当固件版本号使用，所有设备相同
-- 能否用于区分设备，取决于具体硬件，无法一概而论
-
-------
-
-#### 4. 供应商:产品 ID（vid_pid）
-
-USB-IF 分配的 vid 和厂商自定的 pid，规范上标识芯片/产品型号。但有些厂商会给不同
-设备分配不同的 pid，实际上把它当序列号使用。
-
-🎯 优点
-
-- 极其稳定——同一芯片 vid 永远不变
-- 可以一眼区分不同型号的摄像头
-
-⚠️ 缺点
-
-- 同型号通常共享相同 vid_pid
-- 它标识的是型号还是单台设备，完全取决于厂商
-
-------
-
-#### 5. video 设备路径（video_id: /dev/videoX）
-
-内核枚举时分配的 V4L2 设备节点编号。
-
-🎯 优点
-
-- 最直接：看到 `/dev/video2` 就填 `video_id: 2`
-
-⚠️ 缺点
-
-- 插拔顺序、重启、内核枚举顺序都会改变它
-- 多摄像头场景下不可靠
-
-------
-
-#### 五种标识定位
-
-> **注意：** bcd_device 和 vid_pid 的粒度完全取决于厂商的做法。运行
-> `teleimager-server --cf` 查看实际值后再决定用哪个字段。
-
-
-
-### 4.2 为什么需要两种图像传输方式？
-
-本图像服务有两大用途：
-
-1. **录制高质量数据 → 用于模型训练**
-2. **实时可视化（XR / UI） → 用于调试、状态监控、远程操作界面**
-
-不同传输场景（本地 / 局域网 / 远程网络）对延迟和带宽的要求不同，因此系统提供两种图像传输方式。
-
-------
-
-#### 1. ZeroMQ PUB–SUB
-
-**适用于：服务器与客户端**不在同一台机器**，需要通过局域网传输时使用**。ZeroMQ 模式主要用于 **跨机器** 的图像传输，例如图像服务器在 A 电脑，数据记录程序在 B 电脑。
-
-🎯 优点
-
-- 在局域网（LAN）内传输高质量图像
-- 尽可能减少包开销，提高吞吐
-- 不牺牲图像质量的前提下保持低延迟
-
-------
-
-#### 2. WebRTC
-
-**适用于：实时监控预览、VR 遥操作、UI 调试**。WebRTC 不是为训练数据设计的，而是为 **实时可视化流** 设计的：
-
-🎯 优点
-
-- 自动码率控制的前提下低延迟
-- H.264(默认) / VP8
-- 适用于浏览器、VR 设备等
-
-
-
-### 4.3 Triple Ring Buffer 有什么好处？
-
-- **非阻塞读写 (Non-blocking):**
-
-  **写入者（Writer）** 不需要等待读取者读完。只要有空闲缓冲区，它就一直写。即便读取者卡住了，写入者也可以跳过被占用的槽位，继续在另外两个槽位间轮转。
-
-  **读取者（Reader）** 不需要等待写入者写完。它总是能立即拿到最近一次**完整**写入的一帧数据。
-
-- **消除“画面撕裂” (No Tearing):**
-
-  由于读取和写入永远不会发生在同一个索引（`write` 函数中有专门的 `if write_index == read_index` 避让逻辑），读取者永远不会读到一张“写了一半”的图片。
-
-- **始终最新 (Always Fresh):**
-
-  与标准的队列（Queue）不同，队列是先进先出（FIFO），如果处理慢，队列会积压，导致读取者看到的画面有延迟。
-
-  三重缓冲允许**丢帧**。如果写入太快，旧的帧会被覆盖，读取者永远拿到的是 `latest_index` 指向的那一帧。这对实时性至关重要。
-
+---
 
 ## 5. 🧐 FAQ
 
-1. 为什么 teleimager-server --cf 输出的信息中序列号等内容为 unknown？
+1. **`--cf` 输出中序列号等字段显示为 `unknown`？**
+部分摄像头需要更高权限才能读取完整硬件信息，可尝试：
 
-    您可以尝试添加 `sudo` 权限运行该命令，某些摄像头需要更高权限才能读取完整信息。
-    例如：
+```bash
+sudo $(which teleimager-server) --cf --uvc
+```
 
-    ```bash
-    sudo $(which teleimager-server) --cf
-    ```
+**启动服务端时报 `No module named 'psutil'`？**
+`psutil`（用于可选的 CPU 亲和性调优）已包含在 `teleimager[server]` 中。若你的环境是零散安装导致缺失，执行 `pip install psutil` 补上，或用 `pip install -e ".[server]"` 重装。现在即使缺失也只会打印警告并跳过该优化，不再导致崩溃。
+
+---
 
 ## 6. 🙏 Acknowledgement
-
-
 
 部分代码参考了 https://github.com/ARCLab-MIT/beavr-bot

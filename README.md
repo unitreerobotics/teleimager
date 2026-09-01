@@ -6,363 +6,330 @@
   <p align="center">
     <a> English </a> | <a href="README_zh-CN.md">中文</a>
   </p>
+  <p align="center">
+    <a href="https://github.com/unitreerobotics/xr_teleoperate/wiki" target="_blank"> <img src="https://img.shields.io/badge/GitHub-Wiki-181717?logo=github" alt="Unitree LOGO"></a> <a href="https://discord.gg/ZwcVwxv5rq" target="_blank"><img src="https://img.shields.io/badge/-Discord-5865F2?style=flat&logo=Discord&logoColor=white" alt="Unitree LOGO"> <a href="https://deepwiki.com/unitreerobotics/teleimager"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a> </a>
+  </p>
 </div>
-<p align="center">
-  <a href="https://github.com/unitreerobotics/xr_teleoperate/wiki" target="_blank"> <img src="https://img.shields.io/badge/GitHub-Wiki-181717?logo=github" alt="Unitree LOGO"></a> <a href="https://discord.gg/ZwcVwxv5rq" target="_blank"><img src="https://img.shields.io/badge/-Discord-5865F2?style=flat&logo=Discord&logoColor=white" alt="Unitree LOGO"> <a href="https://deepwiki.com/unitreerobotics/teleimager"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a> </a>
-</p>
+[**TeleImager**](https://github.com/unitreerobotics/teleimager) is Unitree's image service: a **server** captures video from multiple cameras (UVC, V4L2, GStreamer, RealSense) and publishes it over the network via **ZeroMQ** or **WebRTC**, while a **client** subscribes and decodes those streams. It powers the teleoperation video pipeline of [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate).
 
-## 1. Image Server
+## ✨ Features
 
-[**TeleImager**](https://github.com/unitreerobotics/teleimager) is Unitree's image server that captures video streams from multiple cameras (UVC, V4L2, GStreamer, and RealSense) and publishes them over the network using ZeroMQ or WebRTC.
-
-Currently, **Tele Imager** is used in the [xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate) project to provide teleoperation video streams.
-
-> All user-callable APIs are located under the `# public api` comment in the code.
-
-
-
-### 1.0 ✨ Features
-
-- 📸 Supports multiple UVC, V4L2, GStreamer, and Intel RealSense cameras
-- 📢 Publishes video frames using **ZeroMQ PUB-SUB**
-- 📢 Publishes video frames using **WebRTC**
-- 💬 Responds to image configuration commands via **ZeroMQ REQ-REP**
-- 🆔 Multiple camera identifiers: physical path, serial number, bcd_device, vid_pid, or video device path
+- 📸 Multiple UVC / V4L2 / GStreamer / Intel RealSense cameras
+- 📢 Publish frames over **ZeroMQ PUB-SUB** (high quality, LAN) and **WebRTC** (low latency, browser)
+- 💬 Serve image-config commands over **ZeroMQ REQ-REP**
+- 🆔 Five camera identifiers: physical path, serial number, bcd_device, vid_pid, video path
 - ⚙️ Configurable resolution and frame rate
-- 🚀 Efficient frame handling using a triple ring buffer
+- 🚀 Efficient frame handoff via a triple ring buffer
 
+---
 
+## 1. 📦 Installation
 
-### 1.1 📥 Environment Setup
+TeleImager has **two roles** — install only what you need:
 
-1. Install miniconda3:
+| Role | What it does | Where it runs |
+|------|--------------|---------------|
+| **Client** | Subscribes and decodes streams (teleoperation, data recording, your own CV code) | Workstation / robot host |
+| **Server** | Captures from cameras and publishes over ZMQ/WebRTC | The robot/device the cameras are plugged into |
+
+### 1.0 System prerequisite (both roles)
+
+Both roles do JPEG encode/decode through **PyTurboJPEG**, a ctypes binding that loads the system library **libjpeg-turbo (3.0+ required)** at import. pip cannot install this native library — do it once per machine. Pick one:
+
+**Method 1 — Conda (recommended, cross-platform)**
 
 ```bash
-# for Jetson Orin NX (ARM architecture)
-unitree@ubuntu:~$ mkdir -p ~/miniconda3
-unitree@ubuntu:~$ wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh -O ~/miniconda3/miniconda.sh
-unitree@ubuntu:~$ bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
-unitree@ubuntu:~$ rm ~/miniconda3/miniconda.sh
-unitree@ubuntu:~$ source ~/miniconda3/bin/activate
-(base) unitree@ubuntu:~$ conda init --all
+conda install -c conda-forge libjpeg-turbo
 ```
 
-2. Create and activate a conda environment:
+**Method 2 — Homebrew (macOS)**
 
 ```bash
-(base) unitree@ubuntu:~$ conda create -n teleimager python=3.10 -y
-(base) unitree@ubuntu:~$ conda activate teleimager
+brew install jpeg-turbo
 ```
 
-3. Install the repository and dependencies:
-
+<details>
+<summary><b>Method 3 — Build from source (Ubuntu/Debian)</b></summary>
 ```bash
-(teleimager) unitree@ubuntu:~$ sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev
-(teleimager) unitree@ubuntu:~$ git clone https://github.com/unitreerobotics/teleimager.git
-(teleimager) unitree@ubuntu:~$ cd teleimager
-# If you only use the client
-(teleimager) unitree@ubuntu:~/teleimager$ pip install -e .
-# If you also use the server
-(teleimager) unitree@ubuntu:~/teleimager$ pip install -e ".[server]"
+git clone https://github.com/libjpeg-turbo/libjpeg-turbo.git
+cd libjpeg-turbo && mkdir build && cd build
+cmake -DCMAKE_INSTALL_PREFIX=/opt/libjpeg-turbo ..
+make -j$(nproc) && sudo make install
+echo 'export LD_LIBRARY_PATH=/opt/libjpeg-turbo/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-4. Add video device permissions for non-root users:
+</details>
+
+> ⚠️ Do **not** install the PyPI package named `turbojpeg` — it is a different, incompatible library. This project uses `PyTurboJPEG` (already pulled in by `pip install teleimager`).
+> Ubuntu's `sudo apt install libturbojpeg` is often older than 3.0, so it's not recommended. If the library is missing, TeleImager raises a detailed install hint equivalent to the above on first import.
+
+### 1.1 Environment (conda)
 
 ```bash
-bash setup_uvc.sh
+# Install Miniconda (skip if already installed). Use the aarch64 installer on Jetson/ARM.
+mkdir -p ~/miniconda3
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3 && rm ~/miniconda3/miniconda.sh
+source ~/miniconda3/bin/activate && conda init --all
+
+# Create and activate the project environment
+conda create -n teleimager python=3.10 -y
+conda activate teleimager
 ```
 
-5. Configure certificate paths (required for WebRTC):
+### 1.2 Client install
 
-   Certificates are usually generated by [televuer](https://github.com/unitreerobotics/televuer).
-    You can specify the certificate location via **user config directory** or **environment variables**.
+| You need | Command |
+|----------|---------|
+| **Headless** — subscribe ZMQ → BGR `ndarray` (feed your own code) | `pip install teleimager` |
+| **+ Viewer** — on-screen OpenCV windows | `pip install "teleimager[viewer]"` |
 
-   **Method 1: User config directory (recommended)**
+> The viewer pulls in `opencv-python`.
 
-   ```bash
-   mkdir -p ~/.config/xr_teleoperate/
-   cp cert.pem key.pem ~/.config/xr_teleoperate/
-   ```
+### 1.3 Server install
 
-   **Method 2: Environment variables**
+Pick the driver(s) for your cameras, run one install command, then add certificates at the end if you use WebRTC.
 
-   ```bash
-   echo 'export XR_TELEOP_CERT="your_file_path/cert.pem"' >> ~/.bashrc
-   echo 'export XR_TELEOP_KEY="your_file_path/key.pem"' >> ~/.bashrc
-   source ~/.bashrc
-   ```
+#### 1.3.1 Choose your backend (camera driver)
 
-   **Method 3: Default behavior**
+A *backend* is the capture driver TeleImager uses to talk to a camera. They're lazily loaded, so unused ones cost nothing; start from the base (V4L2 + WebRTC) and stack on what you have:
 
-   If neither method is used, Tele Imager will look for certificates in the default module paths.
+| Backend (camera driver) | pip extra | Notes |
+|---------|-----------|-------|
+| Base (V4L2) | `[server]` | Always included, no extra needed |
+| + UVC | `[uvc]` | Needs USB access — run [setup_uvc.sh](https://github.com/unitreerobotics/teleimager/blob/main/setup_uvc.sh); the wheel already bundles `libturbojpeg` and `libusb`, no apt needed |
+| + RealSense | `[realsense]` |  |
+| + Everything (except GStreamer) | `[all]` | Equivalent to UVC + RealSense |
+| + GStreamer | no pip package | `sudo apt install python3-gi python3-gst-1.0 gstreamer1.0-plugins-{base,good,bad}` |
 
+#### 1.3.2 Install
 
-
-### 1.2 🔍 Discover Connected Cameras
-
-Run the following command to discover connected cameras:
+Pick your backend (swap the `[server]` below for the matching extra), then choose one of two ways to install:
 
 ```bash
-python -m teleimager.server --cf
-# or
-teleimager-server --cf
+# Option 1 — from source (recommended): also gets the helper scripts setup_uvc.sh / setup_autostart.sh and WebRTC assets
+git clone https://github.com/unitreerobotics/teleimager.git
+cd teleimager
+pip install -e ".[server]"        # e.g. ".[uvc]", ".[all]"
+
+# Option 2 — from PyPI (when you don't need the helper scripts)
+pip install "teleimager[server]"  # e.g. "teleimager[uvc]", "teleimager[all]"
 ```
 
-You will see output similar to:
+#### 1.3.3 Configure TLS certificates (WebRTC only)
+
+See the [CA guide](https://github.com/unitreerobotics/xr_teleoperate/wiki/CA) for details. Or generate a self-signed pair quickly with openssl:
 
 ```bash
-(teleimager) unitree@ubuntu:~$ teleimager-server --cf
-============================ Camera Discovery ============================
-Found video devices: ['/dev/video0', '/dev/video1', '/dev/video2']
-Found RGB video devices: ['/dev/video0', '/dev/video2']
-
-══════ Camera 1/2: Cherry Dual Camera (DECXIN) ══════
-  physical_path : /sys/devices/pci.../usb1/1-3/1-3.1/1-3.1:1.0
-  serial_number : 01.00.00
-  bcdDevice     : 0217 (v2.17)   (USB device release number)
-  vid : pid     : 1bcf:2d4f        (VendorID : ProductID)
-  video_id      : 0
-  uid           : 1:71           (USB bus:device address)
-  Supported modes (MJPG)  [width x height @ fps]:
-    640x480 @ [10, 15, 20, 25, 30, 60, 120] fps
-    1280x720 @ [10, 15, 20, 25, 30, 60] fps
-    ...
-
-══════ Camera 2/2: Abham Image (HHWei Technology Co., Ltd.) ══════
-  physical_path : /sys/devices/pci.../usb1/1-1/1-1:1.0
-  serial_number : HHW001
-  bcdDevice     : 0200 (v2.00)   (USB device release number)
-  vid : pid     : 1c45:6200        (VendorID : ProductID)
-  video_id      : 2
-  uid           : 1:79           (USB bus:device address)
-  Supported modes (MJPG)  [width x height @ fps]:
-    640x480 @ [5, 10, 15, 20, 25, 30] fps
-    1920x1080 @ [5, 10, 15, 20, 25, 30] fps
-    ...
-================================================================
+# Generate a self-signed cert valid for 365 days (cert.pem / key.pem)
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout key.pem -out cert.pem -subj "/CN=teleimager"
 ```
 
-> If RealSense cameras exist, add the `--rs` argument to see RealSense discovery results.
-
-
-
-### 1.3 📡 Start the Image Server
-
-On first start the server creates a default config at `~/.config/teleimager/teleimager_server.yaml`.
-Edit it to match your cameras (using the values from the discovery step above), then start the server:
+Then let TeleImager find it, one of two ways:
 
 ```bash
-python -m teleimager.server
-# or
+# Option A — user config dir (recommended)
+mkdir -p ~/.config/xr_teleoperate/
+cp cert.pem key.pem ~/.config/xr_teleoperate/
+
+# Option B — environment variables
+echo 'export XR_TELEOP_CERT="/path/to/cert.pem"' >> ~/.bashrc
+echo 'export XR_TELEOP_KEY="/path/to/key.pem"'   >> ~/.bashrc
+source ~/.bashrc
+```
+
+> If neither is set, TeleImager falls back to the default certificate paths bundled with the module.
+
+---
+
+## 2. 🚀 Running the Server
+
+### 2.1 Discover connected cameras
+
+Scan with the backend flags matching the cameras you have (`--uvc`, `--v4l2`, `--gst`, `--rs` — combine freely):
+
+```bash
+teleimager-server --cf --uvc --v4l2        # add --rs for RealSense, --gst for GStreamer
+```
+
+Example output:
+
+```text
+[Teleimager] 🎯 Camera Finder Report
+├─ UVCCamera (3 found)   [type: uvc]
+│  ├─ 📷 USB HDR Camera (Generic)
+│  │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.1/1-3.1:1.0
+│  │  ├─ serial_number : 200901010001
+│  │  ├─ bcdDevice     : 0200           (USB device release number)
+│  │  ├─ vid : pid     : 1e45:2050      (VendorID : ProductID)
+│  │  ├─ video_id      : 0              (/dev/video0)
+│  │  └─ modes (MJPG)  [width x height @ fps]:
+│  │     ├─ 320x240 @ [30, 60]
+│  │     
+│  │     └─ 1920x1080 @ [30, 60]
+│  ├─ 📷 Abham Image (HHWei Technology Co., Ltd.)
+│  │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0
+│  │  ├─ serial_number : HHW001
+│  │  ├─ bcdDevice     : 0200           (USB device release number)
+│  │  ├─ vid : pid     : 1c45:6200      (VendorID : ProductID)
+│  │  ├─ video_id      : 10             (/dev/video10)
+│  │  └─ modes (MJPG)  [width x height @ fps]:
+│  │     ├─ 640x480 @ [5, 10, 15, 20, 25, 30]
+│  │     ...
+│  │     └─ 2688x1520 @ [5, 10, 15, 20, 25, 30]
+│  └─ 📷 Cherry Dual Camera (DECXIN)
+│     ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.2/1-3.2:1.0
+│     ├─ serial_number : 01.00.00
+│     ├─ bcdDevice     : 0217           (USB device release number)
+│     ├─ vid : pid     : 1bcf:2d4f      (VendorID : ProductID)
+│     ├─ video_id      : 2              (/dev/video2)
+│     └─ modes (MJPG)  [width x height @ fps]:
+│        ├─ 320x232 @ [10, 15, 20, 25, 30, 60, 120]
+│        ├─ 640x240 @ [10, 15, 20, 25, 30, 60, 120]
+│        ├─ 800x592 @ [10, 15, 20, 25, 30, 60, 120]
+│        ├─ 800x600 @ [10, 15, 20, 25, 30, 60, 120]
+│        ├─ 1280x480 @ [10, 15, 20, 25, 30, 60, 120]
+|        ...
+│        └─ 3200x1296 @ [10, 15, 20, 25, 30, 60]
+└─ V4L2Camera (4 found)   [type: v4l2]
+   ├─ 📷 USB HDR Camera (Generic)
+   │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.1/1-3.1:1.0
+   │  ├─ serial_number : 200901010001
+   │  ├─ bcdDevice     : 0200           (USB device release number)
+   │  ├─ vid : pid     : 1e45:2050      (VendorID : ProductID)
+   │  ├─ video_id      : 0              (/dev/video0)
+   │  └─ modes  [width x height @ fps]:
+   │     ├─ MJPG   1920x1080 @ [60.0, 30.0]
+   ...
+   │     └─ YUYV   640x480 @ [30.0]
+   ├─ 📷 Abham Image (HHWei Technology Co., Ltd.)
+   │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0
+   │  ├─ serial_number : HHW001
+   │  ├─ bcdDevice     : 0200           (USB device release number)
+   │  ├─ vid : pid     : 1c45:6200      (VendorID : ProductID)
+   │  ├─ video_id      : 10             (/dev/video10)
+   │  └─ modes  [width x height @ fps]:
+   │     ├─ MJPG   2688x1520 @ [30.0, 25.0, 20.0, 15.0, 10.0, 5.0]
+   ...
+   │     └─ YUYV   640x480 @ [30.0]
+   ├─ 📷 Cherry Dual Camera (DECXIN)
+   │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.2/1-3.2:1.0
+   │  ├─ serial_number : 01.00.00
+   │  ├─ bcdDevice     : 0217           (USB device release number)
+   │  ├─ vid : pid     : 1bcf:2d4f      (VendorID : ProductID)
+   │  ├─ video_id      : 2              (/dev/video2)
+   │  └─ modes  [width x height @ fps]:
+   │     ├─ MJPG   3200x1296 @ [60.0, 30.0, 25.0, 20.0, 15.0, 10.0]
+   ...
+   │     ├─ YUYV   640x240 @ [60.0, 30.0, 25.0, 20.0, 15.0, 10.0]
+   │     └─ YUYV   320x232 @ [120.0, 60.0, 30.0, 25.0, 20.0, 15.0, 10.0]
+   └─ 📷 Intel(R) RealSense(TM) Depth Camera 435i (Intel(R) RealSense(TM) Depth Camera 435i)
+      ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-11/1-11.2/1-11.2:1.3
+      ├─ serial_number : (none)
+      ├─ bcdDevice     : 50d0           (USB device release number)
+      ├─ vid : pid     : 8086:0b3a      (VendorID : ProductID)
+      ├─ video_id      : 8              (/dev/video8)
+      └─ modes  [width x height @ fps]:
+         ├─ YUYV   424x240 @ [60.0, 30.0, 15.0, 6.0]
+         ├─ YUYV   640x480 @ [30.0, 15.0, 6.0]
+         ├─ YUYV   1280x720 @ [15.0, 10.0, 6.0]
+         └─ YUYV   1920x1080 @ [8.0]
+```
+
+### 2.2 Start the server
+
+On first run the server writes a default config to `~/.config/teleimager/teleimager_server.yaml`.
+
+Edit it to match the Camera Finder Report from section 2.1, then start the service:
+
+```bash
 teleimager-server
 ```
 
-> RealSense cameras are driven by `type: realsense` in the yaml — no extra flag is needed at server start.
-> You can point the server at a different config with `--config <path>` or the `$TELEIMAGER_CONFIG` env var.
+Useful flags: `--config <path>` (or `$TELEIMAGER_CONFIG`) to point at another config; `--no-affinity` to skip CPU-core pinning; `--isaacsim` to run in IsaacSim mode (frames from shared memory).
 
+### 2.3 Auto-start on boot
 
-
-## 2. Image Client
-
-The client module connects to the image server to receive and display multiple video streams. Designed for teleoperation scenarios.
-
-All user-callable APIs are under `# public api`.
-
-------
-
-### 2.1 🌀 Using ZMQ
-
-After the server is running, start the client in another terminal:
+Once everything is verified, you can optionally install it as a [boot service](https://github.com/unitreerobotics/teleimager/blob/main/setup_autostart.sh):
 
 ```bash
-python -m teleimager.client
-# or
-teleimager-client --host 127.0.0.1
+bash setup_autostart.sh        # follow the prompts
 ```
 
-If the server runs on a NVIDIA Jetson with IP `192.168.123.164`:
+---
+
+## 3. 📺 Running the Client
+
+### 3.1 Over ZMQ
+
+With the server running, start the client on another terminal (or machine), pointing at the server's IP:
 
 ```bash
-teleimager-client --host 192.168.123.164
+teleimager-client --host 192.168.123.164        # default: 192.168.123.164
 ```
 
-You will see separate OpenCV windows showing each camera stream.
+Each camera stream opens in its own OpenCV window (requires `teleimager[viewer]`).
 
-> Ensure `opencv-python` is installed.
+For headless subscription, follow the `# public api` of `TeleImageClient` in [`client.py`](src/teleimager/client.py) and subscribe from your own code.
 
+### 3.2 Over WebRTC
 
+Open the server's WebRTC page in a browser and click the **start** button in the center of the page:
 
-### 2.2 🌀 Using WebRTC
-
-For WebRTC streams, open a browser:
-
-```bash
-https://<host_ip>:<webrtc_port>
-# e.g.
-https://192.168.123.164:60001
+```text
+https://<host_ip>:<webrtc_port>        # e.g. https://192.168.123.164:60001
 ```
 
-And please press the `start` button in the center of the page.
-
-
-
-## 3. 🚀 Automatic Startup Service
-
-After successful setup and testing, enable automatic startup:
-
-```bash
-bash setup_autostart.sh
-```
-
-Follow the prompts to complete configuration.
-
-
+---
 
 ## 4. 🧠 Design Principles
 
-### 4.1 Why Support Multiple Camera Identifiers?
+### 4.1 Why five camera identifiers?
 
-When multiple cameras are connected, the system needs a reliable way to tell them apart.
-Tele Imager supports five identifiers, resolved in priority order:
-`physical_path > serial_number > bcd_device > vid_pid > video_id`.
+With several cameras connected at once, the system needs a reliable way to tell them apart. TeleImager supports five identifiers, resolved in priority order:
 
-Each identifier has different trade-offs. More importantly, manufacturers use these fields
-in inconsistent ways — the "meaning" of a field in the USB spec often differs from how a
-vendor actually programs it. The descriptions below reflect real-world behavior, not just
-specification intent.
+`physical_path > serial_number > bcd_device > vid_pid > video_id`
 
-**1. Physical path (physical_path)** — highest priority
+Each has trade-offs, and manufacturers use these fields inconsistently — a field's "standard meaning" in the USB spec often differs from the value the vendor's firmware actually writes. The table below reflects real-world behavior.
 
-This is the USB topology path assigned by the Linux kernel. It uniquely identifies
-which physical port a camera is plugged into.
+| Identifier | What it is | 🎯 Strength | ⚠️ Weakness |
+|------------|-----------|------------|-------------|
+| **physical_path** | Kernel-assigned USB topology path — which physical port it's plugged into | Stable while the port is unchanged; independent of firmware; ideal for fixed rigs (head + wrists) | Must update config if moved to another port |
+| **serial_number** | String in the USB descriptor, meant to be unique per unit | Portable across ports; the canonical per-unit device ID | Cheap cameras may share it, leave it empty, or malform it |
+| **bcd_device** | BCD firmware-revision number; some vendors vary it per unit | Hardcoded in firmware, survives reboots and port changes; can act as a serial number when the vendor intends it | Often identical across all units of a model |
+| **vid_pid** | 16-bit vendor:product IDs | Very stable; distinguishes models at a glance | Same-model units usually share one vid_pid |
+| **video_id** → `/dev/videoX` | Kernel-enumerated V4L2 node number | Simplest: just fill in the number `X` | Changes with plug order / reboot / enumeration — unreliable with more than one camera |
 
-🎯 Advantages:
-- Stable as long as the camera stays in the same USB port
-- Works regardless of what the manufacturer wrote into the firmware
-- Ideal for fixed deployments (e.g. robot head + left wrist + right wrist)
+> The granularity of `bcd_device` and `vid_pid` is entirely up to the vendor. Always run `teleimager-server --cf` to see the actual values before choosing a field.
 
-⚠️ Disadvantages:
-- Must update config if the camera is moved to a different USB port
+### 4.2 Why two transport methods?
 
-**2. Serial number (serial_number)**
+The server serves two purposes with different latency/bandwidth needs:
 
-A string stored in the camera's USB device descriptor, intended to be unique per unit.
+- **ZeroMQ PUB–SUB** — transport over LAN. High-quality frames, low overhead, high throughput, low latency without sacrificing quality. Best for **recording training data**.
+- **WebRTC** — **real-time preview**, VR teleoperation, UI debugging. Low latency with adaptive bitrate, H.264 (default) / VP8, compatible with browsers and VR devices.
 
-🎯 Advantages:
-- Portable: same value regardless of which USB port is used
-- Canonically the right way to identify a specific device
+### 4.3 Triple ring buffer benefits
 
-⚠️ Disadvantages:
-- Some low-cost cameras reuse the same serial across all units, or leave it empty
-- Some cameras report malformed or unstable strings
+- **No tearing** — read and write never touch the same slot, so the reader never reads a half-written frame.
+- **Always fresh** — unlike a FIFO queue, stale frames are overwritten, so the reader always gets the newest frame. Critical for real-time use.
 
-**3. USB device release number (bcd_device)**
-
-A BCD-encoded number in the USB device descriptor, nominally a firmware revision.
-In practice, some manufacturers intentionally assign different values to otherwise
-identical cameras — for example, to distinguish left-wrist from right-wrist units
-in a stereo pair.
-
-🎯 Advantages:
-- Hardcoded in firmware, survives reboots and port changes
-- Can serve as a per-unit identifier when the vendor programs it that way
-
-⚠️ Disadvantages:
-- Many vendors treat it purely as a firmware version — same value across all units
-- Cannot be relied upon for uniqueness without checking the specific hardware
-
-**4. Vendor:Product ID (vid_pid)**
-
-Two 16-bit numbers assigned by the USB-IF (vid) and the vendor (pid).
-Nominally identifies the chip or product model. Some vendors assign different
-pid values to individual units, effectively using it as a serial number.
-
-🎯 Advantages:
-- Extremely stable — same chip always reports the same vid
-- Can distinguish different camera models at a glance
-
-⚠️ Disadvantages:
-- Same-model cameras usually share the same vid_pid
-- Whether it identifies a model or an individual unit is entirely up to the vendor
-
-**5. Video device path (video_id → /dev/videoX)**
-
-The V4L2 device node assigned by the kernel at enumeration time.
-
-🎯 Advantages:
-- Simplest to use: just specify the number X from `/dev/videoX`
-
-⚠️ Disadvantages:
-- Changes with plug order, reboot, or kernel enumeration order
-- Unreliable for any setup with more than one camera
-
-> **Note:** The granularity of bcd_device and vid_pid depends entirely on the manufacturer.
-> Always check `teleimager-server --cf` output to see what values your specific cameras report.
-
-
-
-### 4.2 Why Support Two Transmission Methods?
-
-The image server has two main uses:
-
-1. **Recording high-quality data** → For model training
-2. **Real-time visualization (XR/UI)** → For debugging and monitoring
-
-Different scenarios (local, LAN, remote) require different latency and bandwidth trade-offs. Thus, two transmission methods are supported.
-
-------
-
-**1. ZeroMQ PUB–SUB**
-
-**Use case:** Server and client on **different machines** over LAN
-
-🎯 Advantages
-
-- High-quality frame transmission in LAN
-- Low overhead, high throughput
-- Low latency without sacrificing image quality
-
-------
-
-**2. WebRTC**
-
-**Use case:** Real-time preview, VR teleoperation, UI debugging
-
-🎯 Advantages
-
-- Low latency with adaptive bitrate
-- H.264(default) / VP8
-- Browser and VR device compatible
-
-
-
-### 4.3 Triple Ring Buffer Benefits
-
-- **Non-blocking Read/Write:**
-
-  Writer does not wait for reader; keeps writing in available slots
-
-  Reader always fetches the latest complete frame
-
-- **No Tearing:**
-
-  Reader never reads a partially written frame due to write avoidance logic
-
-- **Always Fresh:**
-
-  Unlike FIFO queues, old frames can be overwritten, so the reader always gets the latest frame
-
-  Critical for real-time applications
+---
 
 ## 5. 🧐 FAQ
 
-1. Why is the serial number and other information displayed as "unknown" in the `teleimager-server --cf` output?
+1. **Serial number / other fields show `unknown` in `--cf` output?**
+Some cameras need elevated permissions to expose full hardware metadata. Try:
 
-    You can try running the command with sudo privileges. Some cameras require elevated permissions to retrieve full hardware metadata. For example:
+```bash
+sudo $(which teleimager-server) --cf --uvc
+```
 
-    ```bash
-    sudo $(which teleimager-server) --cf
-    ```
+**Server reports `No module named 'psutil'` on start?**
+`psutil` (used for optional CPU-affinity tuning) ships with `teleimager[server]`. If a partial install left it missing, add it with `pip install psutil`, or reinstall via `pip install -e ".[server]"`. Missing it now only logs a warning and skips the optimization instead of crashing.
+
+---
 
 ## 6. 🙏 Acknowledgement
 
