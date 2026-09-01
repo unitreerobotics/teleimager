@@ -559,7 +559,25 @@ class WebRTC_PublisherThread(threading.Thread):
         except Exception as e:
             logger_mp.error(f"[Teleimager] WebRTC Thread Error: {e}")
         finally:
-            if self._loop: self._loop.close()
+            if self._loop:
+                try:
+                    self._loop.run_until_complete(self._shutdown())
+                except Exception as e:
+                    logger_mp.warning(f"[Teleimager] WebRTC cleanup failed: {e}")
+                self._loop.close()
+
+    async def _shutdown(self):
+        for pc in list(self._pcs):
+            try:
+                await pc.close()
+            except Exception:
+                pass
+        self._pcs.clear()
+        if self._runner is not None:
+            try:
+                await self._runner.cleanup()
+            except Exception:
+                pass
 
     def send(self, data: np.ndarray):
         """Send data to the processing thread."""
@@ -602,7 +620,7 @@ class WebRTC_PublisherManager:
         t = WebRTC_PublisherThread(port, host, codec_pref)
         t.start()
         if not t.wait_for_start(timeout=10.0):  # Increase timeout to 10 seconds
-             raise ConnectionError("Publisher failed to start (Timeout)")
+             logger_mp.error(f"[Teleimager] WebRTC publisher on {host}:{port} failed to start.")
         return t
 
     def _get_publisher(self, port, host, codec_pref):
@@ -801,10 +819,17 @@ class CameraFinder:
             return None
         cams = []
         for c in cards:
-            cams.append(("📷 " + (c.get("name") or "?"), [
-                self._leaf("type: gstreamer"),
-                self._leaf('gst_pipeline: "%s"' % c.get("gst_pipeline")),
-            ]))
+            fields = []
+            if c.get("recommend_backend"):
+                fields.append(self._leaf("recommend use type: %s (the gstreamer backend can't drive it)" % c["recommend_backend"]))
+                cams.append(("📷 " + (c.get("name") or "?"), fields))
+                continue
+            if c.get("device_physical_path"):
+                fields.append(self._leaf("device (physical_path) : %s" % c["device_physical_path"]))
+            if c.get("device_serial_number"):
+                fields.append(self._leaf("device (serial_number) : %s" % c["device_serial_number"]))
+            fields.append(self._leaf('gst_pipeline: "%s"' % c.get("gst_pipeline")))
+            cams.append(("📷 " + (c.get("name") or "?"), fields))
         return ("GStreamerCamera (%d found)   [type: gstreamer]" % len(cams), cams)
 
 class BaseCamera:
@@ -912,7 +937,7 @@ class RealSenseCamera(BaseCamera):
             self.intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
             logger_mp.info(str(self))
         except Exception as e:
-            if self.pipeline:
+            if getattr(self, "pipeline", None):
                 try:
                     self.pipeline.stop()
                 except:
@@ -955,14 +980,11 @@ class RealSenseCamera(BaseCamera):
         return self._latest_depth.tobytes()
 
     def release(self):
-        try:
-            if hasattr(self.pipeline, "stop") and getattr(self.pipeline, "_running", False):
-                try:
-                    self.pipeline.stop()
-                except Exception as e:
-                    logger_mp.warning(f"[Teleimager] pipeline.stop() failed: {e}")
-        except Exception:
-            pass
+        if self.pipeline is not None and hasattr(self.pipeline, "stop"):
+            try:
+                self.pipeline.stop()
+            except Exception as e:
+                logger_mp.warning(f"[Teleimager] pipeline.stop() failed: {e}")
         self.pipeline = None
         logger_mp.info(f"[Teleimager] Released {self._cam_topic}")
 
@@ -1360,6 +1382,7 @@ class UVCCamera(BaseCamera):
             uid = _uid("physical_path", physical_path, unique=False)
             if uid is None:
                 logger_mp.error(f"[Teleimager] Cannot find UVCCamera for {cam_topic} with physical path {physical_path}")
+                return None
             else:
                 return cls(cam_topic, uid, server_cfg)
 
@@ -1386,7 +1409,13 @@ class UVCCamera(BaseCamera):
                 return None
             return cls(cam_topic, uid, server_cfg)
 
-        return None
+        video_id = server_cfg.get("video_id", 0)
+        video_id = int(video_id) if video_id is not None else 0
+        uid = _uid("video_id", video_id, unique=True)
+        if uid is None:
+            logger_mp.error(f"[Teleimager] Cannot find UVCCamera for {cam_topic} with video_id {video_id}")
+            return None
+        return cls(cam_topic, uid, server_cfg)
 
 class V4L2Camera(BaseCamera):
     def __init__(self, cam_topic, video_path, server_cfg):
@@ -1409,7 +1438,12 @@ class V4L2Camera(BaseCamera):
         self._demux = self.container.demux(self.container.streams.video[0])
 
         # Test if the camera can read frames
-        if not self._can_read_frame():
+        try:
+            can_read = self._can_read_frame()
+        except Exception:
+            self.release()
+            raise
+        if not can_read:
             self.release()
             raise RuntimeError(f"[V4L2Camera] Camera {self._cam_topic} failed to initialize or read frames.")
         else:
@@ -1665,8 +1699,8 @@ class V4L2Camera(BaseCamera):
 
     @classmethod
     def from_config(cls, cam_topic, server_cfg):
-        video_id = server_cfg.get("video_id", "0")
-        video_path = f"/dev/video{video_id}" if video_id else None
+        video_id = server_cfg.get("video_id", 0)
+        video_path = f"/dev/video{video_id}" if video_id is not None else None
         physical_path = str(server_cfg.get("physical_path")) if server_cfg.get("physical_path") else None
         serial_number = str(server_cfg.get("serial_number")) if server_cfg.get("serial_number") else None
         _bcd = server_cfg.get("bcd_device")
@@ -1682,6 +1716,7 @@ class V4L2Camera(BaseCamera):
             vpath = cls._resolve_vpath(ids, "physical_path", physical_path)
             if vpath is None:
                 logger_mp.error(f"[Teleimager] Cannot find V4L2Camera for {cam_topic} with physical path {physical_path}")
+                return None
             else:
                 return cls(cam_topic, vpath, server_cfg)
 
@@ -1823,6 +1858,31 @@ class GStreamerCamera(BaseCamera):
         self.pipe = None
         logger_mp.info(f"[Teleimager] Released {self._cam_topic}")
 
+    @staticmethod
+    def _get_devlinks_from_vpath(video_path):
+        # udev symlinks that realize the same identifiers the other drivers use:
+        #   physical_path -> /dev/v4l/by-path  (USB topology / physical port)
+        #   serial_number -> /dev/v4l/by-id    (vendor/model/serial)
+        # Both are stable across replug/reboot, unlike the raw /dev/videoN.
+        out = {"physical_path": None, "serial_number": None}
+        if not video_path:
+            return out
+        try:
+            target = Path(video_path).resolve()
+        except Exception:
+            return out
+        for key, d in (("physical_path", Path("/dev/v4l/by-path")), ("serial_number", Path("/dev/v4l/by-id"))):
+            if not d.exists():
+                continue
+            for link in sorted(d.iterdir()):
+                try:
+                    if link.resolve() == target:
+                        out[key] = str(link)
+                        break
+                except Exception:
+                    continue
+        return out
+
     @classmethod
     def scan(cls):
         try:
@@ -1844,12 +1904,31 @@ class GStreamerCamera(BaseCamera):
             elif mlaunch:
                 launch = mlaunch.group(1).strip()
                 launch = re.sub(r"\s*!\s*\.\.\.\s*$", "", launch).rstrip("! ").strip()
-                if device and "device=" not in launch:
-                    launch = re.sub(r"^v4l2src\b", f"v4l2src device={device}", launch)
+
+                if "realsense" in (name or "").lower():
+                    cards.append({
+                        "type": "gstreamer",
+                        "name": name,
+                        "video_path": device,
+                        "recommend_backend": "realsense",
+                        "gst_pipeline": None,
+                    })
+                    name, device = None, None
+                    continue
+                # Prefer a replug-stable device path over the raw /dev/videoN.
+                links = cls._get_devlinks_from_vpath(device)
+                stable_device = links["physical_path"] or links["serial_number"] or device
+                if stable_device:
+                    if "device=" in launch:
+                        launch = re.sub(r"device=\S+", f"device={stable_device}", launch, count=1)
+                    else:
+                        launch = re.sub(r"^v4l2src\b", f"v4l2src device={stable_device}", launch)
                 cards.append({
                     "type": "gstreamer",
                     "name": name,
                     "video_path": device,
+                    "device_physical_path": links["physical_path"],
+                    "device_serial_number": links["serial_number"],
                     "gst_pipeline": f"{launch} ! image/jpeg ! appsink name=sink",
                 })
                 name, device = None, None
@@ -1916,8 +1995,7 @@ class IsaacSimCamera(BaseCamera):
             # For WebRTC: use BGR frames directly
             if self._enable_webrtc:
                 self._webrtc_buffer.write(frame_data)
-            else:
-                logger_mp.warning(f"[Teleimager] Failed to encode to WebRTC for {self._cam_topic}")
+
             if not self._ready.is_set():
                 self._ready.set()
         else:
@@ -2125,6 +2203,7 @@ class TeleImageServer:
                 logger_mp.error(f"[Teleimager] {camera_topic} ready timeout after {timeout}s.")
                 self._stop_event.set()
                 self._clean_up()
+                return
         
         for camera_topic, camera in self._cameras.items():
             if camera.enable_webrtc():
