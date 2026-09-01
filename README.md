@@ -129,17 +129,13 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout key.pem -out cert.pe
 Then let TeleImager find it, one of two ways:
 
 ```bash
-# Option A — user config dir (recommended)
-mkdir -p ~/.config/xr_teleoperate/
-cp cert.pem key.pem ~/.config/xr_teleoperate/
+# Option A — default config dir (recommended, same dir as the server yaml)
+mkdir -p ~/.config/teleimager/
+cp cert.pem key.pem ~/.config/teleimager/
 
-# Option B — environment variables
-echo 'export XR_TELEOP_CERT="/path/to/cert.pem"' >> ~/.bashrc
-echo 'export XR_TELEOP_KEY="/path/to/key.pem"'   >> ~/.bashrc
-source ~/.bashrc
+# Option B — point at any path on the CLI
+teleimager-server --cert /path/to/cert.pem --key /path/to/key.pem
 ```
-
-> If neither is set, TeleImager falls back to the default certificate paths bundled with the module.
 
 ---
 

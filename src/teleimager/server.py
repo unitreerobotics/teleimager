@@ -48,10 +48,12 @@ from typing import Dict, Optional, Tuple, Any
 
 
 # ========================================================
-# teleimager_server.yaml path
+# teleimager_server.yaml path + TLS cert/key defaults
 # ========================================================
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "teleimager"
 SERVER_CONFIG_PATH = str(CONFIG_DIR / "teleimager_server.yaml")
+CERT_PEM_PATH = CONFIG_DIR / "cert.pem"
+KEY_PEM_PATH = CONFIG_DIR / "key.pem"
 
 def load_server_config(cli_path=None):
     """Resolve the server config path, seeding the default from the bundled
@@ -88,25 +90,6 @@ def load_server_config(cli_path=None):
         logger_mp.error(f"[Teleimager] Failed to load configuration file at {path}: {e}")
         exit(1)
 
-# ========================================================
-# certificate and key paths
-# ========================================================
-module_dir = Path(__file__).resolve().parent.parent.parent
-default_cert = module_dir / "cert.pem"
-default_key = module_dir / "key.pem"
-env_cert = os.getenv("XR_TELEOP_CERT")
-env_key = os.getenv("XR_TELEOP_KEY")
-user_config_dir = Path.home() / ".config" / "xr_teleoperate"
-user_cert = user_config_dir / "cert.pem"
-user_key = user_config_dir / "key.pem"
-CERT_PEM_PATH = Path(env_cert or (user_cert if user_cert.exists() else default_cert))
-KEY_PEM_PATH = Path(env_key or (user_key if user_key.exists() else default_key))
-CERT_PEM_PATH = CERT_PEM_PATH.resolve()
-KEY_PEM_PATH = KEY_PEM_PATH.resolve()
-
-LOGO_SVG_PATH = Path(__file__).resolve().with_name("unitree_logo.svg")
-with open(LOGO_SVG_PATH, "r", encoding="utf-8") as f:
-    UNITREE_LOGO_SVG = f.read()
 
 # ========================================================
 # WebRTC global encoder config (bitrate caps + GOP).
@@ -175,6 +158,9 @@ h264.H264Encoder._encode_frame = jetson_software_encode_frame
 # ========================================================
 # Embed HTML and JS directly
 # ========================================================
+with open(Path(__file__).resolve().with_name("unitree_logo.svg"), "r", encoding="utf-8") as f:
+    UNITREE_LOGO_SVG = f.read()
+
 INDEX_HTML = """
 <!DOCTYPE html>
 <html>
@@ -2233,7 +2219,16 @@ def main():
     parser.add_argument('--isaacsim', action='store_true', help='Run the server in IsaacSim mode (frames from shared memory instead of physical cameras).')
     parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Do not pin the process to specific CPU cores.')
     parser.add_argument('--config', default=None, metavar='PATH', help='Path to a server yaml config (overrides $TELEIMAGER_CONFIG and the default user config dir).')
+    parser.add_argument('--cert', default=None, metavar='PATH', help='Path to the TLS certificate (overrides the default ~/.config/teleimager/cert.pem).')
+    parser.add_argument('--key', default=None, metavar='PATH', help='Path to the TLS private key (overrides the default ~/.config/teleimager/key.pem).')
     args = parser.parse_args()
+
+    global CERT_PEM_PATH, KEY_PEM_PATH
+    # --cert / --key override the defaults alongside the server yaml.
+    if args.cert:
+        CERT_PEM_PATH = Path(args.cert).expanduser().resolve()
+    if args.key:
+        KEY_PEM_PATH = Path(args.key).expanduser().resolve()
 
     if args.affinity:
         set_performance_mode(cores=[0, 1, 2])
@@ -2247,6 +2242,21 @@ def main():
                      enable_gstreamer=args.gst,
                      enable_realsense=args.rs)
         exit(0)
+
+    # WebRTC needs a TLS cert/key pair; verify it up front so a missing cert fails
+    # fast here instead of crashing the WebRTC thread on every frame.
+    if any(cfg.get("enable_webrtc", False) for cfg in (server_config.get("camera") or {}).values()):
+        for label, p in (("certificate", CERT_PEM_PATH), ("private key", KEY_PEM_PATH)):
+            if not p.exists():
+                logger_mp.error(
+                    f"[Teleimager] TLS {label} not found at {p}. WebRTC needs a cert/key pair. Either:\n"
+                    f"  1) Put cert.pem / key.pem in the default config dir:\n"
+                    f"       mkdir -p {CONFIG_DIR}\n"
+                    f"       openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout {CONFIG_DIR / 'key.pem'} -out {CONFIG_DIR / 'cert.pem'} -subj \"/CN=teleimager\"\n"
+                    f"     (or copy existing ones: cp cert.pem key.pem {CONFIG_DIR}/)\n"
+                    f"  2) Point at existing files on the CLI: teleimager-server --cert <path> --key <path>"
+                )
+                exit(1)
 
     # start teleimage server
     server = TeleImageServer(server_config)

@@ -129,17 +129,13 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 -keyout key.pem -out cert.pe
 生成后，用以下任一方式让 TeleImager 找到它：
 
 ```bash
-# 方式 A —— 用户配置目录（推荐）
-mkdir -p ~/.config/xr_teleoperate/
-cp cert.pem key.pem ~/.config/xr_teleoperate/
+# 方式 A —— 默认配置目录（推荐，与服务端 yaml 同一目录）
+mkdir -p ~/.config/teleimager/
+cp cert.pem key.pem ~/.config/teleimager/
 
-# 方式 B —— 环境变量
-echo 'export XR_TELEOP_CERT="/路径/cert.pem"' >> ~/.bashrc
-echo 'export XR_TELEOP_KEY="/路径/key.pem"'   >> ~/.bashrc
-source ~/.bashrc
+# 方式 B —— 在命令行指定任意路径
+teleimager-server --cert /路径/cert.pem --key /路径/key.pem
 ```
-
-> 若两者都未设置，TeleImager 会回退到模块自带的默认证书路径。
 
 ---
 
