@@ -1,6 +1,6 @@
 [project]
 name = "teleimager"
-version = "2.0.0"
+dynamic = ["version"]
 description = "TeleImager: Unitree multi-camera image streaming service"
 authors = [
     { name = "silencht", email = "silencht@qq.com" }
@@ -18,6 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Video :: Capture",
     "Topic :: Scientific/Engineering",
 ]
@@ -64,6 +65,9 @@ Documentation = "https://deepwiki.com/unitreerobotics/teleimager"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "teleimager.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
