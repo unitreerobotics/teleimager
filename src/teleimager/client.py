@@ -490,6 +490,9 @@ class ZMQ_SubscriberThread(threading.Thread):
 
             # Signal that socket is ready
             self._started.set()
+
+            empty_polls = 0
+            stall_threshold = max(1, int(STALL_SECONDS * 1000 / 100))
             while self._running:
                 events = dict(poller.poll(timeout=100))
                 if self._socket in events:
@@ -508,7 +511,8 @@ class ZMQ_SubscriberThread(threading.Thread):
                                 pass
                         # update fps
                         self._fps_monitor.tick()
-                        
+                        empty_polls = 0
+
                     except Exception as e:
                         if self._running:
                             logger_mp.error(f"[Teleimager] Error in subscriber loop: {e}")
@@ -523,7 +527,9 @@ class ZMQ_SubscriberThread(threading.Thread):
                         except queue.Full:
                             pass
 
-                    self._fps_monitor.reset()
+                    empty_polls += 1
+                    if empty_polls >= stall_threshold:
+                        self._fps_monitor.reset()
                     logger_mp.debug(f"[Teleimager] No message received from {self._host}:{self._port} within timeout.")
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to initialize subscriber socket: {e}")
