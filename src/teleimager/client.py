@@ -22,6 +22,7 @@ import time
 import contextlib
 import queue
 import threading
+import sys
 from typing import Any, Dict, Optional, Tuple
 import zmq
 import numpy as np
@@ -44,7 +45,7 @@ try:
     from turbojpeg import TurboJPEG
     _turbojpeg = TurboJPEG()
 except Exception as e:
-    raise RuntimeError(
+    logger_mp.error(
         "\n"
         "  [Teleimager] Failed to initialize TurboJPEG.\n"
         "\n"
@@ -71,7 +72,8 @@ except Exception as e:
         "      brew install jpeg-turbo\n"
         "\n"
         f"  Original error: {e}"
-    ) from e
+    )
+    sys.exit(1)
 
 # ========================================================
 # Utility tools

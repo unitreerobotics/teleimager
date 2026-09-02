@@ -15,11 +15,24 @@ import logging_mp
 logging_mp.basicConfig(level=logging_mp.INFO)
 logger_mp = logging_mp.getLogger(__name__)
 import os
+import sys
 import argparse
 import glob
 import numpy as np
-import av
-# uvc will be imported when needed
+try:
+    import av
+    from aiohttp import web
+    from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+    from aiortc.rtcrtpsender import RTCRtpSender
+    from aiortc.contrib.media import MediaRelay
+    from aiortc.codecs import h264
+except ImportError as e:
+    logger_mp.error(
+        f"[Teleimager] Server dependencies not installed (missing '{e.name}').\n"
+        "    The server needs the `[server]` extra (av / aiortc / aiohttp). Install with:\n"
+        "        pip install \"teleimager[server]\"   # or [uvc] / [realsense] / [all]"
+    )
+    sys.exit(1)
 import yaml
 import time
 import threading
@@ -32,14 +45,8 @@ from .client import TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responser
 # Shared JPEG codec (libturbojpeg): encode(BGR)->jpeg bytes, decode(jpeg)->BGR.
 from turbojpeg import TurboJPEG
 _turbojpeg = TurboJPEG()
-# webrtc dependencies
 import asyncio
 import json
-from aiohttp import web
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
-from aiortc.rtcrtpsender import RTCRtpSender
-from aiortc.contrib.media import MediaRelay
-from aiortc.codecs import h264
 import ssl
 from pathlib import Path
 import queue
@@ -80,7 +87,7 @@ def load_server_config(cli_path=None):
                 )
             except Exception as e:
                 logger_mp.error(f"[Teleimager] Failed to create default config at {path}: {e}")
-                exit(1)
+                sys.exit(1)
     try:
         with open(path, "r") as f:
             config = yaml.safe_load(f)
@@ -88,7 +95,7 @@ def load_server_config(cli_path=None):
         return config
     except Exception as e:
         logger_mp.error(f"[Teleimager] Failed to load configuration file at {path}: {e}")
-        exit(1)
+        sys.exit(1)
 
 
 # ========================================================
@@ -1013,7 +1020,8 @@ class RealSenseCamera(BaseCamera):
                     "    cmake .. -DBUILD_PYTHON_BINDINGS=ON -DPYTHON_EXECUTABLE=$(which python3)\n"
                     "    make -j$(nproc) && sudo make install\n"
                 )
-            raise RuntimeError(msg)
+            logger_mp.error(msg)
+            sys.exit(1)
 
     @classmethod
     def _list_serial_numbers(cls):
@@ -1196,7 +1204,8 @@ class UVCCamera(BaseCamera):
                 "    sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev\n"
                 "    pip install \"teleimager[uvc]\"\n"
             )
-            raise RuntimeError(msg)
+            logger_mp.error(msg)
+            sys.exit(1)
 
     def __str__(self):
         zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
@@ -1780,11 +1789,12 @@ class GStreamerCamera(BaseCamera):
                 Gst.init(None)
             return Gst
         except Exception as e:
-            raise RuntimeError(
-                "PyGObject/GStreamer not installed. Install with:\n"
+            logger_mp.error(
+                f"PyGObject/GStreamer not installed ({e}). Install with:\n"
                 "    sudo apt install python3-gi python3-gst-1.0 "
                 "gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad"
-            ) from e
+            )
+            sys.exit(1)
 
     def _start_pipeline(self, pipeline_str):
         Gst = self._Gst
@@ -2075,10 +2085,10 @@ class TeleImageServer:
                 else:
                     logger_mp.error(f"[Teleimager] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                     continue
-        except Exception as e:
-            logger_mp.error(f"[Teleimager] Initialization failed: {e}")
+        except Exception:
+            logger_mp.error("[Teleimager] Initialization failed", exc_info=True)
             self._clean_up()
-            raise
+            sys.exit(1)
 
         logger_mp.info("[Teleimager] has started, waiting for client connections...")
 
@@ -2184,7 +2194,6 @@ class TeleImageServer:
             if camera is None:
                 logger_mp.error(f"[Teleimager] Camera {camera_topic} failed to initialize previously, cannot start.")
                 self._stop_event.set()
-                self._clean_up()
                 return
             t = threading.Thread(target=self._update_frames, args=(camera_topic, camera), daemon=True)
             t.start()
@@ -2202,7 +2211,6 @@ class TeleImageServer:
             if not ready:
                 logger_mp.error(f"[Teleimager] {camera_topic} ready timeout after {timeout}s.")
                 self._stop_event.set()
-                self._clean_up()
                 return
         
         for camera_topic, camera in self._cameras.items():
@@ -2216,7 +2224,7 @@ class TeleImageServer:
                 t.start()
                 self._publisher_threads.append(t)
 
-    def wait(self):
+    def wait_until_stopped(self):
         self._stop_event.wait()
         self._clean_up()
 
@@ -2254,7 +2262,6 @@ def run_isaacsim_server():
 
 def main():
     # ANSI colors for --help, only when stdout is a real terminal (skipped when piped/redirected).
-    import sys
     _tty = sys.stdout.isatty()
     C = (lambda s, code: f"\033[{code}m{s}\033[0m" if _tty else s)
     head = lambda s: C(s, "1;36")   # bold cyan  — section / step titles
@@ -2320,7 +2327,7 @@ def main():
                      enable_v4l2=args.v4l2,
                      enable_gstreamer=args.gst,
                      enable_realsense=args.rs)
-        exit(0)
+        sys.exit(0)
 
     # WebRTC needs a TLS cert/key pair; verify it up front so a missing cert fails
     # fast here instead of crashing the WebRTC thread on every frame.
@@ -2335,7 +2342,7 @@ def main():
                     f"     (or copy existing ones: cp cert.pem key.pem {CONFIG_DIR}/)\n"
                     f"  2) Point at existing files on the CLI: teleimager-server --cert <path> --key <path>"
                 )
-                exit(1)
+                sys.exit(1)
 
     # start teleimage server
     server = TeleImageServer(server_config)
@@ -2346,11 +2353,11 @@ def main():
     signal.signal(signal.SIGTERM, functools.partial(signal_handler, server))
 
     logger_mp.info("[Teleimager] Running... Press Ctrl+C to exit.")
-    server.wait()
+    server.wait_until_stopped()
 
     # usbhub plugout may cause block process exit, no better solution for now
-    time.sleep(0.5)
-    os.killpg(os.getpgrp(), 9)
+    # time.sleep(0.5)
+    # os.killpg(os.getpgrp(), 9)
 
 if __name__ == "__main__":
     main()
