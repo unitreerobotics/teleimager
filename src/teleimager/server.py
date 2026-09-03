@@ -695,16 +695,19 @@ class CameraFinder:
         v4l2_cards = [c for c in V4L2Camera.scan() if c["video_path"] not in rs_depth_ir_paths] if self.enable_v4l2 else []
         gst_cards = [c for c in GStreamerCamera.scan() if c["video_path"] not in rs_depth_ir_paths] if self.enable_gstreamer else []
 
-        branches = [
-            self._report_realsense(rs_cards),
-            self._report_uvc(uvc_cards),
-            self._report_v4l2(v4l2_cards),
-            self._report_gstreamer(gst_cards),
-        ]
-        branches = [b for b in branches if b is not None]
+        branches = []
+        if self.enable_realsense:
+            branches.append(self._report_realsense(rs_cards))
+        if self.enable_uvc:
+            branches.append(self._report_uvc(uvc_cards))
+        if self.enable_v4l2:
+            branches.append(self._report_v4l2(v4l2_cards))
+        if self.enable_gstreamer:
+            branches.append(self._report_gstreamer(gst_cards))
 
         logger_mp.info("[Teleimager] 🎯 Camera Finder Report")
         self._print_children(branches, "")
+        logger_mp.info("[Teleimager] 👉 Use the results above to edit your server config yaml.")
 
     @staticmethod
     def _print_children(children, prefix):
@@ -720,8 +723,6 @@ class CameraFinder:
         return (text, [])
 
     def _report_realsense(self, cards):
-        if not cards:
-            return None
         cams = []
         for c in cards:
             sn = c.get("serial_number") or "(none)"
@@ -745,8 +746,6 @@ class CameraFinder:
         return ("RealSenseCamera (%d found)   [type: realsense]" % len(cams), cams)
 
     def _report_uvc(self, cards):
-        if not cards:
-            return None
         cams = []
         for cam in cards:
             dev_info = cam.get("dev_info") or {}
@@ -796,8 +795,6 @@ class CameraFinder:
         return ("UVCCamera (%d found)   [type: uvc]" % len(cams), cams)
 
     def _report_v4l2(self, cards):
-        if not cards:
-            return None
         cams = []
         for c in cards:
             fields = [
@@ -822,8 +819,6 @@ class CameraFinder:
         return ("V4L2Camera (%d found)   [type: v4l2]" % len(cams), cams)
 
     def _report_gstreamer(self, cards):
-        if not cards:
-            return None
         cams = []
         for c in cards:
             fields = []
@@ -2281,7 +2276,7 @@ def main():
         f"    {dim('Pass as many as you like; the example above scans all four backends.')}\n"
         "    The output lists each camera's video path, serial number, physical path, etc.\n"
         "\n"
-        f"  {head('Step 2')} — Fill in the config with those values. Edit this file:\n"
+        f"  {head('Step 2')} — Use the Camera Finder Report from Step 1 to fill in the config. Edit this file:\n"
         f"      {flag('~/.config/teleimager/teleimager_server.yaml')}\n"
         "    (the default, auto-created on first run; or use your own path via --config / $TELEIMAGER_CONFIG)\n"
         "\n"
