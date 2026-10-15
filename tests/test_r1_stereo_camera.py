@@ -14,11 +14,17 @@ from aiortc.rtp import RtpPacket
 
 # Other TeleImager tests may already have initialized the process-wide logger.
 with patch("logging_mp.basicConfig"):
-    from teleimager.image_server import ImageServer, R1StereoCamera
+    from teleimager.server import (
+        BaseCamera, GStreamerCamera, IsaacSimCamera, RealSenseCamera,
+        R1StereoCamera, TeleImageServer, UVCCamera, V4L2Camera,
+    )
 
 
 class R1StereoCameraTest(unittest.TestCase):
     def setUp(self):
+        reload_driver = patch("teleimager.server.reload_uvcvideo_module")
+        self.reload_driver = reload_driver.start()
+        self.addCleanup(reload_driver.stop)
         self.sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.addCleanup(self.sender.close)
         self.encoders = [H264Encoder(), H264Encoder()]
@@ -32,7 +38,9 @@ class R1StereoCameraTest(unittest.TestCase):
             left_port=0, right_port=0, receive_timeout=1.0, max_pair_delay=0.05,
         )
         options.update(overrides)
-        camera = R1StereoCamera(**options)
+        options["image_shape"] = options.pop("img_shape")
+        options["enable_zmq"] = True
+        camera = R1StereoCamera(options.pop("cam_topic"), options)
         camera.enable_bgr_output()
         self.addCleanup(camera.release)
         return camera
@@ -254,7 +262,7 @@ class R1StereoCameraTest(unittest.TestCase):
             processes.append(process)
             return process
 
-        with patch("teleimager.image_server.subprocess.Popen", side_effect=start):
+        with patch("teleimager.server.subprocess.Popen", side_effect=start):
             with self.assertRaises(OSError):
                 self.make_camera(rtp_encoding="JPEG", right_port=occupied.getsockname()[1])
         self.assertEqual(len(processes), 1)
@@ -262,14 +270,26 @@ class R1StereoCameraTest(unittest.TestCase):
         self.assertTrue(processes[0].stdout.closed)
 
     def test_server_selects_jpeg_encoding(self):
-        config = {"head_camera": {
-            "type": "r1_stereo", "rtp_encoding": "JPEG", "image_shape": [80, 240],
-            "fps": 30, "enable_zmq": True, "left_port": 0, "right_port": 0,
-        }}
-        with patch("teleimager.image_server.ZMQ_Responser"), \
-             patch("teleimager.image_server.ZMQ_PublisherManager"), \
-             patch("teleimager.image_server.WebRTC_PublisherManager"):
-            server = ImageServer(config)
+        config = {
+            "camera": {
+                "head_camera": {
+                    "type": "r1_stereo",
+                    "rtp_encoding": "JPEG",
+                    "image_shape": [
+                        80,
+                        240
+                    ],
+                    "fps": 30,
+                    "enable_zmq": True,
+                    "left_port": 0,
+                    "right_port": 0
+                }
+            }
+        }
+        with patch("teleimager.server.ZMQ_Responser"), \
+             patch("teleimager.server.ZMQ_PublisherManager"), \
+             patch("teleimager.server.WebRTC_PublisherManager"):
+            server = TeleImageServer(config)
             try:
                 self.assertEqual(server._cameras["head_camera"]._rtp_encoding, "JPEG")
                 self.assertEqual(len(server._cameras["head_camera"]._jpeg_processes), 2)
@@ -277,17 +297,29 @@ class R1StereoCameraTest(unittest.TestCase):
                 server._clean_up()
 
     def test_network_only_server_skips_usb_discovery(self):
-        config = {"head_camera": {
-            "type": "r1_stereo", "image_shape": [80, 240], "fps": 10,
-            "enable_zmq": True, "left_port": 0, "right_port": 0,
-        }}
-        with patch("teleimager.image_server.CameraFinder") as finder, \
-             patch("teleimager.image_server.ZMQ_Responser"), \
-             patch("teleimager.image_server.ZMQ_PublisherManager"), \
-             patch("teleimager.image_server.WebRTC_PublisherManager"):
-            server = ImageServer(config)
+        config = {
+            "camera": {
+                "head_camera": {
+                    "type": "r1_stereo",
+                    "image_shape": [
+                        80,
+                        240
+                    ],
+                    "fps": 10,
+                    "enable_zmq": True,
+                    "left_port": 0,
+                    "right_port": 0
+                }
+            }
+        }
+        with patch("teleimager.server.UVCCamera.from_config") as factory, \
+             patch("teleimager.server.ZMQ_Responser"), \
+             patch("teleimager.server.ZMQ_PublisherManager"), \
+             patch("teleimager.server.WebRTC_PublisherManager"):
+            server = TeleImageServer(config)
             try:
-                finder.assert_not_called()
+                factory.assert_not_called()
+                self.reload_driver.assert_not_called()
                 self.assertIsInstance(server._cameras["head_camera"], R1StereoCamera)
             finally:
                 server._clean_up()
@@ -317,16 +349,28 @@ class R1StereoCameraTest(unittest.TestCase):
 
     def test_quad_starts_with_missing_cameras_and_isolates_capture_failure(self):
         config = {
-            "app_stream": {"enabled": True, "layout": "stereo_quad"},
-            "right_wrist_camera": {"type": "uvc", "physical_path": "/test/camera", "image_shape": [480, 640]},
+            "app_stream": {
+                "enabled": True,
+                "layout": "stereo_quad"
+            },
+            "camera": {
+                "right_wrist_camera": {
+                    "type": "uvc",
+                    "physical_path": "/test/camera",
+                    "image_shape": [
+                        480,
+                        640
+                    ]
+                }
+            }
         }
-        with patch("teleimager.image_server.CameraFinder"), \
-             patch("teleimager.image_server.UVCCamera", side_effect=OSError("disconnected")), \
-             patch("teleimager.image_server.H264TcpStreamServer") as stream, \
-             patch("teleimager.image_server.ZMQ_Responser"), \
-             patch("teleimager.image_server.ZMQ_PublisherManager"), \
-             patch("teleimager.image_server.WebRTC_PublisherManager"):
-            server = ImageServer(config)
+        with patch("teleimager.server.CameraFinder"), \
+             patch("teleimager.server.UVCCamera.from_config", side_effect=OSError("disconnected")), \
+             patch("teleimager.h264_tcp_stream.H264TcpStreamServer") as stream, \
+             patch("teleimager.server.ZMQ_Responser"), \
+             patch("teleimager.server.ZMQ_PublisherManager"), \
+             patch("teleimager.server.WebRTC_PublisherManager"):
+            server = TeleImageServer(config)
             captured = []
             def receive(frame):
                 captured.append(frame)
@@ -350,24 +394,35 @@ class R1StereoCameraTest(unittest.TestCase):
 
     def test_quad_requires_zmq_head_camera_to_initialize(self):
         config = {
-            "app_stream": {"enabled": True, "layout": "stereo_quad"},
-            "head_camera": {
-                "type": "uvc", "serial_number": "01.00.00",
-                "image_shape": [480, 1280], "fps": 30, "enable_zmq": True,
+            "app_stream": {
+                "enabled": True,
+                "layout": "stereo_quad"
             },
+            "camera": {
+                "head_camera": {
+                    "type": "uvc",
+                    "serial_number": "01.00.00",
+                    "image_shape": [
+                        480,
+                        1280
+                    ],
+                    "fps": 30,
+                    "enable_zmq": True
+                }
+            }
         }
         for uid in (None, "1:3"):
             with self.subTest(uid=uid), \
-                 patch("teleimager.image_server.CameraFinder") as finder, \
-                 patch("teleimager.image_server.UVCCamera", side_effect=OSError("disconnected")), \
-                 patch("teleimager.image_server.H264TcpStreamServer") as stream, \
-                 patch("teleimager.image_server.ZMQ_Responser") as responder, \
-                 patch("teleimager.image_server.ZMQ_PublisherManager") as zmq_manager, \
-                 patch("teleimager.image_server.WebRTC_PublisherManager"):
-                finder.return_value.get_uid_by_sn.return_value = uid
+                 patch("teleimager.server.UVCCamera.from_config") as factory, \
+                 patch("teleimager.h264_tcp_stream.H264TcpStreamServer") as stream, \
+                 patch("teleimager.server.ZMQ_Responser") as responder, \
+                 patch("teleimager.server.ZMQ_PublisherManager") as zmq_manager, \
+                 patch("teleimager.server.WebRTC_PublisherManager"):
+                factory.side_effect = OSError("disconnected") if uid else None
+                factory.return_value = None
 
                 with self.assertRaisesRegex(RuntimeError, "Required ZMQ head_camera"):
-                    ImageServer(config)
+                    TeleImageServer(config)
 
                 stream.return_value.start.assert_not_called()
                 stream.return_value.stop.assert_called_once()
@@ -376,40 +431,106 @@ class R1StereoCameraTest(unittest.TestCase):
 
     def test_quad_keeps_missing_app_only_head_camera_optional(self):
         config = {
-            "app_stream": {"enabled": True, "layout": "stereo_quad"},
-            "head_camera": {
-                "type": "uvc", "serial_number": "01.00.00",
-                "image_shape": [480, 1280], "enable_zmq": False,
+            "app_stream": {
+                "enabled": True,
+                "layout": "stereo_quad"
             },
+            "camera": {
+                "head_camera": {
+                    "type": "uvc",
+                    "serial_number": "01.00.00",
+                    "image_shape": [
+                        480,
+                        1280
+                    ],
+                    "enable_zmq": False
+                }
+            }
         }
-        with patch("teleimager.image_server.CameraFinder") as finder, \
-             patch("teleimager.image_server.H264TcpStreamServer"), \
-             patch("teleimager.image_server.ZMQ_Responser"), \
-             patch("teleimager.image_server.ZMQ_PublisherManager"), \
-             patch("teleimager.image_server.WebRTC_PublisherManager"):
-            finder.return_value.get_uid_by_sn.return_value = None
-            server = ImageServer(config)
+        with patch("teleimager.server.UVCCamera.from_config") as factory, \
+             patch("teleimager.h264_tcp_stream.H264TcpStreamServer"), \
+             patch("teleimager.server.ZMQ_Responser"), \
+             patch("teleimager.server.ZMQ_PublisherManager"), \
+             patch("teleimager.server.WebRTC_PublisherManager"):
+            factory.return_value = None
+            server = TeleImageServer(config)
             try:
                 self.assertIsNone(server._cameras["head_camera"])
             finally:
                 server._clean_up()
 
-    def test_uvc_server_still_uses_camera_finder(self):
-        config = {"head_camera": {
-            "type": "uvc", "physical_path": "/test/camera", "image_shape": [480, 640],
-            "fps": 30, "enable_zmq": True,
-        }}
-        with patch("teleimager.image_server.CameraFinder") as finder, \
-             patch("teleimager.image_server.UVCCamera") as uvc, \
-             patch("teleimager.image_server.ZMQ_Responser"), \
-             patch("teleimager.image_server.ZMQ_PublisherManager"), \
-             patch("teleimager.image_server.WebRTC_PublisherManager"):
-            finder.return_value.get_uid_by_ppath.return_value = "001:003"
-            server = ImageServer(config)
+    def test_uvc_server_uses_public_camera_factory(self):
+        camera_config = {
+            "type": "uvc", "physical_path": "/test/camera",
+            "image_shape": [480, 640], "fps": 30, "enable_zmq": True,
+        }
+        with patch("teleimager.server.UVCCamera.from_config") as factory, \
+             patch("teleimager.server.ZMQ_Responser"), \
+             patch("teleimager.server.ZMQ_PublisherManager"), \
+             patch("teleimager.server.WebRTC_PublisherManager"):
+            server = TeleImageServer({"camera": {"head_camera": camera_config}})
             try:
-                finder.assert_called_once_with(False, False)
-                uvc.assert_called_once()
-                self.assertEqual(uvc.call_args[0][1], "001:003")
+                factory.assert_called_once_with("head_camera", camera_config)
+                self.reload_driver.assert_called_once_with()
+            finally:
+                server._clean_up()
+
+    def test_app_bgr_output_does_not_require_webrtc_for_public_backends(self):
+        frame = np.full((16, 24, 3), (40, 80, 160), dtype=np.uint8)
+        jpeg = cv2.imencode(".jpg", frame)[1].tobytes()
+        for backend in (
+            UVCCamera, V4L2Camera, GStreamerCamera, RealSenseCamera, IsaacSimCamera,
+        ):
+            with self.subTest(backend=backend.__name__):
+                camera = backend.__new__(backend)
+                BaseCamera.__init__(camera, "head_camera", {
+                    "image_shape": [16, 24], "enable_zmq": True,
+                    "enable_webrtc": False,
+                })
+                self.assertIsNone(camera.get_bgr_frame())
+                camera.enable_bgr_output()
+                if backend is UVCCamera:
+                    camera.cap = Mock()
+                    camera.cap.get_frame_robust.return_value = Mock(
+                        bgr=frame, jpeg_buffer=jpeg,
+                    )
+                elif backend is V4L2Camera:
+                    camera.container = Mock()
+                    camera._passthrough = True
+                    camera._demux = iter((jpeg,))
+                elif backend is GStreamerCamera:
+                    camera.sink = Mock()
+                    camera._pull_jpeg = Mock(return_value=jpeg)
+                elif backend is RealSenseCamera:
+                    camera._enable_depth = False
+                    camera.pipeline = Mock()
+                    camera.align = Mock()
+                    camera.align.process.return_value.get_color_frame.return_value.get_data.return_value = frame
+                else:
+                    camera._binocular = False
+                    camera._image_source = "head"
+                    camera.multi_image_reader = Mock()
+                    camera.multi_image_reader.read_single_image.return_value = frame
+                camera._update_frame()
+                self.assertFalse(camera.enable_webrtc())
+                self.assertTrue(camera.wait_until_ready(0))
+                self.assertIsNotNone(camera.get_jpeg_bytes())
+                np.testing.assert_allclose(camera.get_bgr_frame(), frame, atol=3)
+
+    def test_hardware_capture_keeps_public_unpaced_loop(self):
+        with patch("teleimager.server.ZMQ_Responser"), \
+             patch("teleimager.server.ZMQ_PublisherManager"), \
+             patch("teleimager.server.WebRTC_PublisherManager"):
+            server = TeleImageServer({"camera": {}})
+            camera = Mock()
+            camera._capture_requires_pacing = False
+            camera._update_frame.side_effect = server.stop
+            try:
+                with patch.object(server._stop_event, "wait") as wait:
+                    server._update_frames("head_camera", camera)
+                wait.assert_not_called()
+                camera.get_fps.assert_not_called()
+                self.assertIn("head_camera", server._camera_frame_times)
             finally:
                 server._clean_up()
 
