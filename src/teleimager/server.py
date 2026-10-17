@@ -2461,12 +2461,23 @@ class TeleImageServer:
         try:
             interval = 1.0 / camera.get_fps()
             next_frame_time = time.monotonic()
+            next_empty_warning = 0.0
 
             while not self._stop_event.is_set():
                 jpeg_bytes = camera.get_jpeg_bytes()
                 if jpeg_bytes is not None:
                     self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_zmq_port())
                 else:
+                    if self._enable_isaacsim:
+                        # The simulation loop may not have produced its first frame yet.
+                        now = time.monotonic()
+                        if now >= next_empty_warning:
+                            logger_mp.warning(f"[Teleimager] {cam_topic} ZMQ waiting for simulation frames.")
+                            next_empty_warning = now + 5.0
+                        if self._stop_event.wait(interval):
+                            break
+                        next_frame_time = time.monotonic()
+                        continue
                     logger_mp.warning(f"[Teleimager] {cam_topic} returned no frame.")
                     self._stop_event.set()
                     break
@@ -2486,12 +2497,23 @@ class TeleImageServer:
             interval = 1.0 / camera.get_fps()
             webrtc_codec = camera.get_webrtc_codec()
             next_frame_time = time.monotonic()
+            next_empty_warning = 0.0
             while not self._stop_event.is_set():
                 bgr_frame = camera.get_bgr_frame()
 
                 if bgr_frame is not None:
                     self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
                 else:
+                    if self._enable_isaacsim:
+                        # The simulation loop may not have produced its first frame yet.
+                        now = time.monotonic()
+                        if now >= next_empty_warning:
+                            logger_mp.warning(f"[Teleimager] {cam_topic} WebRTC waiting for simulation frames.")
+                            next_empty_warning = now + 5.0
+                        if self._stop_event.wait(interval):
+                            break
+                        next_frame_time = time.monotonic()
+                        continue
                     logger_mp.info(f"[Teleimager] {cam_topic} returned no frame.")
                     self._stop_event.set()
                     break
