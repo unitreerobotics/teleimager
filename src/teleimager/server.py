@@ -322,10 +322,28 @@ function stop() {
 """
 
 # ========================================================
+# JPEG -> YUV video frame
+# ========================================================
+def _jpeg_to_yuv_frame(jpeg_bytes):
+    """Decode MJPEG into a YUV VideoFrame (4:2:0 / 4:2:2 / 4:4:4)."""
+    planes = _turbojpeg.decode_to_yuv_planes(jpeg_bytes)
+    h, w = planes[0].shape
+    if planes[1].shape == (h // 2, w // 2):
+        pix_fmt = "yuvj420p"
+    elif planes[1].shape == (h, w // 2):
+        pix_fmt = "yuvj422p"
+    else:
+        pix_fmt = "yuvj444p"
+    frame = av.VideoFrame(w, h, format=pix_fmt)
+    for i, data in enumerate(planes):
+        frame.planes[i].update(data)
+    return frame
+
+# ========================================================
 # WebRTC publish
 # ========================================================
-class BGRArrayVideoStreamTrack(MediaStreamTrack):
-    """MediaStreamTrack exposing BGR ndarrays as av.VideoFrame (latest-frame semantics)."""
+class VideoFrameStreamTrack(MediaStreamTrack):
+    """MediaStreamTrack exposing VideoFrames with latest-frame semantics."""
     kind = "video"
 
     def __init__(self):
@@ -340,15 +358,13 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
         frame = await self._queue.get()
         return frame
 
-    def push_frame(self, bgr_numpy: np.ndarray, loop: Optional[asyncio.AbstractEventLoop] = None):
-        if bgr_numpy is None:
+    def push_frame(self, frame, loop: Optional[asyncio.AbstractEventLoop] = None):
+        if frame is None:
             return
 
-        # 1. Convert and calculate PTS immediately
+        # 1. Calculate PTS immediately
         # MediaRelay requires consistent PTS to function correctly
         try:
-            video_frame = av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24")
-            
             if self._start_time is None:
                 self._start_time = time.monotonic()
                 self._pts = 0
@@ -356,10 +372,10 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
                 # 90000 is the standard RTP clock rate for video
                 # This ensures smooth playback
                 self._pts = int((time.monotonic() - self._start_time) * 90000)
-            
-            video_frame.pts = self._pts
-            video_frame.time_base = fractions.Fraction(1, 90000)
-            
+
+            frame.pts = self._pts
+            frame.time_base = fractions.Fraction(1, 90000)
+
         except Exception as e:
             logger_mp.debug(f"[Teleimager] Conversion failed: {e}")
             return
@@ -368,13 +384,13 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
         target_loop = loop or asyncio.get_event_loop()
         if target_loop.is_closed():
             return
-            
+
         def _put():
             try:
                 # Drop old frame if queue is full (Low Latency strategy)
                 if self._queue.full():
                     self._queue.get_nowait()
-                self._queue.put_nowait(video_frame)
+                self._queue.put_nowait(frame)
             except Exception:
                 pass
 
@@ -399,7 +415,7 @@ class WebRTC_PublisherThread(threading.Thread):
         self._stop_event = threading.Event()
         self._frame_queue = queue.Queue(maxsize=1)
 
-        self._bgr_track: Optional[BGRArrayVideoStreamTrack] = None
+        self._video_track: Optional[VideoFrameStreamTrack] = None
         self._relay: Optional[MediaRelay] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -467,9 +483,9 @@ class WebRTC_PublisherThread(threading.Thread):
 
         # CORE LOGIC: Use MediaRelay to subscribe
         # This ensures encoding happens only once globally
-        if self._bgr_track and self._relay:
+        if self._video_track and self._relay:
             try:
-                relayed_track = self._relay.subscribe(self._bgr_track)
+                relayed_track = self._relay.subscribe(self._video_track)
                 transceiver = pc.addTransceiver(relayed_track, direction="sendonly")
                 capabilities = RTCRtpSender.getCapabilities("video")
                 client_codec = params.get("codec")
@@ -551,7 +567,7 @@ class WebRTC_PublisherThread(threading.Thread):
             await self._runner.setup()
             
             # Init Track and Relay inside the loop
-            self._bgr_track = BGRArrayVideoStreamTrack()
+            self._video_track = VideoFrameStreamTrack()
             self._relay = MediaRelay()
 
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -600,9 +616,9 @@ class WebRTC_PublisherThread(threading.Thread):
             frame = self._frame_queue.get_nowait()
         except queue.Empty:
             return
-        self._bgr_track.push_frame(frame, loop=self._loop)
+        self._video_track.push_frame(frame, loop=self._loop)
 
-    def send(self, data: np.ndarray):
+    def send(self, data: Any):
         """Send data to the processing thread, keeping only the latest frame."""
         # Simple drop-frame logic if queue is full
         if not self._frame_queue.full():
@@ -614,7 +630,7 @@ class WebRTC_PublisherThread(threading.Thread):
             except: pass
 
         loop = self._loop
-        if loop is not None and self._bgr_track is not None and not loop.is_closed():
+        if loop is not None and self._video_track is not None and not loop.is_closed():
             try:
                 loop.call_soon_threadsafe(self._drain_frames)
             except RuntimeError:
@@ -1207,8 +1223,8 @@ class BaseCamera:
         self._zmq_seq = seq
         return self._zmq_buffer.read()
 
-    def get_bgr_frame(self, timeout=None):
-        """Wait for the next new BGR frame; None if none arrives within timeout."""
+    def get_webrtc_frame(self, timeout=None):
+        """Wait for the next new WebRTC frame; None on timeout."""
         if not self._enable_webrtc or self._webrtc_buffer is None:
             return None
         seq = self._webrtc_buffer.wait_new(self._webrtc_seq, timeout=timeout)
@@ -1309,7 +1325,7 @@ class RealSenseCamera(BaseCamera):
         bgr_numpy = np.asanyarray(color_frame.get_data())
 
         if self._webrtc_connected.is_set():
-            self._webrtc_buffer.write(bgr_numpy)
+            self._webrtc_buffer.write(av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24"))
 
         if self._enable_zmq:
             self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
@@ -1576,8 +1592,10 @@ class UVCCamera(BaseCamera):
                         self._zmq_buffer.write(bytes(frame.jpeg_buffer))
 
                 if self._webrtc_connected.is_set():
-                    if frame.bgr is not None:
-                        self._webrtc_buffer.write(frame.bgr)
+                    if frame.jpeg_buffer is not None:
+                        self._webrtc_buffer.write(_jpeg_to_yuv_frame(bytes(frame.jpeg_buffer)))
+                    elif frame.bgr is not None:
+                        self._webrtc_buffer.write(av.VideoFrame.from_ndarray(frame.bgr, format="bgr24"))
 
                 if not self._ready.is_set():
                     self._ready.set()
@@ -1835,17 +1853,17 @@ class V4L2Camera(BaseCamera):
             if self._enable_zmq:
                 self._zmq_buffer.write(jpeg_bytes)
             if self._webrtc_connected.is_set():
-                self._webrtc_buffer.write(_turbojpeg.decode(jpeg_bytes))
+                self._webrtc_buffer.write(_jpeg_to_yuv_frame(jpeg_bytes))
         else:
             # YUYV source: decode to BGR (libswscale); re-encode for ZMQ.
             frames = packet.decode()
             if not frames:
                 return
-            bgr_numpy = frames[0].to_ndarray(format="bgr24")
+            frame = frames[0]
             if self._webrtc_connected.is_set():
-                self._webrtc_buffer.write(bgr_numpy)
+                self._webrtc_buffer.write(frame)
             if self._enable_zmq:
-                self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
+                self._zmq_buffer.write(_turbojpeg.encode(frame.to_ndarray(format="bgr24")))
 
         if not self._ready.is_set():
             self._ready.set()
@@ -2246,9 +2264,9 @@ class GStreamerCamera(BaseCamera):
         if self._enable_zmq:
             self._zmq_buffer.write(jpeg_bytes)
 
-        # WebRTC needs raw BGR frames, so decode lazily only when a client is connected.
+        # WebRTC needs raw frames, so decode lazily only when a client is connected.
         if self._webrtc_connected.is_set():
-            self._webrtc_buffer.write(_turbojpeg.decode(jpeg_bytes))
+            self._webrtc_buffer.write(_jpeg_to_yuv_frame(jpeg_bytes))
 
         if not self._ready.is_set():
             self._ready.set()
@@ -2435,10 +2453,10 @@ class TeleImageServer:
                     connected.wait(0.1)
                     continue
 
-                bgr_frame = camera.get_bgr_frame(timeout=0.5)
-                if bgr_frame is not None:
+                frame = camera.get_webrtc_frame(timeout=0.5)
+                if frame is not None:
                     no_frame_warned = False
-                    self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
+                    self._webrtc_publisher_manager.publish(frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
                 elif connected.is_set() and not no_frame_warned:
                     logger_mp.warning(f"[Teleimager] {cam_topic} produced no new frame for 0.5s.")
                     no_frame_warned = True
