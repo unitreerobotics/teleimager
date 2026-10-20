@@ -15,7 +15,7 @@ webrtc:
     min: 2000000      # floor under congestion
     default: 5000000  # startup rate, skips slow-start
     max: 12000000     # quality ceiling on healthy network
-  gop_length: 60      # frames between keyframes; lower = faster recovery from packet loss
+  gop_length: null    # keyframe interval in FRAMES; null = 2 seconds (2 x camera fps)
 
 # =====================================================
 # Cameras. Each entry below `camera:` is one camera topic.

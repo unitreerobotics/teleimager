@@ -106,7 +106,7 @@ def load_server_config(cli_path=None):
 # WebRTC global encoder config (bitrate caps + GOP).
 # aiortc's bitrate constants are module-level, so this is global by design.
 # ========================================================
-_GOP_LENGTH = 60  # frames between keyframes; overridden by yaml if present
+_GOP_LENGTH = 60  # frames between keyframes; default 2s at the configured fps
 _WEBRTC_FPS = 30  # encoder frame rate; kept in sync with the camera config
 
 def _apply_webrtc_config(server_config):
@@ -118,10 +118,10 @@ def _apply_webrtc_config(server_config):
         if key in bitrate and int(bitrate[key]) >= 100_000:
             setattr(h264, attr, int(bitrate[key]))
             setattr(vpx, attr, int(bitrate[key]))
-    if "gop_length" in cfg and int(cfg["gop_length"]) > 0:
-        _GOP_LENGTH = int(cfg["gop_length"])
     fps = {int(c.get("fps", 30)) for c in (server_config or {}).get("camera", {}).values()}
     _WEBRTC_FPS = fps.pop() if len(fps) == 1 else 30
+    gop = cfg.get("gop_length")
+    _GOP_LENGTH = int(gop) if gop and int(gop) > 0 else _WEBRTC_FPS * 2
     logger_mp.info(f"[Teleimager] bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}, fps={_WEBRTC_FPS}")
 
 # ========================================================
