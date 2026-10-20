@@ -1042,7 +1042,7 @@ class CameraFinder:
         self._print_children(branches, "")
         if not any([self.enable_uvc, self.enable_v4l2, self.enable_gstreamer, self.enable_realsense]):
             logger_mp.warning(
-                "[Teleimager] 🖼️ No camera backends enabled — nothing to scan.  Add one flag per camera type:\n"
+                "[Teleimager] 🖼️  No camera backends enabled — nothing to scan.  Add one flag per camera type:\n"
                 "    teleimager-server --cf --uvc --v4l2 --gst --rs\n"
                 "    --uvc (USB UVC)  --v4l2 (V4L2)  --gst (GStreamer)  --rs (RealSense)")
         elif rs_cards or uvc_cards or v4l2_cards or gst_cards:
@@ -1181,17 +1181,18 @@ class CameraFinder:
         cams = []
         for c in cards:
             fields = []
-            if c.get("recommend_backend"):
-                fields.append(self._leaf("recommend use type: %s (the gstreamer backend can't drive it)" % c["recommend_backend"]))
-                cams.append(("📷 " + (c.get("name") or "?"), fields))
-                continue
             if c.get("device_physical_path"):
                 fields.append(self._leaf("device (physical_path) : %s" % c["device_physical_path"]))
             if c.get("device_serial_number"):
                 fields.append(self._leaf("device (serial_number) : %s" % c["device_serial_number"]))
-            fields.append(self._leaf('gst_pipeline: "%s"' % c.get("gst_pipeline")))
             cams.append(("📷 " + (c.get("name") or "?"), fields))
-        return ("GStreamerCamera (%d found)   [type: gstreamer]" % len(cams), cams)
+        children = cams
+        if cams:
+            children = cams + [
+                self._leaf("⚠️  NOTE: GStreamer is intended for GMSL/MIPI and other non-USB cameras; "
+                           "for USB cameras prefer uvc or v4l2; build gst_pipeline with AI assistance."),
+            ]
+        return ("GStreamerCamera (%d found)   [type: gstreamer]" % len(cams), children)
 
 class BaseCamera:
     def __init__(self, cam_topic, server_cfg):
@@ -2358,13 +2359,6 @@ class GStreamerCamera(BaseCamera):
                 launch = re.sub(r"\s*!\s*\.\.\.\s*$", "", launch).rstrip("! ").strip()
 
                 if "realsense" in (name or "").lower():
-                    cards.append({
-                        "type": "gstreamer",
-                        "name": name,
-                        "video_path": device,
-                        "recommend_backend": "realsense",
-                        "gst_pipeline": None,
-                    })
                     name, device = None, None
                     continue
                 # Prefer a replug-stable device path over the raw /dev/videoN.

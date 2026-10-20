@@ -22,7 +22,11 @@ webrtc:
 # Type of camera:
 #   - "uvc"       → pyuvc driver (Python binding for libuvc; USB UVC)
 #   - "v4l2"      → PyAV (libav v4l2) JPEG-first driver: MJPG passthrough, YUYV fallback decode
-#   - "gstreamer" → GStreamer (gi) appsink driver; user supplies a full gst_pipeline (USB / GMSL / MIPI CSI)
+#   - "gstreamer" → GStreamer (gi) appsink driver, intended for GMSL / MIPI CSI and
+#                   other non-USB cameras. For USB cameras prefer "uvc" or "v4l2".
+#                   Build gst_pipeline with AI assistance. It must end with
+#                   image/jpeg ! appsink name=sink; add videoconvert ! jpegenc
+#                   (or a hardware JPEG encoder) for raw sources.
 #   - "realsense" → pyrealsense2 driver
 #
 # Camera identifiers (choose one or more), listed in priority order:
