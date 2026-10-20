@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import tempfile
 import platform
+from . import __version__
 from .client import TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responser
 # Shared JPEG codec (libturbojpeg): encode(BGR)->jpeg bytes, decode(jpeg)->BGR.
 from turbojpeg import TurboJPEG
@@ -109,8 +110,29 @@ def load_server_config(cli_path=None):
 _GOP_LENGTH = 60  # frames between keyframes; default 2s at the configured fps
 _WEBRTC_FPS = 30  # encoder frame rate; kept in sync with the camera config
 
+# H.264 encoders as (FFmpeg name, options). A hardware one is used when this
+# FFmpeg build has it and it opens at startup; otherwise libx264 (CPU).
+_SW_H264 = ("libx264", {"preset": "ultrafast", "tune": "zerolatency", "threads": "1"})
+_HW_H264 = [("h264_nvenc", {"preset": "p1", "tune": "ull", "zerolatency": "1", "bf": "0", "delay": "0"}), 
+            ("h264_nvmpi", {}),
+            ("h264_nvv4l2enc", {})]
+_H264_ENCODER = _SW_H264
+
+def _open_h264(name, options, width=640, height=480, bitrate=1_000_000):
+    """Open an H.264 encoder; the defaults are the fixed capability-probe frame."""
+    codec = av.CodecContext.create(name, "w")
+    codec.width = width
+    codec.height = height
+    codec.bit_rate = bitrate
+    codec.pix_fmt = "yuv420p"
+    codec.framerate = fractions.Fraction(_WEBRTC_FPS, 1)
+    codec.time_base = fractions.Fraction(1, _WEBRTC_FPS)
+    codec.options = {**options, "g": str(_GOP_LENGTH)}
+    codec.open()
+    return codec
+
 def _apply_webrtc_config(server_config):
-    global _GOP_LENGTH, _WEBRTC_FPS
+    global _GOP_LENGTH, _WEBRTC_FPS, _H264_ENCODER
     cfg = (server_config or {}).get("webrtc", {})
     bitrate = cfg.get("bitrate", {})
     from aiortc.codecs import vpx
@@ -118,40 +140,47 @@ def _apply_webrtc_config(server_config):
         if key in bitrate and int(bitrate[key]) >= 100_000:
             setattr(h264, attr, int(bitrate[key]))
             setattr(vpx, attr, int(bitrate[key]))
-    fps = {int(c.get("fps", 30)) for c in (server_config or {}).get("camera", {}).values()}
+    cameras = [c for c in (server_config or {}).get("camera", {}).values() if c.get("enable_webrtc")]
+    if not cameras: return
+
+    fps = {int(c.get("fps", 30)) for c in cameras}
     _WEBRTC_FPS = fps.pop() if len(fps) == 1 else 30
     gop = cfg.get("gop_length")
     _GOP_LENGTH = int(gop) if gop and int(gop) > 0 else _WEBRTC_FPS * 2
-    logger_mp.info(f"[Teleimager] bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}, fps={_WEBRTC_FPS}")
+
+    codecs = {(c.get("webrtc_codec") or "h264").lower() for c in cameras}
+    if codecs - {"vp8"}:
+        for name, options in _HW_H264:
+            try:
+                list(_open_h264(name, options).encode(av.VideoFrame(640, 480, format="yuv420p")))
+                _H264_ENCODER = (name, options)
+                break
+            except Exception:
+                logger_mp.debug(f"[Teleimager] H.264 hardware encoder {name} not available")
+    encoders = ", ".join("vp8 (libvpx)" if c == "vp8" else f"h264 ({_H264_ENCODER[0]})" for c in sorted(codecs))
+    logger_mp.info(f"[Teleimager] WebRTC encoder: {encoders}, bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}, fps={_WEBRTC_FPS}")
 
 # ========================================================
-# libx264 for Jetson (Patch h264 Encoder)
+# H.264 encode (patch aiortc's H264Encoder)
 # ========================================================
-def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
+def h264_encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
     if self.codec and (frame.width != self.codec.width or frame.height != self.codec.height):
         self.codec = None
 
     if self.codec is None:
-        try:
-            self.codec = av.CodecContext.create("libx264", "w")
-            self.codec.width = frame.width
-            self.codec.height = frame.height
-            self.codec.bit_rate = self.target_bitrate
-            self.codec.pix_fmt = "yuv420p"
-            self.codec.framerate = fractions.Fraction(_WEBRTC_FPS, 1)
-            self.codec.time_base = fractions.Fraction(1, _WEBRTC_FPS)
-        
-            self.codec.options = {
-                "preset": "ultrafast",
-                "tune": "zerolatency",
-                "threads": "1",
-                "g": str(_GOP_LENGTH),
-            }
-            self.frame_count = 0
-            force_keyframe = True
-        except Exception as e:
-            logger_mp.error(f"[Teleimager] Initialization failed: {e}")
+        # Fall back to libx264 when the hardware encoder cannot open (e.g. session limit).
+        for name, options in (_H264_ENCODER, _SW_H264):
+            try:
+                self.codec = _open_h264(name, options, frame.width, frame.height, self.target_bitrate)
+                if name != _H264_ENCODER[0]:
+                    logger_mp.info(f"[Teleimager] H.264 encoder: {name} ({frame.width}x{frame.height}@{_WEBRTC_FPS})")
+                break
+            except Exception as e:
+                logger_mp.warning(f"[Teleimager] {name} failed to open: {e}")
+        if self.codec is None:
             return
+        self.frame_count = 0
+        force_keyframe = True
 
     if not force_keyframe and hasattr(self, "frame_count") and self.frame_count % _GOP_LENGTH == 0:
         force_keyframe = True
@@ -167,7 +196,7 @@ def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: boo
     except Exception as e:
         logger_mp.warning(f"[Teleimager] Encode error: {e}")
 
-h264.H264Encoder._encode_frame = jetson_software_encode_frame
+h264.H264Encoder._encode_frame = h264_encode_frame
 
 # ========================================================
 # Embed HTML and JS directly
@@ -237,6 +266,7 @@ INDEX_HTML = """
 CLIENT_JS = """
 var pc = null;
 var _fallback = false;
+var FALLBACK_MS = 20000;
 
 function negotiate(codec) {
     pc.addTransceiver('video', { direction: 'recvonly' });
@@ -289,7 +319,7 @@ function start() {
         if (evt.track.kind == 'video') {
             var v = document.getElementById('video');
             v.srcObject = evt.streams[0];
-            // H.264 -> VP8 fallback: if no frames in 5s, reconnect with VP8
+            // H.264 -> VP8 fallback: if no frames in FALLBACK_MS, reconnect with VP8
             if (!_fallback) {
                 var t0 = v.currentTime;
                 setTimeout(function() {
@@ -298,7 +328,7 @@ function start() {
                         _fallback = true;
                         start();
                     }
-                }, 5000);
+                }, FALLBACK_MS);
             }
         } else {
             document.getElementById('audio').srcObject = evt.streams[0];
@@ -495,7 +525,7 @@ class WebRTC_PublisherThread(threading.Thread):
                     h264_codecs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
                     if h264_codecs:
                         transceiver.setCodecPreferences(h264_codecs)
-                        logger_mp.info(f"[Teleimager] Preferred H264 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred H264 for port:{self._port} (encoder: {_H264_ENCODER[0]})")
                     else:
                         logger_mp.warning(f"[Teleimager] H264 preferred but not found, using auto-negotiation for port:{self._port}")
                         
@@ -503,7 +533,7 @@ class WebRTC_PublisherThread(threading.Thread):
                     vp8_codecs = [c for c in capabilities.codecs if c.mimeType == "video/VP8"]
                     if vp8_codecs:
                         transceiver.setCodecPreferences(vp8_codecs)
-                        logger_mp.info(f"[Teleimager] Preferred VP8 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred VP8 for port:{self._port} (encoder: libvpx)")
                     else:
                         logger_mp.warning(f"[Teleimager] VP8 preferred but not found, using auto-negotiation for port:{self._port}")
                 
@@ -511,7 +541,7 @@ class WebRTC_PublisherThread(threading.Thread):
                     h264_codecs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
                     if h264_codecs:
                         transceiver.setCodecPreferences(h264_codecs)
-                        logger_mp.info(f"[Teleimager] Preferred codec '{pref}' not found, falling back to H264 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred codec '{pref}' not found, falling back to H264 for port:{self._port} (encoder: {_H264_ENCODER[0]})")
                     else:
                         logger_mp.warning(f"[Teleimager] Preferred codec '{pref}' not found, using auto-negotiation for port:{self._port}")
                     
@@ -1355,8 +1385,6 @@ class RealSenseCamera(BaseCamera):
         except ImportError:
             arch = platform.machine()
             system = platform.system()
-            print(f"[RealSense] Platform: {system} / {arch}")
-
             msg = (
                 "[RealSense] pyrealsense2 not installed. Try pip first:\n"
                 "    pip install pyrealsense2\n"
@@ -2373,6 +2401,7 @@ class GStreamerCamera(BaseCamera):
 # ========================================================
 class TeleImageServer:
     def __init__(self, server_config):
+        logger_mp.info(f"[Teleimager] TeleImager v{__version__} on {platform.system()} {platform.machine()}")
         _apply_webrtc_config(server_config)
         self._server_config = server_config
         self._stop_event = threading.Event()
