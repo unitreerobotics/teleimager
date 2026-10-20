@@ -394,6 +394,7 @@ class WebRTC_PublisherThread(threading.Thread):
         self._app = web.Application()
         self._runner: Optional[web.AppRunner] = None
         self._pcs = set()
+        self._connected = threading.Event()  # set while at least one client is connected
         self._start_event = threading.Event()
         self._stop_event = threading.Event()
         self._frame_queue = queue.Queue(maxsize=1)
@@ -462,6 +463,7 @@ class WebRTC_PublisherThread(threading.Thread):
 
         pc = RTCPeerConnection()
         self._pcs.add(pc)
+        self._connected.set()
 
         # CORE LOGIC: Use MediaRelay to subscribe
         # This ensures encoding happens only once globally
@@ -528,6 +530,8 @@ class WebRTC_PublisherThread(threading.Thread):
 
     async def _cleanup_pc(self, pc):
         self._pcs.discard(pc)
+        if not self._pcs:
+            self._connected.clear()
         try:
             await pc.close()
         except: pass
@@ -553,20 +557,11 @@ class WebRTC_PublisherThread(threading.Thread):
             site = web.TCPSite(self._runner, self._host, self._port, ssl_context=ssl_context)
             await site.start()
             self._start_event.set()
-            
-            # Frame Pushing Loop
+
+            # Frames wake the loop via call_soon_threadsafe; only stop needs polling.
+            self._drain_frames()
             while not self._stop_event.is_set():
-                try:
-                    # Non-blocking check for new frames
-                    if not self._frame_queue.empty():
-                        # Get frame (no pickling overhead in Threads!)
-                        frame = self._frame_queue.get_nowait()
-                        self._bgr_track.push_frame(frame, loop=self._loop)
-                    
-                    # CRITICAL: Yield control to asyncio loop to handle WebRTC packets
-                    await asyncio.sleep(0.005)
-                except Exception:
-                    await asyncio.sleep(0.005)
+                await asyncio.sleep(0.1)
 
         try:
             self._loop.run_until_complete(_main())
@@ -598,8 +593,15 @@ class WebRTC_PublisherThread(threading.Thread):
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    def _drain_frames(self):
+        try:
+            frame = self._frame_queue.get_nowait()
+        except queue.Empty:
+            return
+        self._bgr_track.push_frame(frame, loop=self._loop)
+
     def send(self, data: np.ndarray):
-        """Send data to the processing thread."""
+        """Send data to the processing thread, keeping only the latest frame."""
         # Simple drop-frame logic if queue is full
         if not self._frame_queue.full():
             self._frame_queue.put(data)
@@ -608,6 +610,13 @@ class WebRTC_PublisherThread(threading.Thread):
                 self._frame_queue.get_nowait()
                 self._frame_queue.put(data)
             except: pass
+
+        loop = self._loop
+        if loop is not None and self._bgr_track is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._drain_frames)
+            except RuntimeError:
+                pass
 
     def stop(self):
         self._stop_event.set()
@@ -648,6 +657,9 @@ class WebRTC_PublisherManager:
             if key not in self._publisher_threads:
                 self._publisher_threads[key] = self._create_publisher(port, host, codec_pref)
             return self._publisher_threads[key]
+
+    def connected_event(self, port, host="0.0.0.0", codec_pref=None):
+        return self._get_publisher(port, host, codec_pref)._connected
 
     def publish(self, data: Any, port: int, host: str = "0.0.0.0", codec_pref: str = None) -> None:
         if not self._running: return
@@ -1157,6 +1169,7 @@ class BaseCamera:
         else:
             self._webrtc_buffer = None
         self._webrtc_seq = 0
+        self._webrtc_connected = threading.Event()  # set while a WebRTC client is connected
 
     def __str__(self):
         raise NotImplementedError
@@ -1177,6 +1190,10 @@ class BaseCamera:
     
     def enable_zmq(self):
         return self._enable_zmq
+
+    def set_webrtc_connected(self, event):
+        """Share the publisher's connection state with the capture thread."""
+        self._webrtc_connected = event
 
     def get_jpeg_bytes(self, timeout=None):
         """Wait for the next new ZMQ frame; None if none arrives within timeout."""
@@ -1289,7 +1306,7 @@ class RealSenseCamera(BaseCamera):
 
         bgr_numpy = np.asanyarray(color_frame.get_data())
 
-        if self._enable_webrtc:
+        if self._webrtc_connected.is_set():
             self._webrtc_buffer.write(bgr_numpy)
 
         if self._enable_zmq:
@@ -1556,7 +1573,7 @@ class UVCCamera(BaseCamera):
                     if frame.jpeg_buffer is not None:
                         self._zmq_buffer.write(bytes(frame.jpeg_buffer))
 
-                if self._enable_webrtc:
+                if self._webrtc_connected.is_set():
                     if frame.bgr is not None:
                         self._webrtc_buffer.write(frame.bgr)
 
@@ -1815,7 +1832,7 @@ class V4L2Camera(BaseCamera):
                 return
             if self._enable_zmq:
                 self._zmq_buffer.write(jpeg_bytes)
-            if self._enable_webrtc:
+            if self._webrtc_connected.is_set():
                 self._webrtc_buffer.write(_turbojpeg.decode(jpeg_bytes))
         else:
             # YUYV source: decode to BGR (libswscale); re-encode for ZMQ.
@@ -1823,7 +1840,7 @@ class V4L2Camera(BaseCamera):
             if not frames:
                 return
             bgr_numpy = frames[0].to_ndarray(format="bgr24")
-            if self._enable_webrtc:
+            if self._webrtc_connected.is_set():
                 self._webrtc_buffer.write(bgr_numpy)
             if self._enable_zmq:
                 self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
@@ -1984,14 +2001,19 @@ class V4L2Camera(BaseCamera):
         Return the single capture node whose identifier `key` == `value`.
         A UVC/CSI device exposes a real capture node plus metadata/control
         siblings that share the same USB identifier, so matches are narrowed
-        to nodes that actually grab a frame; a still-ambiguous match (two
-        distinct cameras of the same model by vid_pid) raises.
+        to nodes that expose capture formats and actually grab a frame; a
+        still-ambiguous match (two distinct cameras of the same model by
+        vid_pid) raises.
         """
         matches = [r["video_path"] for r in ids if r.get(key) == value]
         if not matches:
             return None
+        # Drop metadata/control siblings: they share the USB id but expose no capture formats.
+        matches = [v for v in matches if (cls._v4l2_device_info(v) or {}).get("modes")]
         grabbable = [v for v in matches if cls._can_grab(v)]
         pool = grabbable or matches
+        if not pool:
+            return None
         if len(pool) > 1:
             raise ValueError(f"Multiple V4L2 capture nodes match {key}={value}: {pool}")
         return pool[0]
@@ -2222,8 +2244,8 @@ class GStreamerCamera(BaseCamera):
         if self._enable_zmq:
             self._zmq_buffer.write(jpeg_bytes)
 
-        # WebRTC needs raw BGR frames, so decode lazily only when it is enabled.
-        if self._enable_webrtc:
+        # WebRTC needs raw BGR frames, so decode lazily only when a client is connected.
+        if self._webrtc_connected.is_set():
             self._webrtc_buffer.write(_turbojpeg.decode(jpeg_bytes))
 
         if not self._ready.is_set():
@@ -2403,18 +2425,21 @@ class TeleImageServer:
     def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
         try:
             webrtc_codec = camera.get_webrtc_codec()
+            connected = self._webrtc_publisher_manager.connected_event(camera.get_webrtc_port(), codec_pref=webrtc_codec)
+            camera.set_webrtc_connected(connected)
             no_frame_warned = False
             while not self._stop_event.is_set():
-                bgr_frame = camera.get_bgr_frame(timeout=0.5)
-
-                if bgr_frame is None:
-                    if not no_frame_warned:
-                        logger_mp.warning(f"[Teleimager] {cam_topic} produced no new frame for 0.5s.")
-                        no_frame_warned = True
+                if not connected.is_set():
+                    connected.wait(0.1)
                     continue
 
-                no_frame_warned = False
-                self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
+                bgr_frame = camera.get_bgr_frame(timeout=0.5)
+                if bgr_frame is not None:
+                    no_frame_warned = False
+                    self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
+                elif connected.is_set() and not no_frame_warned:
+                    logger_mp.warning(f"[Teleimager] {cam_topic} produced no new frame for 0.5s.")
+                    no_frame_warned = True
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to publish rtc frame from {cam_topic} camera.")
             self._stop_event.set()
