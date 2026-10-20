@@ -501,6 +501,8 @@ class WebRTC_PublisherThread(threading.Thread):
                     
             except Exception as e:
                 logger_mp.error(f"[Teleimager] Relay subscription failed: {e}")
+                await self._cleanup_pc(pc)
+                return self._error_response(500, "Relay subscription failed")
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
