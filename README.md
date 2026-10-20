@@ -268,7 +268,7 @@ Edit it to match the Camera Finder Report from section 2.1, then start the servi
 teleimager-server
 ```
 
-Useful flags: `--config <path>` (or `$TELEIMAGER_CONFIG`) to point at another config; `--no-affinity` to skip CPU-core pinning; `--isaacsim` to run in IsaacSim mode (frames from shared memory).
+Useful flags: `--config <path>` (or `$TELEIMAGER_CONFIG`) to point at another config; `--no-affinity` to skip CPU-core pinning.
 
 ### 2.3 Auto-start on boot
 

@@ -268,7 +268,7 @@ teleimager-server --cf --uvc --v4l2        # RealSense 加 --rs，GStreamer 加 
 teleimager-server
 ```
 
-常用参数：`--config <路径>`（或环境变量 `$TELEIMAGER_CONFIG`）指定其它配置文件；`--no-affinity` 跳过 CPU 核心绑定；`--isaacsim` 以 IsaacSim 模式运行（帧来自共享内存）。
+常用参数：`--config <路径>`（或环境变量 `$TELEIMAGER_CONFIG`）指定其它配置文件；`--no-affinity` 跳过 CPU 核心绑定。
 
 ### 2.3 开机自启动
 

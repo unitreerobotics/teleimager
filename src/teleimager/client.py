@@ -85,14 +85,18 @@ class TripleRingBuffer:
         self.latest_index = -1          # Index of the latest written data
         self.read_index = -1            # Index of the current read data
         self.lock = threading.Lock()
+        self._cond = threading.Condition(self.lock)
+        self._seq = 0                   # Incremented on every write()
 
     def write(self, data):
-        with self.lock:
+        with self._cond:
             self.buffer[self.write_index] = data
             self.latest_index = self.write_index
             self.write_index = (self.write_index + 1) % 3
             if self.write_index == self.read_index:
                 self.write_index = (self.write_index + 1) % 3
+            self._seq += 1
+            self._cond.notify_all()
 
     def read(self):
         with self.lock:
@@ -100,6 +104,12 @@ class TripleRingBuffer:
                 return None  # No data has been written yet
             self.read_index = self.latest_index
         return self.buffer[self.read_index]
+
+    def wait_new(self, last_seq, timeout=None):
+        """Block until a newer frame is written; returns the sequence (unchanged on timeout)."""
+        with self._cond:
+            self._cond.wait_for(lambda: self._seq != last_seq, timeout)
+            return self._seq
 
 class SimpleFPSMonitor:
     def __init__(self, window_size: int):

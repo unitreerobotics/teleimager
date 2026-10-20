@@ -107,9 +107,10 @@ def load_server_config(cli_path=None):
 # aiortc's bitrate constants are module-level, so this is global by design.
 # ========================================================
 _GOP_LENGTH = 60  # frames between keyframes; overridden by yaml if present
+_WEBRTC_FPS = 30  # encoder frame rate; kept in sync with the camera config
 
 def _apply_webrtc_config(server_config):
-    global _GOP_LENGTH
+    global _GOP_LENGTH, _WEBRTC_FPS
     cfg = (server_config or {}).get("webrtc", {})
     bitrate = cfg.get("bitrate", {})
     from aiortc.codecs import vpx
@@ -119,7 +120,9 @@ def _apply_webrtc_config(server_config):
             setattr(vpx, attr, int(bitrate[key]))
     if "gop_length" in cfg and int(cfg["gop_length"]) > 0:
         _GOP_LENGTH = int(cfg["gop_length"])
-    logger_mp.info(f"[Teleimager] bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}")
+    fps = {int(c.get("fps", 30)) for c in (server_config or {}).get("camera", {}).values()}
+    _WEBRTC_FPS = fps.pop() if len(fps) == 1 else 30
+    logger_mp.info(f"[Teleimager] bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}, fps={_WEBRTC_FPS}")
 
 # ========================================================
 # libx264 for Jetson (Patch h264 Encoder)
@@ -135,8 +138,8 @@ def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: boo
             self.codec.height = frame.height
             self.codec.bit_rate = self.target_bitrate
             self.codec.pix_fmt = "yuv420p"
-            self.codec.framerate = fractions.Fraction(30, 1)
-            self.codec.time_base = fractions.Fraction(1, 30)
+            self.codec.framerate = fractions.Fraction(_WEBRTC_FPS, 1)
+            self.codec.time_base = fractions.Fraction(1, _WEBRTC_FPS)
         
             self.codec.options = {
                 "preset": "ultrafast",
@@ -347,12 +350,12 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
             video_frame = av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24")
             
             if self._start_time is None:
-                self._start_time = time.time()
+                self._start_time = time.monotonic()
                 self._pts = 0
             else:
                 # 90000 is the standard RTP clock rate for video
                 # This ensures smooth playback
-                self._pts = int((time.time() - self._start_time) * 90000)
+                self._pts = int((time.monotonic() - self._start_time) * 90000)
             
             video_frame.pts = self._pts
             video_frame.time_base = fractions.Fraction(1, 90000)
@@ -1131,26 +1134,20 @@ class CameraFinder:
         return ("GStreamerCamera (%d found)   [type: gstreamer]" % len(cams), cams)
 
 class BaseCamera:
-    # Hardware reads (V4L2 DQBUF, libuvc frame poll, GStreamer appsink pull,
-    # RealSense wait_for_frames) block until the driver has a frame, so the
-    # capture loop must NOT pace them again: an extra per-frame sleep freezes
-    # any backlog the driver queued during a stall (the loop can never drain
-    # it faster than real time). Shared-memory reads return immediately and
-    # still need explicit pacing — see IsaacSimCamera.
-    _capture_requires_pacing = False
-
     def __init__(self, cam_topic, server_cfg):
         self._ready = threading.Event()
         self._cam_topic = cam_topic
         # ---- common keys: parsed here once for every camera ----
         self._img_shape = server_cfg.get("image_shape", None) # (H, W)
         self._fps = server_cfg.get("fps", 30)
+
         self._enable_zmq = server_cfg.get("enable_zmq", False)
         self._zmq_port = server_cfg.get("zmq_port", None)
         if self._enable_zmq:
             self._zmq_buffer = TripleRingBuffer()
         else:
             self._zmq_buffer = None
+        self._zmq_seq = 0
 
         self._enable_webrtc = server_cfg.get("enable_webrtc", False)
         self._webrtc_port = server_cfg.get("webrtc_port", None)
@@ -1159,6 +1156,7 @@ class BaseCamera:
             self._webrtc_buffer = TripleRingBuffer()
         else:
             self._webrtc_buffer = None
+        self._webrtc_seq = 0
 
     def __str__(self):
         raise NotImplementedError
@@ -1169,7 +1167,7 @@ class BaseCamera:
     def _update_frame(self):
         """Return a jepg frame as bytes, and a bgr frame as numpy array"""
         raise NotImplementedError
-    
+
     def wait_until_ready(self, timeout=None):
         """Block until the camera is ready (first frame is available) or timeout occurs."""
         return self._ready.wait(timeout=timeout)
@@ -1180,13 +1178,25 @@ class BaseCamera:
     def enable_zmq(self):
         return self._enable_zmq
 
-    def get_jpeg_bytes(self):
-        jpeg_bytes = self._zmq_buffer.read() if self._enable_zmq and self._zmq_buffer else None
-        return jpeg_bytes
+    def get_jpeg_bytes(self, timeout=None):
+        """Wait for the next new ZMQ frame; None if none arrives within timeout."""
+        if not self._enable_zmq or self._zmq_buffer is None:
+            return None
+        seq = self._zmq_buffer.wait_new(self._zmq_seq, timeout=timeout)
+        if seq == self._zmq_seq:
+            return None
+        self._zmq_seq = seq
+        return self._zmq_buffer.read()
 
-    def get_bgr_frame(self):
-        bgr_numpy = self._webrtc_buffer.read() if self._enable_webrtc and self._webrtc_buffer else None
-        return bgr_numpy
+    def get_bgr_frame(self, timeout=None):
+        """Wait for the next new BGR frame; None if none arrives within timeout."""
+        if not self._enable_webrtc or self._webrtc_buffer is None:
+            return None
+        seq = self._webrtc_buffer.wait_new(self._webrtc_seq, timeout=timeout)
+        if seq == self._webrtc_seq:
+            return None
+        self._webrtc_seq = seq
+        return self._webrtc_buffer.read()
 
     def get_depth_frame(self):
         """Return a depth frame as bytes, or None if not supported. 
@@ -1235,6 +1245,14 @@ class RealSenseCamera(BaseCamera):
             self._device = profile.get_device()
             if self._device is None:
                 logger_mp.error('[Teleimager] pipe_profile.get_device() is None .')
+            # Disable auto exposure priority to avoid flickering in some RealSense cameras
+            color_sensor = self._device.first_color_sensor() if self._device is not None else None
+            if color_sensor is not None:
+                try:
+                    color_sensor.set_option(rs.option.auto_exposure_priority, 0)
+                except Exception as e:
+                    logger_mp.debug(f"[RealSenseCamera] {cam_topic}: auto_exposure_priority not supported: {e}")
+            
             if self._enable_depth:
                 assert self._device is not None
                 depth_sensor = self._device.first_depth_sensor()
@@ -1489,10 +1507,21 @@ class UVCCamera(BaseCamera):
 
         try:
             self.cap.frame_mode = self._choose_mode(self.cap, width=self._img_shape[1], height=self._img_shape[0], fps=self._fps)
-            logger_mp.info(str(self))
         except Exception as e:
             self.cap = None
             raise RuntimeError(f"[UVCCamera] Failed to set mode for {self._cam_topic}: {e}")
+
+        # Keep the frame rate constant in low light when the camera supports it.
+        control = next((c for c in self.cap.controls if c.display_name == "Auto Exposure Priority"), None)
+        if control is None:
+            logger_mp.debug(f"[UVCCamera] {cam_topic}: Auto Exposure Priority not supported")
+        else:
+            try:
+                control.value = 0
+            except Exception as e:
+                logger_mp.debug(f"[UVCCamera] {cam_topic}: failed to set Auto Exposure Priority=0: {e}")
+
+        logger_mp.info(str(self))
 
     @staticmethod
     def get_uvc_module():
@@ -1744,6 +1773,11 @@ class V4L2Camera(BaseCamera):
         self._passthrough = "MJPG" in formats
         input_format = "mjpeg" if self._passthrough else "yuyv422"
 
+        # Keep the frame rate constant in low light if the control exists.
+        result = subprocess.run(["v4l2-ctl", "-d", self._video_path, "--set-ctrl=exposure_dynamic_framerate=0"], capture_output=True, text=True)
+        if result.returncode != 0:
+            logger_mp.debug(f"[V4L2Camera] {cam_topic}: exposure_dynamic_framerate not supported")
+
         self.container = av.open(self._video_path, format="v4l2", options={
             "input_format": input_format,
             "video_size": f"{self._img_shape[1]}x{self._img_shape[0]}",
@@ -1751,9 +1785,10 @@ class V4L2Camera(BaseCamera):
         })
         self._demux = self.container.demux(self.container.streams.video[0])
 
-        # Test if the camera can read frames
         try:
-            can_read = self._can_read_frame()
+            can_read = len(bytes(next(self._demux))) > 0
+        except StopIteration:
+            can_read = False
         except Exception:
             self.release()
             raise
@@ -1767,12 +1802,6 @@ class V4L2Camera(BaseCamera):
         zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
         return f" 📷 Camera {self._cam_topic!r:<22} v4l2, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
-
-    def _can_read_frame(self):
-        try:
-            return len(bytes(next(self._demux))) > 0
-        except StopIteration:
-            return False
 
     def _update_frame(self):
         if self.container is None:
@@ -2072,8 +2101,7 @@ class GStreamerCamera(BaseCamera):
         # the pipeline itself with compositor if you need to merge multiple sources.
         self.pipe, self.sink = self._start_pipeline(self._pipeline_str)
 
-        # Test if the camera can read frames
-        if not self._can_read_frame():
+        if self._pull_jpeg(self.sink, timeout_ns=5_000_000_000) is None:
             self.release()
             raise RuntimeError(f"[GStreamerCamera] Camera {self._cam_topic} failed to initialize or read frames.")
         else:
@@ -2149,6 +2177,23 @@ class GStreamerCamera(BaseCamera):
         sink.set_property("max-buffers", 1)
         sink.set_property("drop", True)
         sink.set_property("caps", Gst.Caps.from_string("image/jpeg"))
+
+        # Keep the frame rate constant in low light for v4l2src.
+        applied = False
+        it = pipe.iterate_elements()
+        while True:
+            ok, elem = it.next()
+            if ok != Gst.IteratorResult.OK:
+                break
+            factory = elem.get_factory()
+            if factory is not None and factory.get_name() == "v4l2src":
+                controls = elem.get_property("extra-controls") or Gst.Structure.new_empty("controls")
+                controls.set_value("exposure_dynamic_framerate", 0)
+                elem.set_property("extra-controls", controls)
+                applied = True
+        if not applied:
+            logger_mp.debug("[GStreamerCamera] no v4l2src element; exposure_dynamic_framerate not applied")
+
         pipe.set_state(Gst.State.PLAYING)
         return pipe, sink
 
@@ -2167,10 +2212,6 @@ class GStreamerCamera(BaseCamera):
         finally:
             buf.unmap(mapinfo)
         return jpeg
-
-    def _can_read_frame(self):
-        # first frame may need extra time for the source to warm up (e.g. CSI nvarguscamerasrc ~2s)
-        return self._pull_jpeg(self.sink, timeout_ns=5_000_000_000) is not None
 
     def _update_frame(self):
         jpeg_bytes = self._pull_jpeg(self.sink)
@@ -2285,114 +2326,17 @@ class GStreamerCamera(BaseCamera):
             return None
         return cls(cam_topic, gst_pipeline, server_cfg)
 
-class IsaacSimCamera(BaseCamera):
-    # Shared-memory reads return immediately, so they must be paced to the
-    # configured FPS (unlike the blocking hardware backends).
-    _capture_requires_pacing = True
-
-    def __init__(self, cam_topic, server_cfg, image_source="head"):
-        """
-        IsaacSim camera that reads from shared memory.
-
-        Args:
-            cam_topic: camera topic name
-            server_cfg: this camera's config block (common keys parsed by BaseCamera)
-            image_source: which image to read from shared memory ("head", "left", "right")
-        """
-        super().__init__(cam_topic, server_cfg)
-        from tools.shared_memory_utils import MultiImageReader # https://github.com/unitreerobotics/unitree_sim_isaaclab/tree/main/tools
-        self.multi_image_reader = MultiImageReader()
-        self._image_source = image_source  # "head", "left", or "right"
-        self._binocular = server_cfg.get("binocular", False)  # if True and image_source=="head", concatenate left+right
-        # For IsaacSim cameras, set ready immediately since the camera object is initialized
-        # and will wait for shared memory data in _update_frame
-        self._ready.set()
-        logger_mp.info(str(self))
-
-    def __str__(self):
-        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
-        webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        extra = f"source={self._image_source!r}, {'binocular' if self._binocular else 'monocular'}"
-        return f" 📷 Camera {self._cam_topic!r:<22} isaacsim, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {extra}, {zmq}, {webrtc}"
-
-    def _update_frame(self):
-        # Get the image data based on source and binocular settings
-        frame_data = None
-        if self._binocular:
-            # For binocular cameras: concatenate left + right images
-            left_img = self.multi_image_reader.read_single_image('left')
-            right_img = self.multi_image_reader.read_single_image('right')
-            logger_mp.debug(f"[Teleimager] {self._cam_topic} - left: {left_img is not None}, right: {right_img is not None}")
-
-            if left_img is not None and right_img is not None:
-                frame_data = np.hstack([left_img, right_img])
-                logger_mp.debug(f"[Teleimager] {self._cam_topic} - concatenated binocular frame: {frame_data.shape}")
-        else:
-            # For monocular cameras: use the specified source directly
-            frame_data = self.multi_image_reader.read_single_image(self._image_source)
-            if frame_data is None:
-                logger_mp.debug(f"[Teleimager] {self._cam_topic} - no data for source '{self._image_source}'")
-
-        # Publish the frame data only if we have valid data
-        if frame_data is not None:
-            # For ZMQ: encode to JPEG bytes
-            if self._enable_zmq:
-                self._zmq_buffer.write(_turbojpeg.encode(frame_data))
-
-            # For WebRTC: use BGR frames directly
-            if self._enable_webrtc:
-                self._webrtc_buffer.write(frame_data)
-
-            if not self._ready.is_set():
-                self._ready.set()
-        else:
-            logger_mp.debug(f"[Teleimager] No data available for {self._cam_topic}, frame_data is None")
-        # If no data is available, just return silently and wait for next frame
-
-    def release(self):
-        if hasattr(self, 'multi_image_reader') and self.multi_image_reader is not None:
-            self.multi_image_reader.close()
-        self.multi_image_reader = None
-        logger_mp.info(f"[Teleimager] Released {self._cam_topic}")
-
-    @classmethod
-    def scan(cls):
-        """IsaacSim cameras are virtual (shared-memory / topic-convention based);
-        there is no physical device to discover."""
-        return []
-
-    @classmethod
-    def from_config(cls, cam_topic, server_cfg):
-        # Check if binocular mode is enabled
-        binocular = server_cfg.get("binocular", False)
-
-        # For IsaacSim cameras, determine image source based on camera topic and binocular setting
-        if binocular:
-            # Binocular cameras (like head) need to read left+right and concatenate
-            image_source = "head"  # Special marker for binocular
-        else:
-            # Monocular cameras read their specific source
-            if "left" in cam_topic.lower():
-                image_source = "left"
-            elif "right" in cam_topic.lower():
-                image_source = "right"
-            else:
-                image_source = "head"  # fallback
-
-        return cls(cam_topic, server_cfg, image_source=image_source)
 # ========================================================
 # teleimage server
 # ========================================================
 class TeleImageServer:
-    def __init__(self, server_config, enable_isaacsim=False):
+    def __init__(self, server_config):
         _apply_webrtc_config(server_config)
         self._server_config = server_config
-        self._enable_isaacsim = enable_isaacsim
         self._stop_event = threading.Event()
         self._cameras: dict[str, BaseCamera] = {}
 
-        if not self._enable_isaacsim:
-            reload_uvcvideo_module()
+        reload_uvcvideo_module()
 
         self._responser = ZMQ_Responser(self._server_config)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
@@ -2406,8 +2350,6 @@ class TeleImageServer:
                     continue
 
                 cam_type = server_cfg.get("type", "uvc").lower()
-                if self._enable_isaacsim and cam_type!="isaacsim":
-                    cam_type = "isaacsim"
 
                 if cam_type == "v4l2":
                     self._cameras[cam_topic] = V4L2Camera.from_config(cam_topic, server_cfg)
@@ -2417,8 +2359,6 @@ class TeleImageServer:
                     self._cameras[cam_topic] = UVCCamera.from_config(cam_topic, server_cfg)
                 elif cam_type == "gstreamer":
                     self._cameras[cam_topic] = GStreamerCamera.from_config(cam_topic, server_cfg)
-                elif cam_type == "isaacsim":
-                    self._cameras[cam_topic] = IsaacSimCamera.from_config(cam_topic, server_cfg)
                 else:
                     logger_mp.error(f"[Teleimager] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                     continue
@@ -2431,11 +2371,6 @@ class TeleImageServer:
 
     def _update_frames(self, cam_topic: str, camera: BaseCamera):
         try:
-            # interval == 0 means "read as fast as the driver delivers": hardware
-            # reads already block on the next frame, and letting them run free
-            # drains any backlog queued during a stall instead of freezing it.
-            interval = 1.0 / camera.get_fps() if camera._capture_requires_pacing else 0.0
-            next_frame_time = time.monotonic()
             while not self._stop_event.is_set():
                 try:
                     camera._update_frame()
@@ -2443,65 +2378,43 @@ class TeleImageServer:
                     logger_mp.error(f"[Teleimager] Error updating frame for {cam_topic} camera")
                     self._stop_event.set()
                     break
-                if not interval:
-                    # Unpaced: the driver's read blocks until a frame is available,
-                    # so any backlog queued during a stall drains at full speed.
-                    continue
-                next_frame_time += interval
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    self._stop_event.wait(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to update frames for {cam_topic} camera: {e}")
             self._stop_event.set()
 
     def _zmq_pub(self, cam_topic: str, camera: BaseCamera):
         try:
-            interval = 1.0 / camera.get_fps()
-            next_frame_time = time.monotonic()
-
+            no_frame_warned = False
             while not self._stop_event.is_set():
-                jpeg_bytes = camera.get_jpeg_bytes()
-                if jpeg_bytes is not None:
-                    self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_zmq_port())
-                else:
-                    logger_mp.warning(f"[Teleimager] {cam_topic} returned no frame.")
-                    self._stop_event.set()
-                    break
+                jpeg_bytes = camera.get_jpeg_bytes(timeout=0.5)
 
-                next_frame_time += interval
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
+                if jpeg_bytes is None:
+                    if not no_frame_warned:
+                        logger_mp.warning(f"[Teleimager] {cam_topic} produced no new frame for 0.5s.")
+                        no_frame_warned = True
+                    continue
+
+                no_frame_warned = False
+                self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_zmq_port())
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to publish zmq frame from {cam_topic} camera.")
             self._stop_event.set()
     
     def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
         try:
-            interval = 1.0 / camera.get_fps()
             webrtc_codec = camera.get_webrtc_codec()
-            next_frame_time = time.monotonic()
+            no_frame_warned = False
             while not self._stop_event.is_set():
-                bgr_frame = camera.get_bgr_frame()
+                bgr_frame = camera.get_bgr_frame(timeout=0.5)
 
-                if bgr_frame is not None:
-                    self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
-                else:
-                    logger_mp.info(f"[Teleimager] {cam_topic} returned no frame.")
-                    self._stop_event.set()
-                    break
+                if bgr_frame is None:
+                    if not no_frame_warned:
+                        logger_mp.warning(f"[Teleimager] {cam_topic} produced no new frame for 0.5s.")
+                        no_frame_warned = True
+                    continue
 
-                next_frame_time += interval
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
+                no_frame_warned = False
+                self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to publish rtc frame from {cam_topic} camera.")
             self._stop_event.set()
@@ -2542,18 +2455,10 @@ class TeleImageServer:
             t = threading.Thread(target=self._update_frames, args=(camera_topic, camera), daemon=True)
             t.start()
             self._publisher_threads.append(t)
-        if self._enable_isaacsim:
-            time.sleep(2.0)  # wait a bit for IsaacSim shared memory to be ready
-
         for camera_topic, camera in self._cameras.items():
-            # Use longer timeout for IsaacSim cameras since they need to wait for shared memory data
-            if self._enable_isaacsim:
-                timeout = 15.0
-            else:
-                timeout = 5.0
-            ready = camera.wait_until_ready(timeout=timeout)
+            ready = camera.wait_until_ready(timeout=5.0)
             if not ready:
-                logger_mp.error(f"[Teleimager] {camera_topic} ready timeout after {timeout}s.")
+                logger_mp.error(f"[Teleimager] {camera_topic} ready timeout after 5s.")
                 self._stop_event.set()
                 return
         
@@ -2595,14 +2500,6 @@ def set_performance_mode(cores=[0, 1, 2]):
         logger_mp.warning("[Teleimager] Access Denied: Run as sudo for full optimization")
     except Exception as e:
         logger_mp.error(f"[Teleimager] Error: {e}")
-
-def run_isaacsim_server():
-    # Load config file, start teleimage server
-    server_config = load_server_config()
-    # start teleimage server
-    server = TeleImageServer(server_config, enable_realsense=False, enable_isaacsim=True)
-    server.start()
-    return server
 
 def main():
     # ANSI colors for --help, only when stdout is a real terminal (skipped when piped/redirected).
@@ -2655,7 +2552,6 @@ def main():
     parser.add_argument('--v4l2', action='store_true', help='In --cf, include the V4L2 (PyAV) backend in the scan.')
     parser.add_argument('--gst', action='store_true', help='In --cf, include the GStreamer backend in the scan.')
     parser.add_argument('--rs', action='store_true', help='In --cf, include the RealSense (pyrealsense2) backend in the scan.')
-    parser.add_argument('--isaacsim', action='store_true', help='Run the server in IsaacSim mode (frames from shared memory instead of physical cameras).')
     parser.add_argument('--no-affinity', action='store_false', dest='affinity', help='Do not pin the process to specific CPU cores.')
     parser.add_argument('--config', default=None, metavar='PATH', help='Path to a server yaml config (overrides $TELEIMAGER_CONFIG and the default user config dir).')
     parser.add_argument('--cert', default=None, metavar='PATH', help='Path to the TLS certificate (overrides the default ~/.config/teleimager/cert.pem).')
