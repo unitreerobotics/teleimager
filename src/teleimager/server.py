@@ -2398,7 +2398,6 @@ class GStreamerCamera(BaseCamera):
 # ========================================================
 class TeleImageServer:
     def __init__(self, server_config):
-        logger_mp.info(f"[Teleimager] TeleImager v{__version__} on {platform.system()} {platform.machine()}")
         _apply_webrtc_config(server_config)
         self._server_config = server_config
         self._stop_event = threading.Event()
@@ -2573,6 +2572,8 @@ def set_performance_mode(cores=[0, 1, 2]):
         logger_mp.error(f"[Teleimager] Error: {e}")
 
 def main():
+    logger_mp.info(f"[Teleimager] TeleImager v{__version__} on {platform.system()} {platform.machine()}")
+
     # ANSI colors for --help, only when stdout is a real terminal (skipped when piped/redirected).
     _tty = sys.stdout.isatty()
     C = (lambda s, code: f"\033[{code}m{s}\033[0m" if _tty else s)

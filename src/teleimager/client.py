@@ -23,6 +23,7 @@ import contextlib
 import queue
 import threading
 import sys
+import platform
 from typing import Any, Dict, Optional, Tuple
 import zmq
 import numpy as np
@@ -31,6 +32,7 @@ import os
 from pathlib import Path
 from collections import deque
 import logging_mp
+from . import __version__
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
 
@@ -903,6 +905,8 @@ class TeleImageClient:
 # ========================================================
 
 def main():
+    logger_mp.info(f"[Teleimager] TeleImager v{__version__} on {platform.system()} {platform.machine()}")
+
     # command line args
     import argparse
     parser = argparse.ArgumentParser()
