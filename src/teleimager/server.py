@@ -2258,10 +2258,13 @@ class GStreamerCamera(BaseCamera):
                 break
             factory = elem.get_factory()
             if factory is not None and factory.get_name() == "v4l2src":
-                controls = elem.get_property("extra-controls") or Gst.Structure.new_empty("controls")
-                controls.set_value("exposure_dynamic_framerate", 0)
-                elem.set_property("extra-controls", controls)
                 applied = True
+                try:
+                    controls = elem.get_property("extra-controls") or Gst.Structure.new_empty("controls")
+                    controls.set_value("exposure_dynamic_framerate", 0)
+                    elem.set_property("extra-controls", controls)
+                except Exception as e:
+                    logger_mp.info(f"[GStreamerCamera] {self._cam_topic}: exposure_dynamic_framerate not applied ({e})")
         if not applied:
             logger_mp.debug("[GStreamerCamera] no v4l2src element; exposure_dynamic_framerate not applied")
 
