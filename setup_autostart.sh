@@ -10,6 +10,7 @@
 #   - Automatically detects your Conda installation path.
 #   - Prompts for or detects the Conda environment to use.
 #   - Checks for the 'teleimager-server' command availability.
+#   - Requires an explicit server configuration path.
 #   - Optionally enables RealSense camera support (--rs).
 #   - Creates a persistent systemd service at:
 #         /etc/systemd/system/teleimager.service
@@ -99,6 +100,19 @@ if ! command -v teleimager-server >/dev/null 2>&1; then
 fi
 echo "teleimager-server command found successfully."
 
+SERVER_CONFIG="${TELEIMAGER_CONFIG:-}"
+if [ -z "$SERVER_CONFIG" ]; then
+    read -r -p "Enter the server YAML configuration path: " SERVER_CONFIG
+fi
+if [ ! -f "$SERVER_CONFIG" ]; then
+    echo "Error: Server configuration file does not exist: $SERVER_CONFIG"
+    exit 1
+fi
+SERVER_CONFIG="$(realpath -- "$SERVER_CONFIG")"
+SERVICE_CONFIG="${SERVER_CONFIG//\\/\\\\}"
+SERVICE_CONFIG="${SERVICE_CONFIG//\"/\\\"}"
+SERVICE_CONFIG="${SERVICE_CONFIG//%/%%}"
+
 # Step 4: Ask if RealSense cameras are used
 read -p "Are you using RealSense cameras? (y for yes, n/anything else for no): " USE_RS_INPUT
 if [[ "$USE_RS_INPUT" =~ ^([yY])$ ]]; then
@@ -129,6 +143,7 @@ Restart=always
 RestartSec=5
 Environment="PATH=$CONDA_PATH/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 Environment="PYTHONPATH=$SCRIPT_DIR/src"
+Environment="TELEIMAGER_CONFIG=$SERVICE_CONFIG"
 Environment="XR_TELEOP_CERT=/home/unitree/.config/xr_teleoperate/cert.pem"
 Environment="XR_TELEOP_KEY=/home/unitree/.config/xr_teleoperate/key.pem"
 StandardOutput=journal+console

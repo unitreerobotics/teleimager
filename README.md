@@ -256,22 +256,36 @@ Example output:
 
 ### 2.2 Start the server
 
-On first run the server writes a default config to `~/.config/teleimager/teleimager_server.yaml`.
+Create a server YAML matching the Camera Finder Report from section 2.1; output settings and field comments are in [streaming_config.yaml](streaming_config.yaml). For a mono RealSense head without wrists, save this example next to that file and replace the device serial:
 
-Edit it to match the Camera Finder Report from section 2.1, then start the service:
-
-```bash
-teleimager-server
+```yaml
+streaming: streaming_config.yaml
+camera:
+  head_mono_camera:
+    type: realsense
+    image_shape: [480, 640]
+    binocular: false
+    fps: 30
+    serial_number: "YOUR_SERIAL_NUMBER"
+    enable_depth: false
 ```
 
-Useful flags: `--config <path>` (or `$TELEIMAGER_CONFIG`) to point at another config; `--no-affinity` to skip CPU-core pinning; `--isaacsim` to run in IsaacSim mode (frames from shared memory).
+Select the server YAML explicitly:
+
+```bash
+teleimager-server --config /path/to/server.yaml
+```
+
+Alternatively, use `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`. `--config` takes precedence over the environment variable. Startup fails with a clear error when neither is supplied; no server configuration is generated or read implicitly. Camera discovery (`--cf`) and permission setup (`--setup-permissions`) do not require a server configuration.
+
+Useful flags: `--streaming-config <path>` selects streaming settings; `--no-affinity` skips CPU-core pinning; `--isaacsim` reads frames from shared memory. TLS certificates still default to `~/.config/teleimager/cert.pem` and `key.pem`, and the client retains its last successful configuration cache.
 
 ### 2.3 Auto-start on boot
 
-Once everything is verified, you can optionally install it as a [boot service](https://github.com/unitreerobotics/teleimager/blob/main/setup_autostart.sh):
+Once everything is verified, you can optionally install it as a [boot service](setup_autostart.sh):
 
 ```bash
-bash setup_autostart.sh        # follow the prompts
+bash setup_autostart.sh        # provide the server YAML path when prompted
 ```
 
 ---
@@ -356,10 +370,32 @@ Some code references: https://github.com/ARCLab-MIT/beavr-bot
 
 Version `2.0.5+robotree.1`, based on public source commit `b80649fbb6520d24aeb767e28d608ec08b60a20d`.
 
-- `camera.<topic>.type: r1_stereo` receives paired RTP/JPEG or RTP/H264 eyes, preserving fresh-frame pairing and independent eye previews.
+- `camera.<topic>.type: rtp` receives one RTP/JPEG or RTP/H264 stream per instance. `rtp_port` selects its UDP port and `source_host` filters sender IPs. Eyes publish and recover independently, without pairing or concatenation; expired frames stop publishing.
 - Top-level `app_stream` provides RoboTree App H264/TCP streaming with single, mosaic, and `stereo_quad` layouts. Control defaults to port `13579`; image connections use the address and port requested by the App.
 - App BGR output works independently of WebRTC. Quad layouts replace missing or stale images with placeholders. The public `teleimager.client.TeleImageClient` implementation is unchanged.
 
-Device profiles live in the RoboTree parent repository under `configs/services/teleimager/`. Put cameras below `camera:`; keep `app_stream` and `webrtc` at the top level. Deploy with `teleimager-server --config <path>`.
+For `stereo_quad`, `app_stream.camera_topics` maps `head_mono`, `head_stereo`, `head_left`, `head_right`, `wrist_left`, and `wrist_right` roles to topic names. A single head topic is split only when its capture configuration sets `binocular: true`; a mono head is shown intact in both eye tiles. Independent eyes are read separately. Mono-head, stereo-head, and independent-eye capture sources are mutually exclusive in the App grid. Every declared topic has a distinct ZMQ and WebRTC port. Only configured cameras are opened; absent wrists keep placeholder tiles without starting wrist outputs. All combinations share `streaming_config.yaml`.
+
+Shared output settings are documented in [streaming_config.yaml](streaming_config.yaml). `configs/drivers/teleimager/real/<body>/<part>/<vendor>/<selection>.yaml` stores each input in an inline `camera_config` mapping without publishing settings. The experiment explicitly selects `streaming_config.yaml` through `streaming_config`. This shared file declares peer `zmq`, `tcp`, and `webrtc` blocks with enable flags, codecs, and output settings. Runtime uses only ZMQ for validation and identity; Docker applies all outputs. Use `--streaming-config` or the temporary override `TELEIMAGER_STREAMING_CONFIG`. Camera mappings explicitly declare inputs in `camera_config`; directory and stream names do not imply capture parameters. TCP output dimensions, FPS, bitrate, and encoder options come from the streaming file; the App supplies a receiving endpoint and must use matching dimensions. `python -B docker/pc4/service.py print-config` exports effective static settings without opening devices.
 
 The custom RTP/App paths require OpenCV (the existing `[viewer]` extra). RTP/JPEG also requires `gst-launch-1.0` and the `rtpjitterbuffer`, `rtpjpegdepay`, and `jpegparse` plugins; it does not use the generic GStreamer backend's Python GI binding.
+
+### Source layout
+
+`server.py` provides `TeleImageServer` and the server CLI; `client.py` provides `TeleImageClient` and the client CLI. Import `TeleImage` and `TripleRingBuffer` from `teleimager.frame`, and transport classes from their modules under `teleimager.transport`. Client and server modules no longer re-export implementations moved to those modules. Existing console commands remain available.
+
+Named camera `profiles`, the `read_config(profile=...)` argument, and per-camera `{config, profile}` selections are not supported. Use a complete native camera mapping or a plain relative YAML reference. RoboTree keeps its capture mapping inline in `camera_config` and exports native server settings. Client caching, protocol recovery, and supported camera backends remain available.
+
+| Module | Responsibility |
+| --- | --- |
+| `camera/camera.py` and backend modules | Shared capture lifecycle and one implementation per camera backend |
+| `camera_finder.py` | Camera discovery and reports |
+| `transport/zmq_publisher.py` | ZMQ publication threads and their manager |
+| `transport/zmq_subscriber.py` | ZMQ subscription, FPS monitoring and JPEG decoding |
+| `transport/zmq_request.py` | Configuration requests, responses and client cache |
+| `transport/webrtc.py` | WebRTC publication, encoder settings and browser page |
+| `transport/tcp_stream.py` | Robotree App TCP control, H264 streaming and preview layouts |
+| `frame.py` | Shared frame data and latest-frame buffers |
+| `host.py` | Driver reload, permissions and CPU affinity |
+
+The server imports shared communication directly rather than importing the client module. WebRTC encoder customization is applied when a server is constructed, rather than during module import. The browser logo is loaded as a package resource. App streaming uses `teleimager.transport.tcp_stream.TcpStreamServer`; the previous module path and class name are no longer provided.

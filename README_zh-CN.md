@@ -256,22 +256,36 @@ teleimager-server --cf --uvc --v4l2        # RealSense 加 --rs，GStreamer 加 
 
 ### 2.2 启动服务端
 
-首次启动时，服务器会在 `~/.config/teleimager/teleimager_server.yaml` 生成默认配置。
+根据 2.1 节的相机搜索报告创建服务端 YAML，输出参数及字段注释见 [streaming_config.yaml](streaming_config.yaml)。例如，使用 RealSense 单目头部且无腕部时，将下面的配置与该文件放在同一目录，并替换设备序列号：
 
-根据2.1节的相机搜索报告结果编辑该文件，然后启动服务：
-
-```bash
-teleimager-server
+```yaml
+streaming: streaming_config.yaml
+camera:
+  head_mono_camera:
+    type: realsense
+    image_shape: [480, 640]
+    binocular: false
+    fps: 30
+    serial_number: "YOUR_SERIAL_NUMBER"
+    enable_depth: false
 ```
 
-常用参数：`--config <路径>`（或环境变量 `$TELEIMAGER_CONFIG`）指定其它配置文件；`--no-affinity` 跳过 CPU 核心绑定；`--isaacsim` 以 IsaacSim 模式运行（帧来自共享内存）。
+启动时显式指定服务端 YAML：
+
+```bash
+teleimager-server --config /path/to/server.yaml
+```
+
+也可使用 `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`。`--config` 优先于环境变量；两者都未提供时明确报错，不自动创建或隐式读取服务端配置。相机发现（`--cf`）和权限设置（`--setup-permissions`）不要求配置文件。
+
+`--streaming-config <路径>` 选择输出设置，`--no-affinity` 跳过 CPU 核心绑定，`--isaacsim` 从共享内存读取图像。TLS 证书仍默认读取 `~/.config/teleimager/cert.pem` 和 `key.pem`；客户端仍保留最近一次成功获取的配置缓存。
 
 ### 2.3 开机自启动
 
-一切验证无误后，如有需要，可安装为[开机启动服务](https://github.com/unitreerobotics/teleimager/blob/main/setup_autostart.sh)：
+一切验证无误后，如有需要，可安装为[开机启动服务](setup_autostart.sh)：
 
 ```bash
-bash setup_autostart.sh        # 按提示完成配置
+bash setup_autostart.sh        # 按提示填写服务端 YAML 路径
 ```
 
 ---
@@ -356,10 +370,32 @@ sudo $(which teleimager-server) --cf --uvc
 
 版本 `2.0.5+robotree.1`，公版源码基线为 `b80649fbb6520d24aeb767e28d608ec08b60a20d`。
 
-- `camera.<topic>.type: r1_stereo` 接收 RTP/JPEG 或 RTP/H264 左右眼，保留新鲜帧配对与单眼预览。
+- `camera.<topic>.type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
 - 顶层 `app_stream` 支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。
 - App BGR 输出独立于 WebRTC；四宫格对缺失、过期画面显示占位。公版客户端 `teleimager.client.TeleImageClient` 保持原实现。
 
-RoboTree 的设备模板位于主仓库 `configs/services/teleimager/`。所有相机放在 `camera:` 映射下；`app_stream` 和 `webrtc` 位于顶层。部署使用 `teleimager-server --config <path>`。
+`stereo_quad` 的 `app_stream.camera_topics` 使用 `head_mono`、`head_stereo`、`head_left`、`head_right`、`wrist_left`、`wrist_right` 角色映射话题。单话题头部仅在采集配置声明 `binocular: true` 时拆分；单目完整复制到两个眼格，独立双眼分别读取。App 拼图只选择单目头部、拼接双目或独立双眼中的一种来源。所有声明话题使用独立的 ZMQ 和 WebRTC 端口。只初始化已配置相机，无腕部时保留占位格且不启动腕部输出；所有组合共用 `streaming_config.yaml`。
+
+统一输出参数及字段说明见 [streaming_config.yaml](streaming_config.yaml)。`configs/drivers/teleimager/real/<body>/<part>/<vendor>/<selection>.yaml` 在内联 `camera_config` 中保存单台相机输入参数；目录和流名不推导采集参数。实验通过 `streaming_config` 显式选择统一的 `streaming_config.yaml`。文件包含同级的 `zmq`、`tcp`、`webrtc` 区块，各自配置 `enabled`、`codec` 和输出参数。Runtime 只将 ZMQ 设置用于连接校验与指纹；Docker 应用全部输出，预览参数变化不改变 Runtime 身份。统一启动参数为 `--streaming-config`，临时覆盖变量为 `TELEIMAGER_STREAMING_CONFIG`。TCP 的尺寸、FPS、码率与编码选项以推流文件为准，App 提供接收端点并须使用匹配的解码尺寸。`python -B docker/pc4/service.py print-config` 导出最终静态配置，不打开设备。
 
 定制 RTP/App 路径需要 OpenCV（可安装已有的 `[viewer]` extra）。RTP/JPEG 还需 `gst-launch-1.0` 及 `rtpjitterbuffer`、`rtpjpegdepay`、`jpegparse` 插件，不使用通用 GStreamer 后端的 Python GI binding。
+
+### 源码职责
+
+`server.py` 提供 `TeleImageServer` 和服务端 CLI，`client.py` 提供 `TeleImageClient` 和客户端 CLI。`TeleImage`、`TripleRingBuffer` 从 `teleimager.frame` 导入，通信类从 `teleimager.transport` 下各实现模块导入；客户端和服务端不再转导出已移入这些模块的实现。现有命令名保持可用。
+
+不再支持命名相机 `profiles`、`read_config(profile=...)` 参数及逐相机 `{config, profile}` 选择。原生相机使用完整参数字典或普通相对 YAML 引用；RoboTree 在 `camera_config` 中内联采集参数，再导出原生运行配置。客户端缓存、协议恢复和已支持的相机后端保持可用。
+
+| 模块 | 职责 |
+| --- | --- |
+| `camera/camera.py` 及各后端文件 | 公共采集生命周期与逐后端实现 |
+| `camera_finder.py` | 相机发现及报告 |
+| `transport/zmq_publisher.py` | ZMQ 发布线程与管理 |
+| `transport/zmq_subscriber.py` | ZMQ 订阅、FPS 统计和 JPEG 解码 |
+| `transport/zmq_request.py` | 配置请求、响应和客户端缓存 |
+| `transport/webrtc.py` | WebRTC 发布、编码设置及浏览器页面 |
+| `transport/tcp_stream.py` | Robotree App TCP 控制、H264 推流及预览布局 |
+| `frame.py` | 共享图像数据与最新帧缓冲 |
+| `host.py` | 驱动重载、权限设置和 CPU 亲和性 |
+
+服务端直接引用共享通信模块，不再依赖客户端模块。WebRTC 编码器补丁在构造服务端时应用，不在模块导入时修改；页面 Logo 使用包资源定位。App 推流使用 `teleimager.transport.tcp_stream.TcpStreamServer`，不再提供原模块路径和类名。

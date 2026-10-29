@@ -75,9 +75,8 @@ version = {attr = "teleimager.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-# Bundle non-python assets into the wheel: the default server config template
-# (copied to the user config dir on first run) and the WebRTC page logo.
-teleimager = ["teleimager_server.yaml", "unitree_logo.svg"]
+# Bundle the WebRTC page logo into the wheel.
+teleimager = ["unitree_logo.svg"]
 
 [build-system]
 requires = ["setuptools>=77.0.3"]

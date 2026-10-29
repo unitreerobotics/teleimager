@@ -1,0 +1,83 @@
+# =====================================================
+# TeleImager streaming configuration
+#
+# Shared output settings for the cameras selected by the server configuration.
+# RoboTree experiments select this file through streaming_config.
+# Standalone servers use --streaming-config <path> or a relative streaming reference.
+# Output settings do not add cameras or change capture parameters.
+# Topic names use body part, side, image layout, then camera; omit unused qualifiers.
+# head_mono_camera is the optional RealSense mono-head capture, not a default selection.
+# =====================================================
+
+# =====================================================
+# ZMQ publishing. Each captured camera publishes one JPEG stream.
+# Only captured topics are enabled; active publisher ports must be unique.
+# Each topic has its own port, including alternative head sources.
+# =====================================================
+zmq:
+  enabled: true                # Set to true to enable ZMQ publishing, false to disable
+  codec: jpeg                  # ZMQ output codec; currently "jpeg"
+  ports:
+    head_stereo_camera: 55555     # Side-by-side stereo head topic
+    head_mono_camera: 55560       # Mono head topic
+    head_left_mono_camera: 55559  # Independent left eye
+    head_right_mono_camera: 55558 # Independent right eye
+    wrist_left_camera: 55556      # Left wrist publisher TCP port
+    wrist_right_camera: 55557     # Right wrist publisher TCP port
+
+# =====================================================
+# TCP streaming. One H264 stream carries the App's camera grid.
+# The App supplies the video receiver IP and port in its control request.
+# Output dimensions must match the App decoder; FPS and bitrate come from here.
+# =====================================================
+tcp:
+  enabled: true                # Set to true to enable the App control listener
+  codec: h264                  # TCP output codec; currently "h264"
+
+  # ---- control connection ----
+  control_host: 0.0.0.0        # Listener address; 0.0.0.0 binds all IPv4 interfaces
+  control_port: 13579          # TCP port for App control requests
+  stream_name: robotree        # Stream identifier requested by the App
+
+  # ---- camera roles ----
+  # Capture one head source: mono, side-by-side stereo, or independent eyes.
+  # The capture parameter binocular remains the authority for splitting frames.
+  # Mono heads fill both eye tiles intact; independent eyes are read directly.
+  camera_topics:
+    head_stereo: head_stereo_camera    # Side-by-side stereo head topic
+    head_mono: head_mono_camera        # Mono head topic
+    head_left: head_left_mono_camera   # Independent left eye topic
+    head_right: head_right_mono_camera # Independent right eye topic
+    wrist_left: wrist_left_camera      # Optional left wrist topic
+    wrist_right: wrist_right_camera    # Optional right wrist topic
+
+  # ---- output layout ----
+  # Missing or stale cameras keep placeholder tiles; absent wrists are not opened.
+  layout: stereo_quad         # Top: left/right eyes; bottom: left/right wrists
+  width: 1280                 # Total output width in pixels; must match the App
+  height: 960                 # Total output height in pixels; must match the App
+
+  # ---- encoder settings ----
+  fps: 30                     # Output frames per second
+  bitrate: 5000000            # Target bitrate in bits per second
+  gop_length: 30              # Keyframe interval in frames; 30 frames = 1 second at 30 FPS
+  pixel_format: yuv420p        # Pixel format; currently "yuv420p" for the App decoder
+  preset: ultrafast           # libx264 encoding speed preset
+  tune: zerolatency           # libx264 tuning option
+  threads: 1                  # Number of encoder threads
+
+# =====================================================
+# WebRTC publishing. Each captured camera has its own signaling port.
+# Only captured topics are enabled; active signaling ports must be unique.
+# Each topic has its own port, including alternative head sources.
+# =====================================================
+webrtc:
+  enabled: true                # Set to true to enable WebRTC publishing, false to disable
+  codec: h264                  # WebRTC codec preference; options: "vp8", "h264"
+  ports:
+    head_stereo_camera: 60001     # Side-by-side stereo head topic
+    head_mono_camera: 60006       # Mono head topic
+    head_left_mono_camera: 60005  # Independent left eye
+    head_right_mono_camera: 60004 # Independent right eye
+    wrist_left_camera: 60002      # Left wrist signaling TCP port
+    wrist_right_camera: 60003     # Right wrist signaling TCP port

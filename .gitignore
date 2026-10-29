@@ -9,3 +9,4 @@ build/
 *.key
 *.cnf
 *_client.yaml
+/tests/
