@@ -373,10 +373,13 @@ sudo $(which teleimager-server) --cf --uvc
 - `camera.<topic>.type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
 - 顶层 `app_stream` 支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。
 - App BGR 输出独立于 WebRTC；四宫格对缺失、过期画面显示占位。公版客户端 `teleimager.client.TeleImageClient` 保持原实现。
+- 启用 TCP 推流时，`tcp.status_host` / `tcp.status_port` 经 UDP 接收 RoboTree 的 `robotree_teleop_status` v1（默认 `0.0.0.0:13580`；`status_port: null` 关闭中继）。在控制连接上发出 `SUBSCRIBE_TELEOP_STATUS` 的 App，会从它所连接的地址在 UDP `13581` 收到每条已接受的状态，并自行绘制。中继不改动视频；没有发出该命令的 App 收不到状态。相机发布和录制保留源画面。
+- 发送端每个进程使用一个 `session_id`，`sequence` 从 1 递增。中继丢弃已被取代的会话和乱序包，对已接受的包回复 `robotree_overlay_status_ack`（原样带回 `session_id`），只有 App 视频已连接时才报告 `stream_active: true`。重发的包会再次得到 ACK 并转发。新会话只能从 sequence 1 开始取代当前会话；当前状态超过 `tcp.status_timeout`（默认 3 秒）后，任意 sequence 都可接受。
+- 能访问 `status_host` 的任何主机都可以发送状态。Policy 与相机在同一台主机时，绑定 `127.0.0.1`。
 
 `stereo_quad` 的 `app_stream.camera_topics` 使用 `head_mono`、`head_stereo`、`head_left`、`head_right`、`wrist_left`、`wrist_right` 角色映射话题。单话题头部仅在采集配置声明 `binocular: true` 时拆分；单目完整复制到两个眼格，独立双眼分别读取。App 拼图只选择单目头部、拼接双目或独立双眼中的一种来源。所有声明话题使用独立的 ZMQ 和 WebRTC 端口。只初始化已配置相机，无腕部时保留占位格且不启动腕部输出；所有组合共用 `streaming_config.yaml`。
 
-统一输出参数及字段说明见 [streaming_config.yaml](streaming_config.yaml)。`configs/drivers/teleimager/real/<body>/<part>/<vendor>/<selection>.yaml` 在内联 `camera_config` 中保存单台相机输入参数；目录和流名不推导采集参数。实验通过 `streaming_config` 显式选择统一的 `streaming_config.yaml`。文件包含同级的 `zmq`、`tcp`、`webrtc` 区块，各自配置 `enabled`、`codec` 和输出参数。Runtime 只将 ZMQ 设置用于连接校验与指纹；Docker 应用全部输出，预览参数变化不改变 Runtime 身份。统一启动参数为 `--streaming-config`，临时覆盖变量为 `TELEIMAGER_STREAMING_CONFIG`。TCP 的尺寸、FPS、码率与编码选项以推流文件为准，App 提供接收端点并须使用匹配的解码尺寸。`python -B docker/pc4/service.py print-config` 导出最终静态配置，不打开设备。
+统一输出参数及字段说明见 [streaming_config.yaml](streaming_config.yaml)。`configs/drivers/teleimager/real/<body>/<part>/<vendor>/<selection>.yaml` 在内联 `camera_config` 中保存单台相机输入参数；目录和流名不推导采集参数。实验通过 `streaming_config` 显式选择统一的 `streaming_config.yaml`。文件包含同级的 `zmq`、`tcp`、`webrtc` 区块，各自配置 `enabled`、`codec` 和输出参数。Runtime 只将 ZMQ 设置用于连接校验与指纹；Docker 应用全部输出，预览参数变化不改变 Runtime 身份。统一启动参数为 `--streaming-config`，临时覆盖变量为 `TELEIMAGER_STREAMING_CONFIG`。TCP 的尺寸、FPS、码率与编码选项以推流文件为准，App 提供接收端点并须使用匹配的解码尺寸。`python -B docker/onboard/service.py print-config` 导出最终静态配置，不打开设备。
 
 定制 RTP/App 路径需要 OpenCV（可安装已有的 `[viewer]` extra）。RTP/JPEG 还需 `gst-launch-1.0` 及 `rtpjitterbuffer`、`rtpjpegdepay`、`jpegparse` 插件，不使用通用 GStreamer 后端的 Python GI binding。
 
@@ -394,7 +397,7 @@ sudo $(which teleimager-server) --cf --uvc
 | `transport/zmq_subscriber.py` | ZMQ 订阅、FPS 统计和 JPEG 解码 |
 | `transport/zmq_request.py` | 配置请求、响应和客户端缓存 |
 | `transport/webrtc.py` | WebRTC 发布、编码设置及浏览器页面 |
-| `transport/tcp_stream.py` | Robotree App TCP 控制、H264 推流及预览布局 |
+| `transport/tcp_stream.py` | Robotree App TCP 控制、H264 推流、预览布局及遥操作状态中继 |
 | `frame.py` | 共享图像数据与最新帧缓冲 |
 | `host.py` | 驱动重载、权限设置和 CPU 亲和性 |
 

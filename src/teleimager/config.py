@@ -57,7 +57,7 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
         if type(enabled) is not bool:
             raise TypeError(f"streaming.{protocol}.enabled must be a boolean.")
         if protocol == "tcp":
-            allowed = {"enabled", "codec", "control_host", "control_port", "stream_name", "layout", "camera_topics", "width", "height", "fps", "bitrate", "gop_length", "pixel_format", "preset", "tune", "threads"}
+            allowed = {"enabled", "codec", "control_host", "control_port", "stream_name", "layout", "camera_topics", "width", "height", "fps", "bitrate", "gop_length", "pixel_format", "preset", "tune", "threads", "status_host", "status_port", "status_timeout"}
         else:
             allowed = {"enabled", "codec", "ports"}
             if protocol == "webrtc":
@@ -91,6 +91,7 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
                 raise ValueError("streaming.tcp dimensions must be even for H264 output.")
             if settings["pixel_format"] != "yuv420p":
                 raise ValueError("streaming.tcp.pixel_format must be 'yuv420p' for the App decoder.")
+            _check_status_settings(settings)
             config["app_stream"] = dict(settings)
             continue
         ports = settings.get("ports")
@@ -127,6 +128,23 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
             if encoder:
                 config["webrtc"] = encoder
     return config
+
+
+def _check_status_settings(settings: dict) -> None:
+    """Validate the optional teleop status relay fields of streaming.tcp.
+
+    Raises:
+        ValueError: A present status field has an invalid value.
+    """
+    if "status_host" in settings and (not isinstance(settings["status_host"], str) or not settings["status_host"]):
+        raise ValueError("streaming.tcp.status_host must be a non-empty string.")
+    port = settings.get("status_port")
+    if port is not None and (type(port) is not int or not 1 <= port <= 65535):
+        raise ValueError("streaming.tcp.status_port must be null or in range 1..65535.")
+    if "status_timeout" in settings:
+        timeout = settings["status_timeout"]
+        if type(timeout) not in (int, float) or not 0 < timeout < float("inf"):
+            raise ValueError("streaming.tcp.status_timeout must be a positive number of seconds.")
 
 
 def read_server_config(path: str | Path, *, streaming_config: str | Path | None = None) -> dict:
