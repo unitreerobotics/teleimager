@@ -14,10 +14,12 @@
 
 """Capture UVC MJPEG frames with libuvc and discover Linux camera identifiers."""
 
+import fcntl
+import os
 from pathlib import Path
+import struct
 import sys
 
-import av
 import logging_mp
 
 from .camera import BaseCamera
@@ -25,6 +27,19 @@ from .realsense import RealSenseCamera
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
+
+# VIDIOC_ENUM_FMT is _IOWR('V', 2, struct v4l2_fmtdesc). The struct is 64 bytes;
+# pixelformat follows index, type, flags and the 32-byte description.
+_VIDIOC_ENUM_FMT = 0xC0405602
+_V4L2_BUF_TYPE_VIDEO_CAPTURE = 1
+_FMTDESC_SIZE = 64
+_PIXELFORMAT_OFFSET = 44
+# Capture formats of colour sources. Infrared and depth nodes list only formats
+# such as GREY, Y8I, Y16 or Z16, and metadata nodes list no capture format.
+_COLOR_FOURCCS = frozenset({
+    "MJPG", "JPEG", "YUYV", "YVYU", "UYVY", "VYUY",
+    "NV12", "NV21", "YU12", "YV12", "H264", "RGB3", "BGR3",
+})
 
 
 class UVCCamera(BaseCamera):
@@ -117,19 +132,30 @@ class UVCCamera(BaseCamera):
 
     @staticmethod
     def _is_like_rgb(video_path):
-        """Open a video node with PyAV and check whether its first frame is non-gray."""
+        """Check whether a video node lists a colour capture format.
+
+        Reads the format list with VIDIOC_ENUM_FMT instead of decoding a frame.
+        Some cameras stream nothing in their default format, and a blocking read
+        there would stall the whole scan before the configured mode is chosen.
+        """
         try:
-            container = av.open(video_path, format="v4l2")
-        except Exception:
+            fd = os.open(video_path, os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
             return False
         try:
-            for frame in container.decode(container.streams.video[0]):
-                return not frame.format.name.startswith("gray")
-            return False
-        except Exception:
+            for index in range(64):
+                desc = bytearray(_FMTDESC_SIZE)
+                struct.pack_into("II", desc, 0, index, _V4L2_BUF_TYPE_VIDEO_CAPTURE)
+                try:
+                    fcntl.ioctl(fd, _VIDIOC_ENUM_FMT, desc)
+                except OSError:
+                    return False
+                fourcc = bytes(desc[_PIXELFORMAT_OFFSET:_PIXELFORMAT_OFFSET + 4])
+                if fourcc.decode("ascii", "replace") in _COLOR_FOURCCS:
+                    return True
             return False
         finally:
-            container.close()
+            os.close(fd)
 
     @staticmethod
     def _get_ppath_from_vpath(video_path):
@@ -194,9 +220,10 @@ class UVCCamera(BaseCamera):
     def scan(cls):
         """Discover non-gray video sources and read their USB identifiers.
 
-        Probes video nodes with PyAV, then reads physical_path, serial_number,
-        bcd_device, vid_pid, video_id, and the libuvc UID from sysfs. RealSense
-        exclusions are applied by CameraFinder and from_config(), not this scan.
+        Checks each video node's capture formats without streaming, then reads
+        physical_path, serial_number, bcd_device, vid_pid, video_id, and the
+        libuvc UID from sysfs. RealSense exclusions are applied by CameraFinder
+        and from_config(), not this scan.
         """
         cards = []
         for vpath in cls._list_video_paths():
