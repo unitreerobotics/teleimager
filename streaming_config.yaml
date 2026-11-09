@@ -27,9 +27,14 @@ zmq:
     chest_camera: 55561           # Chest publisher TCP port
 
 # =====================================================
-# TCP streaming. One H264 stream carries the App's camera grid.
+# TCP streaming. One H264 stream carries the App's camera view.
 # The App supplies the video receiver IP and port in its control request.
-# Output dimensions must match the App decoder; FPS and bitrate come from here.
+# Version one (OPEN_CAMERA) gets the 2x2 grid below; its size must match the App.
+# Version two (OPEN_STREAM) picks the layout from the App's render mode: the
+# immersive view gets both eyes side by side from the decoded head source,
+# independent of the recording image_shape; the window view gets the grid.
+# Each version-two video connection starts with an RTSI message that tells
+# the App the size and where each camera sits, so nothing is hard-coded.
 # =====================================================
 tcp:
   enabled: true                # Set to true to enable the App control listener
@@ -58,14 +63,22 @@ tcp:
   width: 1280                 # Total output width in pixels; must match the App
   height: 960                 # Total output height in pixels; must match the App
 
+  # ---- immersive view (version two) ----
+  eye_shape: [960, 1280]      # Upper limit of one eye [height, width], multiples of 16
+  max_bitrate: 20000000       # Immersive budget in bits per second; sized for a dedicated 5 GHz router
+  min_bitrate: 4000000        # Floor when adapting to a congested link
+
   # ---- encoder settings ----
-  fps: 30                     # Output frames per second
-  bitrate: 5000000            # Target bitrate in bits per second
-  gop_length: 30              # Keyframe interval in frames; 30 frames = 1 second at 30 FPS
+  fps: 30                     # Nominal frames per second; frames follow the head cameras
+  bitrate: 5000000            # Grid (version one and window view) budget in bits per second
+  gop_length: 60              # Intra-refresh period in frames; 60 frames = 2 seconds at 30 FPS
+  intra_refresh: true         # Spread intra coding over frames instead of periodic IDR spikes
+  vbv_seconds: 0.04           # Rate-control buffer; about one frame keeps Wi-Fi bursts small
   pixel_format: yuv420p        # Pixel format; currently "yuv420p" for the App decoder
-  preset: ultrafast           # libx264 encoding speed preset
+  preset: superfast           # libx264 encoding speed preset
   tune: zerolatency           # libx264 tuning option
-  threads: 1                  # Number of encoder threads
+  threads: 4                  # Number of encoder threads
+  codecs: [h264]              # Encoders offered to the App, in preference order
 
   # ---- teleop status relay ----
   # RoboTree Policy sends robotree_teleop_status over UDP (policy.status_host/status_port).

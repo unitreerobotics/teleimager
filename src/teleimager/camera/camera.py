@@ -33,7 +33,10 @@ class BaseCamera:
 
     Subclasses update enabled buffers in _update_frame() and own their capture
     resources. JPEG output serves ZMQ; BGR output serves WebRTC and App streams.
-    Buffer reads return references without waiting for another capture.
+    The display output serves the App's immersive stream: backends that decode
+    a frame larger than image_shape fill it at the requested display shape;
+    the others return their BGR output. Buffer reads return references without
+    waiting for another capture.
     """
 
     # Hardware reads already block on capture. Extra pacing would prevent
@@ -67,6 +70,8 @@ class BaseCamera:
             self._bgr_buffer = TripleRingBuffer()
         else:
             self._bgr_buffer = None
+        self._display_shape = None
+        self._display_buffer = None
 
     def __str__(self):
         raise NotImplementedError
@@ -109,6 +114,31 @@ class BaseCamera:
         if self._bgr_buffer is None:
             self._bgr_buffer = TripleRingBuffer()
         self._enable_bgr_output = True
+
+    def set_display_shape(self, shape):
+        """Select the (height, width) of display frames, or None to stop them."""
+        if shape is None:
+            self._display_shape = None
+            return
+        self._display_shape = (int(shape[0]), int(shape[1]))
+        if self._display_buffer is None:
+            self._display_buffer = TripleRingBuffer()
+
+    def get_display_frame(self):
+        """Return the latest display frame, or None when none is selected.
+
+        Backends without a larger native frame return their BGR output; the
+        App stream fits it into its rectangle.
+        """
+        if self._display_shape is None:
+            return None
+        return self.get_bgr_frame()
+
+    def get_source_shape(self):
+        """Return the (height, width) of one captured frame, or None if unknown."""
+        if self._img_shape is None:
+            return None
+        return (int(self._img_shape[0]), int(self._img_shape[1]))
 
     def get_depth_frame(self):
         """Return None by default; depth-capable backends override this method."""

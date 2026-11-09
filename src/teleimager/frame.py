@@ -24,11 +24,40 @@
 from typing import Any, Optional
 import threading
 
+import cv2
 import logging_mp
 import numpy as np
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
+
+
+def fit_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Return frame fitted into width x height with aspect ratio kept.
+
+    A frame within about 2% of the target in both dimensions is center-cropped
+    or padded instead of resampled, so near-native sources lose no sharpness.
+    Downscaling uses INTER_AREA; the rest of the canvas is black.
+    """
+    source_height, source_width = frame.shape[:2]
+    if (source_width, source_height) == (width, height):
+        return frame
+    output = np.zeros((height, width, 3), dtype=np.uint8)
+    if abs(source_width - width) <= 0.02 * width and abs(source_height - height) <= 0.02 * height:
+        crop_x, crop_y = max(0, (source_width - width) // 2), max(0, (source_height - height) // 2)
+        cropped = frame[crop_y:crop_y + height, crop_x:crop_x + width]
+        x, y = (width - cropped.shape[1]) // 2, (height - cropped.shape[0]) // 2
+        output[y:y + cropped.shape[0], x:x + cropped.shape[1]] = cropped
+        return output
+    scale = min(width / source_width, height / source_height)
+    resized_width = max(1, round(source_width * scale))
+    resized_height = max(1, round(source_height * scale))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    x, y = (width - resized_width) // 2, (height - resized_height) // 2
+    output[y:y + resized_height, x:x + resized_width] = cv2.resize(
+        frame, (resized_width, resized_height), interpolation=interpolation,
+    )
+    return output
 
 
 class TripleRingBuffer:

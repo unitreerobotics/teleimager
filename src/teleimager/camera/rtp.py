@@ -29,6 +29,7 @@ import av
 import logging_mp
 import numpy as np
 
+from ..frame import fit_frame
 from .camera import BaseCamera
 
 logger_mp = logging_mp.getLogger(__name__)
@@ -68,6 +69,7 @@ class RtpCamera(BaseCamera):
         self._jpeg_process = None
         self._closed = threading.Event()
         self._last_frame_time = None
+        self._source_shape = None
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
@@ -183,6 +185,12 @@ class RtpCamera(BaseCamera):
                 raise
             if bgr is None:
                 continue
+            self._source_shape = bgr.shape[:2]
+            display_shape = self._display_shape
+            if display_shape is not None:
+                # Fit the decoded frame once here, in this camera's thread, so
+                # the App stream only copies it into place.
+                self._display_buffer.write(fit_frame(bgr, display_shape[1], display_shape[0]))
             height, width = self._img_shape
             scale = min(width / bgr.shape[1], height / bgr.shape[0])
             resized_width = max(1, round(bgr.shape[1] * scale))
@@ -211,6 +219,22 @@ class RtpCamera(BaseCamera):
         if self._last_frame_time is None or time.monotonic() - self._last_frame_time >= self._receive_timeout:
             return None
         return super().get_bgr_frame()
+
+    def get_display_frame(self):
+        """Return the display frame fitted from the decoded source while fresh."""
+        if self._display_shape is None or self._display_buffer is None:
+            return None
+        if self._last_frame_time is None or time.monotonic() - self._last_frame_time >= self._receive_timeout:
+            return None
+        frame = self._display_buffer.read()
+        if frame is None or frame.shape[:2] != self._display_shape:
+            # The shape changed since the last capture; wait for the next one.
+            return None
+        return frame
+
+    def get_source_shape(self):
+        """Return the decoded (height, width) of the RTP source, or None before a frame."""
+        return self._source_shape
 
     def release(self):
         """Stop reception and close decoder subprocesses, sockets, and the selector."""

@@ -368,10 +368,10 @@ sudo $(which teleimager-server) --cf --uvc
 
 ## RoboTree 定制功能
 
-版本 `2.0.5+robotree.1`，公版源码基线为 `b80649fbb6520d24aeb767e28d608ec08b60a20d`。
+版本 `2.0.5+robotree.2`，公版源码基线为 `b80649fbb6520d24aeb767e28d608ec08b60a20d`。
 
 - `camera.<topic>.type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
-- 顶层 `app_stream` 支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。
+- 顶层 `app_stream`（即推流文件的 `tcp` 段）支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。使用 `stereo_quad` 时，App 还可以请求协议 v2，见下文“App 推流协议”。
 - App BGR 输出独立于 WebRTC；四宫格对缺失、过期画面显示占位。公版客户端 `teleimager.client.TeleImageClient` 保持原实现。
 - 启用 TCP 推流时，`tcp.status_host` / `tcp.status_port` 经 UDP 接收 RoboTree 的 `robotree_teleop_status` v1（默认 `0.0.0.0:13580`；`status_port: null` 关闭中继）。在控制连接上发出 `SUBSCRIBE_TELEOP_STATUS` 的 App，会从它所连接的地址在 UDP `13581` 收到每条已接受的状态，并自行绘制。中继不改动视频；没有发出该命令的 App 收不到状态。相机发布和录制保留源画面。
 - 发送端每个进程使用一个 `session_id`，`sequence` 从 1 递增。中继丢弃已被取代的会话和乱序包，对已接受的包回复 `robotree_overlay_status_ack`（原样带回 `session_id`），只有 App 视频已连接时才报告 `stream_active: true`。重发的包会再次得到 ACK 并转发。新会话只能从 sequence 1 开始取代当前会话；当前状态超过 `tcp.status_timeout`（默认 3 秒）后，任意 sequence 都可接受。
@@ -379,7 +379,42 @@ sudo $(which teleimager-server) --cf --uvc
 
 `stereo_quad` 的 `app_stream.camera_topics` 使用 `head_mono`、`head_stereo`、`head_left`、`head_right`、`wrist_left`、`wrist_right` 角色映射话题。单话题头部仅在采集配置声明 `binocular: true` 时拆分；单目完整复制到两个眼格，独立双眼分别读取。App 拼图只选择单目头部、拼接双目或独立双眼中的一种来源。所有声明话题使用独立的 ZMQ 和 WebRTC 端口。只初始化已配置相机，无腕部时保留占位格且不启动腕部输出；所有组合共用 `streaming_config.yaml`。
 
-统一输出参数及字段说明见 [streaming_config.yaml](streaming_config.yaml)。`configs/drivers/teleimager/real/<body>/<part>/<vendor>/<selection>.yaml` 在内联 `camera_config` 中保存单台相机输入参数；目录和流名不推导采集参数。实验通过 `streaming_config` 显式选择统一的 `streaming_config.yaml`。文件包含同级的 `zmq`、`tcp`、`webrtc` 区块，各自配置 `enabled`、`codec` 和输出参数。Runtime 只将 ZMQ 设置用于连接校验与指纹；Docker 应用全部输出，预览参数变化不改变 Runtime 身份。统一启动参数为 `--streaming-config`，临时覆盖变量为 `TELEIMAGER_STREAMING_CONFIG`。TCP 的尺寸、FPS、码率与编码选项以推流文件为准，App 提供接收端点并须使用匹配的解码尺寸。`python -B docker/onboard/service.py print-config` 导出最终静态配置，不打开设备。
+统一输出参数及字段说明见 [streaming_config.yaml](streaming_config.yaml)。每份 RoboTree 实验在 `robot.drivers.teleimager.camera_streams[].camera_config` 中内联保存相机输入参数，不含发布设置；目录和流名不推导采集参数。实验通过 `streaming_config` 显式选择统一的 `streaming_config.yaml`。文件包含同级的 `zmq`、`tcp`、`webrtc` 区块，各自配置 `enabled`、`codec` 和输出参数。Runtime 只将 ZMQ 设置用于连接校验与指纹；Docker 应用全部输出，预览参数变化不改变 Runtime 身份。统一启动参数为 `--streaming-config`，临时覆盖变量为 `TELEIMAGER_STREAMING_CONFIG`。TCP 的尺寸、FPS、码率与编码选项以推流文件为准，App 提供接收端点。v1 App 必须请求四宫格的 `width`、`height`；v2 的画面几何来自 `RTSI` 消息。`python -B docker/onboard/service.py print-config` 导出最终静态配置，不打开设备。
+
+### App 推流协议
+
+TCP `13579` 上的控制包先是 4 字节大端包长，再是小端长度前缀的命令和负载。App 端口上的视频消息是 4 字节大端长度加负载。
+
+| 命令 | 版本 | 负载 | 服务端处理 |
+| --- | --- | --- | --- |
+| `OPEN_CAMERA` | 1 | 二进制：`0xCAFE`、版本字节 1、七个小端整数（宽、高、FPS、码率、两个不使用的字段、端口），再是流名和主机 | 按 `width` × `height` 推 `stereo_quad` 四宫格（请求尺寸必须一致），码率为 `bitrate`；直接开始发 H264 |
+| `OPEN_STREAM` | 2 | JSON：`version: 2`、`request_id`、`stream_name`、`render_mode`（`immersive` 或 `window`）、`host`、`port`、`decoders`（`{编码器: {max_width, max_height}}`） | 为请求选定画面几何，新开一条视频连接，第一条消息是 `RTSI` |
+| `REQUEST_KEYFRAME` | 2 | JSON：`request_id` | 为对应请求强制一个 IDR 帧，最快每 0.5 秒一次 |
+| `CLOSE_CAMERA` | 1、2 | 空 | 停止推流 |
+| `SUBSCRIBE_TELEOP_STATUS` | 1、2 | 空 | 转发遥操作状态，见上文 |
+
+`OPEN_STREAM` 需要 `layout: stereo_quad` 提供头部角色映射，否则服务端记一条警告并忽略。RoboTree App 1.2.0 在 3 秒内收不到 `RTSI` 时退回 `OPEN_CAMERA`，并在本次运行中记住这台主机。
+
+- **窗口视图与 v1：** `quad` 布局，尺寸为 `width` × `height`，`head_left`、`head_right`、`wrist_left`、`wrist_right` 按 2×2 排列，码率预算为 `bitrate`。
+- **沉浸视图：** `stereo` 布局，`head_left`、`head_right` 左右并排。每眼尺寸取解码后的头部单眼、`eye_shape`、解码器 `max_width` 的一半与 `max_height` 三者中最小的，再向下取 16 的倍数；码率预算为 `max_bitrate`。H2 PC1 源图为 2064×1552 时，每眼 1280×960，整帧 2560×960。沉浸帧取自相机的显示缓冲：RTP 相机在自己的线程里把解码帧缩放到单眼尺寸，与 `image_shape` 无关；其他后端提供 `image_shape` 尺寸的 BGR 输出。ZMQ、WebRTC 和录制保持 `image_shape`。
+- **`RTSI` 消息：** 每条 v2 视频连接的第一条消息，`RTSI` 后接 UTF-8 JSON，含 `version`、`request_id`、`codec`、`width`、`height`、`fps`、`bitrate`、`layout`（`stereo` 或 `quad`）和 `rects`（`{角色: [x, y, 宽, 高]}`，左上角为原点），之后是带长度前缀的 H264 包。v1 连接没有这个头。
+- **出帧节奏：** 有头部角色时，所有头部相机都有新采集帧，或第一路新帧到达 10 毫秒后，才合成一帧；没有新帧时仍每 0.5 秒发一帧，超过 2 秒没有新帧的相机显示占位。
+- **码率控制：** 上一帧还没发完或 socket 不可写时，编码前跳过这一帧。持续跳帧时目标码率乘 0.75，最快每 2 秒一次；连续 4 秒不跳帧后每 2 秒乘 1.1，范围为 [`min_bitrate`, 预算]。只有 5 秒没有任何发送进展才重连。`TCP_NOTSENT_LOWAT` 让内核里最多积压约一帧。
+- **编码器：** libx264，使用 `preset`、`tune`、`threads`。`intra_refresh: true` 时没有周期性 IDR 帧，`gop_length` 是刷新周期。`maxrate` 为预算，VBV 缓冲为预算 × `vbv_seconds`。
+- **统计日志：** 每 5 秒一行 `[App Stream] target=…Mbps sent=…Mbps unsent=…B encoded=… skipped=… encode_p95=…ms`；收到请求时记 `Requested immersive stream #N: stereo 2560x960@30fps up to 20.0 Mbps to <host>:<port>.`，视频连上时记 `H264 stream connected to <host>:<port> (stereo 2560x960).`
+
+`tcp` 段的 v2 字段都是可选的，填写时会校验：
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `eye_shape` | `[960, 1280]` | 沉浸视图单眼尺寸上限，`[高, 宽]`，16 的倍数 |
+| `max_bitrate` | `20000000` | 沉浸视图码率预算，单位 bit/s |
+| `min_bitrate` | `4000000` | 码率自适应下限，不能大于 `max_bitrate` |
+| `vbv_seconds` | `0.04` | 码率控制缓冲，单位秒，取值 (0, 2] |
+| `intra_refresh` | `true` | 用 intra refresh 代替周期性 IDR 帧 |
+| `codecs` | `[h264]` | 按优先级提供给 App 的编码器，目前只有 `h264` |
+
+`streaming_config.yaml` 现在设为 `preset: superfast`（原 `ultrafast`）、`threads: 4`（原 1）、`gop_length: 60`（原 30）；`bitrate` 只用于四宫格。`teleimager-server` 默认绑定 0–2 号 CPU 核，加 `--no-affinity` 关闭。
 
 定制 RTP/App 路径需要 OpenCV（可安装已有的 `[viewer]` extra）。RTP/JPEG 还需 `gst-launch-1.0` 及 `rtpjitterbuffer`、`rtpjpegdepay`、`jpegparse` 插件，不使用通用 GStreamer 后端的 Python GI binding。
 
@@ -397,7 +432,7 @@ sudo $(which teleimager-server) --cf --uvc
 | `transport/zmq_subscriber.py` | ZMQ 订阅、FPS 统计和 JPEG 解码 |
 | `transport/zmq_request.py` | 配置请求、响应和客户端缓存 |
 | `transport/webrtc.py` | WebRTC 发布、编码设置及浏览器页面 |
-| `transport/tcp_stream.py` | Robotree App TCP 控制、H264 推流、预览布局及遥操作状态中继 |
+| `transport/tcp_stream.py` | Robotree App TCP 控制、协议 v2 画面几何、H264 推流与码率控制、预览布局及遥操作状态中继 |
 | `frame.py` | 共享图像数据与最新帧缓冲 |
 | `host.py` | 驱动重载、权限设置和 CPU 亲和性 |
 

@@ -368,10 +368,10 @@ Some code references: https://github.com/ARCLab-MIT/beavr-bot
 
 ## RoboTree integration
 
-Version `2.0.5+robotree.1`, based on public source commit `b80649fbb6520d24aeb767e28d608ec08b60a20d`.
+Version `2.0.5+robotree.2`, based on public source commit `b80649fbb6520d24aeb767e28d608ec08b60a20d`.
 
 - `camera.<topic>.type: rtp` receives one RTP/JPEG or RTP/H264 stream per instance. `rtp_port` selects its UDP port and `source_host` filters sender IPs. Eyes publish and recover independently, without pairing or concatenation; expired frames stop publishing.
-- Top-level `app_stream` provides RoboTree App H264/TCP streaming with single, mosaic, and `stereo_quad` layouts. Control defaults to port `13579`; image connections use the address and port requested by the App.
+- Top-level `app_stream` (the `tcp` block of the streaming file) provides RoboTree App H264/TCP streaming with single, mosaic, and `stereo_quad` layouts. Control defaults to port `13579`; image connections use the address and port requested by the App. With `stereo_quad`, the App can also request protocol version two; see App stream protocol below.
 - App BGR output works independently of WebRTC. Quad layouts replace missing or stale images with placeholders. The public `teleimager.client.TeleImageClient` implementation is unchanged.
 - With TCP streaming enabled, `tcp.status_host` / `tcp.status_port` receive RoboTree `robotree_teleop_status` version 1 over UDP (default `0.0.0.0:13580`; `status_port: null` disables the relay). An App that sends `SUBSCRIBE_TELEOP_STATUS` on its control connection receives each accepted status on its UDP port `13581`, from the address it connected to, and draws it natively. The relay never modifies the video, and an App without that command receives no status. Camera publishers and recordings keep their source frames.
 - Status senders use one `session_id` per process and increasing `sequence` values from 1. The relay drops packets from replaced sessions and out-of-order packets, acknowledges accepted ones with `robotree_overlay_status_ack` (echoing `session_id`), and reports `stream_active: true` only while the App video is connected. A resend is acknowledged and forwarded again. A new session replaces the current one only from sequence 1, or with any sequence once the current status is older than `tcp.status_timeout` (default 3 s).
@@ -379,7 +379,42 @@ Version `2.0.5+robotree.1`, based on public source commit `b80649fbb6520d24aeb76
 
 For `stereo_quad`, `app_stream.camera_topics` maps `head_mono`, `head_stereo`, `head_left`, `head_right`, `wrist_left`, and `wrist_right` roles to topic names. A single head topic is split only when its capture configuration sets `binocular: true`; a mono head is shown intact in both eye tiles. Independent eyes are read separately. Mono-head, stereo-head, and independent-eye capture sources are mutually exclusive in the App grid. Every declared topic has a distinct ZMQ and WebRTC port. Only configured cameras are opened; absent wrists keep placeholder tiles without starting wrist outputs. All combinations share `streaming_config.yaml`.
 
-Shared output settings are documented in [streaming_config.yaml](streaming_config.yaml). `configs/drivers/teleimager/real/<body>/<part>/<vendor>/<selection>.yaml` stores each input in an inline `camera_config` mapping without publishing settings. The experiment explicitly selects `streaming_config.yaml` through `streaming_config`. This shared file declares peer `zmq`, `tcp`, and `webrtc` blocks with enable flags, codecs, and output settings. Runtime uses only ZMQ for validation and identity; Docker applies all outputs. Use `--streaming-config` or the temporary override `TELEIMAGER_STREAMING_CONFIG`. Camera mappings explicitly declare inputs in `camera_config`; directory and stream names do not imply capture parameters. TCP output dimensions, FPS, bitrate, and encoder options come from the streaming file; the App supplies a receiving endpoint and must use matching dimensions. `python -B docker/onboard/service.py print-config` exports effective static settings without opening devices.
+Shared output settings are documented in [streaming_config.yaml](streaming_config.yaml). Each RoboTree experiment stores its inputs in inline `robot.drivers.teleimager.camera_streams[].camera_config` mappings without publishing settings. The experiment explicitly selects `streaming_config.yaml` through `streaming_config`. This shared file declares peer `zmq`, `tcp`, and `webrtc` blocks with enable flags, codecs, and output settings. Runtime uses only ZMQ for validation and identity; Docker applies all outputs. Use `--streaming-config` or the temporary override `TELEIMAGER_STREAMING_CONFIG`. Camera mappings explicitly declare inputs in `camera_config`; directory and stream names do not imply capture parameters. TCP output dimensions, FPS, bitrate, and encoder options come from the streaming file; the App supplies a receiving endpoint. A version-one App must request the grid's `width` and `height`; version two takes its geometry from the `RTSI` message. `python -B docker/onboard/service.py print-config` exports effective static settings without opening devices.
+
+### App stream protocol
+
+Control packets on TCP `13579` carry a 4-byte big-endian packet length, then a little-endian length-prefixed command and payload. Video messages on the App's port carry a 4-byte big-endian length and a payload.
+
+| Command | Version | Payload | Server action |
+| --- | --- | --- | --- |
+| `OPEN_CAMERA` | 1 | Binary: `0xCAFE`, version byte 1, seven little-endian integers (width, height, FPS, bitrate, two unused fields, port), then the stream name and host | Streams the `stereo_quad` grid at `width` × `height`, which the request must match, with `bitrate`; H264 starts right away |
+| `OPEN_STREAM` | 2 | JSON: `version: 2`, `request_id`, `stream_name`, `render_mode` (`immersive` or `window`), `host`, `port`, `decoders` (`{codec: {max_width, max_height}}`) | Chooses a geometry for the request and opens a new video connection that starts with an `RTSI` message |
+| `REQUEST_KEYFRAME` | 2 | JSON: `request_id` | Forces an IDR frame for the matching request, at most every 0.5 s |
+| `CLOSE_CAMERA` | 1, 2 | Empty | Stops the stream |
+| `SUBSCRIBE_TELEOP_STATUS` | 1, 2 | Empty | Forwards teleop status, as above |
+
+`OPEN_STREAM` needs `layout: stereo_quad`, which maps the head roles; otherwise the server logs a warning and ignores it. RoboTree App 1.2.0 falls back to `OPEN_CAMERA` when no `RTSI` arrives within 3 s and remembers that host for the rest of its run.
+
+- **Window view and version one:** `quad` layout of `width` × `height`, with `head_left`, `head_right`, `wrist_left`, and `wrist_right` in 2×2 tiles and the `bitrate` budget.
+- **Immersive view:** `stereo` layout with `head_left` and `head_right` side by side. Each eye is the smallest of the decoded head eye, `eye_shape`, and half the decoder's `max_width` by its `max_height`, rounded down to multiples of 16; the budget is `max_bitrate`. An H2 PC1 source of 2064×1552 gives 1280×960 per eye and a 2560×960 frame. Immersive frames come from the cameras' display buffers: RTP cameras fit each decoded frame to the eye size in their own thread, independent of `image_shape`; other backends supply their BGR output at `image_shape`. ZMQ, WebRTC, and recordings keep `image_shape`.
+- **`RTSI` message:** the first message of every version-two video connection, `RTSI` followed by UTF-8 JSON with `version`, `request_id`, `codec`, `width`, `height`, `fps`, `bitrate`, `layout` (`stereo` or `quad`), and `rects` (`{role: [x, y, width, height]}`, top-left origin). Length-prefixed H264 packets follow. Version-one connections have no header.
+- **Pacing:** with head roles, a frame is composed when every head camera has a newer capture, or 10 ms after the first one did; without new captures a frame still goes out every 0.5 s, with placeholder tiles for cameras silent for 2 s.
+- **Rate control:** a frame is skipped before encoding while the previous one is unsent or the socket is not writable. Sustained skips multiply the target by 0.75 at most every 2 s; after 4 s without skips the target rises by 1.1× every 2 s, within [`min_bitrate`, budget]. A connection is reopened only after 5 s without send progress. `TCP_NOTSENT_LOWAT` keeps about one frame unsent in the kernel.
+- **Encoder:** libx264 with `preset`, `tune`, and `threads`. With `intra_refresh: true` there are no periodic IDR frames and `gop_length` is the refresh period. `maxrate` is the budget and the VBV buffer is the budget × `vbv_seconds`.
+- **Statistics:** every 5 s the server logs `[App Stream] target=…Mbps sent=…Mbps unsent=…B encoded=… skipped=… encode_p95=…ms`; requests log `Requested immersive stream #N: stereo 2560x960@30fps up to 20.0 Mbps to <host>:<port>.` and connections `H264 stream connected to <host>:<port> (stereo 2560x960).`
+
+Version-two fields of the `tcp` block are optional and validated when present:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `eye_shape` | `[960, 1280]` | Upper limit of one immersive eye, `[height, width]`, multiples of 16 |
+| `max_bitrate` | `20000000` | Immersive budget in bit/s |
+| `min_bitrate` | `4000000` | Floor of bitrate adaptation; must not exceed `max_bitrate` |
+| `vbv_seconds` | `0.04` | Rate-control buffer in seconds, in (0, 2] |
+| `intra_refresh` | `true` | Intra refresh instead of periodic IDR frames |
+| `codecs` | `[h264]` | Encoders offered to the App in preference order; only `h264` |
+
+`streaming_config.yaml` now sets `preset: superfast` (was `ultrafast`), `threads: 4` (was 1), and `gop_length: 60` (was 30); `bitrate` applies only to the grid. `teleimager-server` pins itself to CPU cores 0–2 unless started with `--no-affinity`.
 
 The custom RTP/App paths require OpenCV (the existing `[viewer]` extra). RTP/JPEG also requires `gst-launch-1.0` and the `rtpjitterbuffer`, `rtpjpegdepay`, and `jpegparse` plugins; it does not use the generic GStreamer backend's Python GI binding.
 
@@ -397,7 +432,7 @@ Named camera `profiles`, the `read_config(profile=...)` argument, and per-camera
 | `transport/zmq_subscriber.py` | ZMQ subscription, FPS monitoring and JPEG decoding |
 | `transport/zmq_request.py` | Configuration requests, responses and client cache |
 | `transport/webrtc.py` | WebRTC publication, encoder settings and browser page |
-| `transport/tcp_stream.py` | Robotree App TCP control, H264 streaming, preview layouts and teleop status relay |
+| `transport/tcp_stream.py` | Robotree App TCP control, protocol version two geometry, H264 streaming and bitrate control, preview layouts and teleop status relay |
 | `frame.py` | Shared frame data and latest-frame buffers |
 | `host.py` | Driver reload, permissions and CPU affinity |
 

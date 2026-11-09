@@ -146,6 +146,9 @@ class TeleImageServer:
                 status_host=self._app_stream_config.get("status_host", "0.0.0.0"),
                 status_port=self._app_stream_config.get("status_port", DEFAULT_STATUS_PORT),
                 status_timeout=self._app_stream_config.get("status_timeout", 3.0),
+                # Version two places head roles, so it needs the role mapping.
+                stereo_enabled=self._app_stream_layout == "stereo_quad",
+                eye_source_shape=self._eye_source_shape,
             )
 
         if not self._enable_isaacsim and any(
@@ -328,63 +331,165 @@ class TeleImageServer:
                 self._stop_event.set()
 
     def _app_stream_pub(self):
-        """Compose and send App previews while a stream is requested.
+        """Compose and send App frames for the active request's geometry.
 
-        stereo_quad uses placeholders for missing or stale camera frames. The
-        default layout waits until all selected cameras provide BGR data.
+        With head roles, a frame is composed only when every live head camera
+        (one with a capture in the last 0.5 s) has a newer capture, so both
+        eyes always show the same instant. Pairing a new eye with the other's
+        previous capture shows the eyes different moments, which distorts depth
+        in motion and is harder on the viewer than a repeated frame; such a
+        partial frame goes out only when an eye has lagged for 2.5 frame
+        periods. Encoding follows the cameras instead of a free-running timer;
+        without new captures a placeholder frame still goes out twice a second.
+        Immersive (stereo) frames use the cameras' display buffers, window
+        (quad) frames their BGR buffers. The default layout has no head roles
+        and uses the stream frame rate.
         """
-        from .transport.tcp_stream import DEFAULT_WIDTH, DEFAULT_HEIGHT, compose_camera_output
+        from .transport.tcp_stream import compose_camera_output, compose_stream_frame
 
-        width = int(self._app_stream_config.get("width", DEFAULT_WIDTH))
-        height = int(self._app_stream_config.get("height", DEFAULT_HEIGHT))
+        stream = self._app_stream
+        active_generation = None
+        last_head_times = {}
+        first_new_at = None
+        last_sent_at = float("-inf")
+        next_timer_frame = 0.0
+        paired = partial = 0
+        next_pair_log = time.monotonic() + 5.0
 
         while not self._stop_event.is_set():
-            if not self._app_stream.stream_requested:
-                self._stop_event.wait(0.1)
+            generation, request, geometry = stream.snapshot()
+            if request is None or geometry is None:
+                if active_generation is not None:
+                    self._set_display_shapes(None)
+                    active_generation = None
+                self._stop_event.wait(0.05)
                 continue
-            if not self._app_stream.frame_due():
-                self._stop_event.wait(0.005)
-                continue
+            if generation != active_generation:
+                active_generation = generation
+                self._set_display_shapes(geometry)
+                last_head_times = {}
+                first_new_at = None
+            stream.pump()
 
-            frames_by_topic = {}
-            for camera_topic in self._app_stream_topics:
-                camera = self._cameras.get(camera_topic)
-                frame = camera.get_bgr_frame() if camera is not None else None
-                if self._app_stream_layout == "stereo_quad":
-                    if time.monotonic() - self._camera_frame_times.get(camera_topic, float("-inf")) >= 2.0:
-                        frame = None
-                frames_by_topic[camera_topic] = frame
-            if self._app_stream_layout == "stereo_quad":
-                frames_by_role = {
-                    role: frames_by_topic.get(topic) for role, topic in self._app_stream_roles.items()
-                }
-                for role in ("head_mono", "head_stereo"):
-                    head_topic = self._app_stream_roles.get(role)
-                    if head_topic not in self._server_config["camera"]:
+            now = time.monotonic()
+            if now >= next_pair_log:
+                if paired or partial:
+                    logger_mp.info(f"[App Stream] head frames paired={paired} partial={partial} in 5s")
+                paired = partial = 0
+                next_pair_log = now + 5.0
+            head_topics = self._head_topics()
+            if head_topics:
+                times = {topic: self._camera_frame_times.get(topic) for topic in head_topics}
+                live = [
+                    topic for topic, captured_at in times.items()
+                    if captured_at is not None and now - captured_at < 0.5
+                ]
+                newer = [
+                    topic for topic in live
+                    if times[topic] > last_head_times.get(topic, float("-inf"))
+                ]
+                if not newer and now - last_sent_at < 0.5:
+                    self._stop_event.wait(0.002)
+                    continue
+                if newer and len(newer) < len(live):
+                    if first_new_at is None:
+                        first_new_at = now
+                    if now - first_new_at < 2.5 / geometry.fps:
+                        self._stop_event.wait(0.002)
                         continue
-                    head = frames_by_role.get(role)
-                    if head is not None and self._server_config["camera"][head_topic].get("binocular", False):
-                        frames_by_role["head_left"], frames_by_role["head_right"] = np.hsplit(head, 2)
+                if newer:
+                    if len(newer) == len(live):
+                        paired += 1
                     else:
-                        frames_by_role["head_left"] = frames_by_role["head_right"] = head
-                frames = [frames_by_role.get(role) for role in ("head_left", "head_right", "wrist_left", "wrist_right")]
+                        partial += 1
+                first_new_at = None
+                for topic in newer:
+                    last_head_times[topic] = times[topic]
             else:
-                frames = [frames_by_topic[topic] for topic in self._app_stream_topics]
-            if self._app_stream_layout == "default" and any(frame is None for frame in frames):
-                self._stop_event.wait(0.01)
-                continue
+                if now < next_timer_frame:
+                    self._stop_event.wait(0.002)
+                    continue
+                next_timer_frame = now + 1.0 / geometry.fps
 
             try:
-                output = compose_camera_output(
-                    frames,
-                    width=width,
-                    height=height,
-                    layout=self._app_stream_layout,
-                )
-                self._app_stream.send_frame(output)
+                if self._app_stream_layout == "stereo_quad":
+                    frames_by_role = self._role_frames(display=geometry.layout == "stereo")
+                    output = compose_stream_frame(frames_by_role, geometry)
+                else:
+                    frames = [
+                        camera.get_bgr_frame() if camera is not None else None
+                        for camera in (self._cameras.get(topic) for topic in self._app_stream_topics)
+                    ]
+                    if any(frame is None for frame in frames):
+                        self._stop_event.wait(0.01)
+                        continue
+                    output = compose_camera_output(
+                        frames, width=geometry.width, height=geometry.height, layout="default",
+                    )
+                stream.send_frame(output, generation=generation)
+                last_sent_at = now
             except Exception as exc:
                 logger_mp.warning(f"[App Stream] Failed to publish frame: {exc}")
                 self._stop_event.wait(0.1)
+
+    def _head_topics(self):
+        """Return the opened camera topics that feed head roles."""
+        return tuple(
+            topic
+            for role, topic in self._app_stream_roles.items()
+            if role.startswith("head") and self._cameras.get(topic) is not None
+        )
+
+    def _eye_source_shape(self):
+        """Return the (height, width) of one head eye as captured, or None."""
+        roles = self._app_stream_roles
+        for role in ("head_left", "head_right", "head_stereo", "head_mono"):
+            camera = self._cameras.get(roles.get(role))
+            if camera is None:
+                continue
+            shape = camera.get_source_shape()
+            if shape is None:
+                continue
+            if role == "head_stereo" and self._server_config["camera"][roles[role]].get("binocular", False):
+                return (shape[0], shape[1] // 2)
+            return shape
+        return None
+
+    def _set_display_shapes(self, geometry):
+        """Select display shapes for head cameras of a stereo geometry, else stop them."""
+        stereo = geometry is not None and geometry.layout == "stereo"
+        eye = geometry.rect("head_left") if stereo else None
+        for role, topic in self._app_stream_roles.items():
+            camera = self._cameras.get(topic)
+            if camera is None:
+                continue
+            shape = None
+            if eye is not None and role.startswith("head"):
+                _, _, eye_width, eye_height = eye
+                binocular = self._server_config["camera"][topic].get("binocular", False)
+                shape = (eye_height, 2 * eye_width if role == "head_stereo" and binocular else eye_width)
+            camera.set_display_shape(shape)
+
+    def _role_frames(self, *, display):
+        """Return fresh frames by role with heads split or shared, or None when stale."""
+        now = time.monotonic()
+        frames_by_role = {}
+        for role, topic in self._app_stream_roles.items():
+            camera = self._cameras.get(topic)
+            frame = None
+            if camera is not None and now - self._camera_frame_times.get(topic, float("-inf")) < 2.0:
+                frame = camera.get_display_frame() if display and role.startswith("head") else camera.get_bgr_frame()
+            frames_by_role[role] = frame
+        for role in ("head_mono", "head_stereo"):
+            head_topic = self._app_stream_roles.get(role)
+            if head_topic not in self._server_config["camera"]:
+                continue
+            head = frames_by_role.get(role)
+            if head is not None and self._server_config["camera"][head_topic].get("binocular", False):
+                frames_by_role["head_left"], frames_by_role["head_right"] = np.hsplit(head, 2)
+            else:
+                frames_by_role["head_left"] = frames_by_role["head_right"] = head
+        return frames_by_role
 
     def _clean_up(self):
         """Stop outputs, join workers briefly, and release camera resources."""

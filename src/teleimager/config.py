@@ -57,7 +57,8 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
         if type(enabled) is not bool:
             raise TypeError(f"streaming.{protocol}.enabled must be a boolean.")
         if protocol == "tcp":
-            allowed = {"enabled", "codec", "control_host", "control_port", "stream_name", "layout", "camera_topics", "width", "height", "fps", "bitrate", "gop_length", "pixel_format", "preset", "tune", "threads", "status_host", "status_port", "status_timeout"}
+            allowed = {"enabled", "codec", "control_host", "control_port", "stream_name", "layout", "camera_topics", "width", "height", "fps", "bitrate", "gop_length", "pixel_format", "preset", "tune", "threads", "status_host", "status_port", "status_timeout",
+                       "eye_shape", "max_bitrate", "min_bitrate", "vbv_seconds", "intra_refresh", "codecs"}
         else:
             allowed = {"enabled", "codec", "ports"}
             if protocol == "webrtc":
@@ -91,6 +92,7 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
                 raise ValueError("streaming.tcp dimensions must be even for H264 output.")
             if settings["pixel_format"] != "yuv420p":
                 raise ValueError("streaming.tcp.pixel_format must be 'yuv420p' for the App decoder.")
+            _check_app_stream_settings(settings)
             _check_status_settings(settings)
             config["app_stream"] = dict(settings)
             continue
@@ -128,6 +130,38 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
             if encoder:
                 config["webrtc"] = encoder
     return config
+
+
+def _check_app_stream_settings(settings: dict) -> None:
+    """Validate the optional version-two App stream fields of streaming.tcp.
+
+    eye_shape is the (height, width) upper limit of one immersive eye in
+    16-pixel blocks; max_bitrate is the immersive budget and min_bitrate the
+    floor of bitrate adaptation; vbv_seconds sizes the rate-control buffer;
+    codecs lists the encoders offered to the App.
+    """
+    eye_shape = settings.get("eye_shape")
+    if eye_shape is not None:
+        if (not isinstance(eye_shape, (list, tuple)) or len(eye_shape) != 2
+                or any(type(value) is not int or value < 16 or value % 16 for value in eye_shape)):
+            raise ValueError("streaming.tcp.eye_shape must be [height, width] in multiples of 16.")
+    for field in ("max_bitrate", "min_bitrate"):
+        value = settings.get(field)
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError(f"streaming.tcp.{field} must be a positive integer.")
+    if settings.get("min_bitrate") is not None and settings.get("max_bitrate") is not None:
+        if settings["min_bitrate"] > settings["max_bitrate"]:
+            raise ValueError("streaming.tcp.min_bitrate must not exceed max_bitrate.")
+    vbv_seconds = settings.get("vbv_seconds")
+    if vbv_seconds is not None and (type(vbv_seconds) not in (int, float) or not 0 < vbv_seconds <= 2):
+        raise ValueError("streaming.tcp.vbv_seconds must be in (0, 2] seconds.")
+    intra_refresh = settings.get("intra_refresh")
+    if intra_refresh is not None and type(intra_refresh) is not bool:
+        raise TypeError("streaming.tcp.intra_refresh must be a boolean.")
+    codecs = settings.get("codecs")
+    if codecs is not None:
+        if not isinstance(codecs, (list, tuple)) or not codecs or any(codec != "h264" for codec in codecs):
+            raise ValueError("streaming.tcp.codecs must list encoders from ['h264'].")
 
 
 def _check_status_settings(settings: dict) -> None:
