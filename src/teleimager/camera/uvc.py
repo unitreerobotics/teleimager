@@ -40,6 +40,15 @@ _COLOR_FOURCCS = frozenset({
     "MJPG", "JPEG", "YUYV", "YVYU", "UYVY", "VYUY",
     "NV12", "NV21", "YU12", "YV12", "H264", "RGB3", "BGR3",
 })
+# VIDIOC_ENUM_FRAMESIZES and VIDIOC_ENUM_FRAMEINTERVALS are _IOWR('V', 74, ...)
+# and _IOWR('V', 75, ...) on struct v4l2_frmsizeenum (44 bytes) and
+# struct v4l2_frmivalenum (52 bytes). Both take the pixel format as a FourCC.
+_VIDIOC_ENUM_FRAMESIZES = 0xC02C564A
+_VIDIOC_ENUM_FRAMEINTERVALS = 0xC034564B
+_FRMSIZE_SIZE = 44
+_FRMIVAL_SIZE = 52
+_V4L2_FRM_TYPE_DISCRETE = 1
+_MJPG_FOURCC = int.from_bytes(b"MJPG", "little")
 
 
 class UVCCamera(BaseCamera):
@@ -156,6 +165,49 @@ class UVCCamera(BaseCamera):
             return False
         finally:
             os.close(fd)
+
+    @staticmethod
+    def _list_mjpeg_modes(video_path):
+        """List a video node's MJPEG modes as ``(width, height, fps)`` without streaming.
+
+        Reads the discrete frame sizes and intervals with VIDIOC_ENUM_FRAMESIZES
+        and VIDIOC_ENUM_FRAMEINTERVALS, largest frame first, then the highest
+        rate. Only whole frame rates are listed: libuvc reports a mode's ``fps``
+        as an integer, and ``_choose_mode`` must find the same value there.
+        Returns an empty list when the node cannot be opened or has no MJPEG.
+        """
+        try:
+            fd = os.open(video_path, os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
+            return []
+        modes = set()
+        try:
+            for size_index in range(256):
+                size = bytearray(_FRMSIZE_SIZE)
+                struct.pack_into("II", size, 0, size_index, _MJPG_FOURCC)
+                try:
+                    fcntl.ioctl(fd, _VIDIOC_ENUM_FRAMESIZES, size)
+                except OSError:
+                    break
+                size_type, width, height = struct.unpack_from("III", size, 8)
+                if size_type != _V4L2_FRM_TYPE_DISCRETE:
+                    break
+                for interval_index in range(256):
+                    interval = bytearray(_FRMIVAL_SIZE)
+                    struct.pack_into("IIII", interval, 0, interval_index, _MJPG_FOURCC, width, height)
+                    try:
+                        fcntl.ioctl(fd, _VIDIOC_ENUM_FRAMEINTERVALS, interval)
+                    except OSError:
+                        break
+                    interval_type, numerator, denominator = struct.unpack_from("III", interval, 16)
+                    if interval_type != _V4L2_FRM_TYPE_DISCRETE or numerator == 0:
+                        break
+                    fps = denominator / numerator
+                    if abs(fps - round(fps)) < 0.01:
+                        modes.add((width, height, round(fps)))
+        finally:
+            os.close(fd)
+        return sorted(modes, key=lambda mode: (-mode[0] * mode[1], -mode[0], -mode[2]))
 
     @staticmethod
     def _get_ppath_from_vpath(video_path):

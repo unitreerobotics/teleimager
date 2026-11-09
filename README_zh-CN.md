@@ -373,7 +373,7 @@ sudo $(which teleimager-server) --cf --uvc
 - `camera.<topic>.type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
 - 顶层 `app_stream`（即推流文件的 `tcp` 段）支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。使用 `stereo_quad` 时，App 还可以请求协议 v2，见下文“App 推流协议”。
 - App BGR 输出独立于 WebRTC；四宫格对缺失、过期画面显示占位。公版客户端 `teleimager.client.TeleImageClient` 保持原实现。
-- 相机发现不再从设备取流，默认模式下不出流的相机不会卡住启动。UVC 发现（`type: uvc` 和 `--cf --uvc`）用 `VIDIOC_ENUM_FMT` 读取每个节点的采集格式，列出 MJPG、YUYV、NV12、H264 等格式时视为彩色相机，红外、深度和元数据节点会被跳过。V4L2 发现保留 `v4l2-ctl` 输出中声明采集并列出格式的节点，不读取数据包。
+- 相机发现不再从设备取流，默认模式下不出流的相机不会卡住启动。UVC 发现（`type: uvc` 和 `--cf --uvc`）用 `VIDIOC_ENUM_FMT` 读取每个节点的采集格式，列出 MJPG、YUYV、NV12、H264 等格式时视为彩色相机，红外、深度和元数据节点会被跳过。V4L2 发现保留 `v4l2-ctl` 输出中声明采集并列出格式的节点，不读取数据包。`UVCCamera._list_mjpeg_modes()` 用同样方式（`VIDIOC_ENUM_FRAMESIZES`、`VIDIOC_ENUM_FRAMEINTERVALS`）列出节点的 MJPEG 尺寸和整数帧率，RoboTree 建档向导只给出本后端能打开的模式。
 - 启用 TCP 推流时，`tcp.status_host` / `tcp.status_port` 经 UDP 接收 RoboTree 的 `robotree_teleop_status` v1（默认 `0.0.0.0:13580`；`status_port: null` 关闭中继）。在控制连接上发出 `SUBSCRIBE_TELEOP_STATUS` 的 App，会从它所连接的地址在 UDP `13581` 收到每条已接受的状态，并自行绘制。中继不改动视频；没有发出该命令的 App 收不到状态。相机发布和录制保留源画面。
 - 发送端每个进程使用一个 `session_id`，`sequence` 从 1 递增。中继丢弃已被取代的会话和乱序包，对已接受的包回复 `robotree_overlay_status_ack`（原样带回 `session_id`），只有 App 视频已连接时才报告 `stream_active: true`。重发的包会再次得到 ACK 并转发。新会话只能从 sequence 1 开始取代当前会话；当前状态超过 `tcp.status_timeout`（默认 3 秒）后，任意 sequence 都可接受。
 - 能访问 `status_host` 的任何主机都可以发送状态。Policy 与相机在同一台主机时，绑定 `127.0.0.1`。
