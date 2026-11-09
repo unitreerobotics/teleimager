@@ -153,21 +153,15 @@ class V4L2Camera(BaseCamera):
             "modes": modes,
         }
 
-    @staticmethod
-    def _can_grab(video_path):
-        """Open a video node with PyAV and test for a nonempty packet."""
-        try:
-            container = av.open(video_path, format="v4l2")
-        except Exception:
-            return False
-        try:
-            for packet in container.demux(container.streams.video[0]):
-                return len(bytes(packet)) > 0
-            return False
-        except Exception:
-            return False
-        finally:
-            container.close()
+    @classmethod
+    def _lists_capture_formats(cls, video_path):
+        """Check with v4l2-ctl whether a node advertises capture and lists formats.
+
+        Reads the capability and format lists instead of a packet, because a
+        blocking read in a camera's default format can stall discovery.
+        """
+        info = cls._v4l2_device_info(video_path)
+        return bool(info and info.get("is_capture") and info.get("modes"))
 
     # Read identifiers independently of UVC so devices inaccessible to libuvc
     # can still be selected through the V4L2 backend.
@@ -239,16 +233,16 @@ class V4L2Camera(BaseCamera):
 
     @classmethod
     def _resolve_vpath(cls, ids, key, value):
-        """Resolve an identifier, preferring nodes that yield capture data.
+        """Resolve an identifier, preferring nodes that list capture formats.
 
-        Falls back to the original matches if no node yields a packet. Returns
-        None for no match and raises ValueError if multiple candidates remain.
+        Falls back to the original matches if no node lists one. Returns None
+        for no match and raises ValueError if multiple candidates remain.
         """
         matches = [r["video_path"] for r in ids if r.get(key) == value]
         if not matches:
             return None
-        grabbable = [v for v in matches if cls._can_grab(v)]
-        pool = grabbable or matches
+        capture = [v for v in matches if cls._lists_capture_formats(v)]
+        pool = capture or matches
         if len(pool) > 1:
             raise ValueError(f"Multiple V4L2 capture nodes match {key}={value}: {pool}")
         return pool[0]
@@ -257,9 +251,11 @@ class V4L2Camera(BaseCamera):
     def scan(cls):
         """Discover USB and non-USB V4L2 sources with capture modes and identifiers.
 
-        Each reported node must advertise video capture, expose capture formats,
-        and yield a packet through PyAV. Identifiers come from this backend's
-        sysfs scan; CameraFinder is not needed for device resolution.
+        Each reported node must advertise video capture and list capture
+        formats. Nodes are not opened for streaming, so a camera that sends
+        nothing in its default format cannot stall the scan. Identifiers come
+        from this backend's sysfs scan; CameraFinder is not needed for device
+        resolution.
         """
         base = Path("/sys/class/video4linux")
         if not base.exists():
@@ -274,8 +270,6 @@ class V4L2Camera(BaseCamera):
             if info is None or not info.get("is_capture"):
                 continue
             if not info.get("modes"):        # metadata / control node: no capture formats
-                continue
-            if not cls._can_grab(vpath):      # declares capture but yields no frame
                 continue
             ident = id_map.get(vpath, {})
             cards.append({
