@@ -60,6 +60,45 @@ def fit_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     return output
 
 
+# Shared JPEG codec (libturbojpeg): encode(BGR) -> jpeg bytes, decode(jpeg) -> BGR, decode_to_yuv_planes.
+_turbojpeg = None
+
+
+def get_turbojpeg():
+    """Return the process-wide TurboJPEG instance (created on first use)."""
+    global _turbojpeg
+    if _turbojpeg is None:
+        from turbojpeg import TurboJPEG
+
+        _turbojpeg = TurboJPEG()
+    return _turbojpeg
+
+
+def jpeg_to_yuv_frame(jpeg_bytes):
+    """Decode MJPEG into a YUV av.VideoFrame (4:2:0 / 4:2:2 / 4:4:4) without a BGR round trip."""
+    import av
+
+    planes = get_turbojpeg().decode_to_yuv_planes(jpeg_bytes)
+    h, w = planes[0].shape
+    if planes[1].shape == (h // 2, w // 2):
+        pix_fmt = "yuvj420p"
+    elif planes[1].shape == (h, w // 2):
+        pix_fmt = "yuvj422p"
+    else:
+        pix_fmt = "yuvj444p"
+    frame = av.VideoFrame(w, h, format=pix_fmt)
+    for i, data in enumerate(planes):
+        frame.planes[i].update(data)
+    return frame
+
+
+def bgr_to_video_frame(bgr):
+    """Wrap a BGR array as an av.VideoFrame."""
+    import av
+
+    return av.VideoFrame.from_ndarray(bgr, format="bgr24")
+
+
 class TripleRingBuffer:
     """Share the latest value between a producer and a consumer.
 
@@ -74,15 +113,19 @@ class TripleRingBuffer:
         self.latest_index = -1          # Index of the latest written data
         self.read_index = -1            # Index of the current read data
         self.lock = threading.Lock()
+        self._cond = threading.Condition(self.lock)
+        self._seq = 0                   # Incremented on every write()
 
     def write(self, data):
         """Replace the latest value while avoiding the current read slot."""
-        with self.lock:
+        with self._cond:
             self.buffer[self.write_index] = data
             self.latest_index = self.write_index
             self.write_index = (self.write_index + 1) % 3
             if self.write_index == self.read_index:
                 self.write_index = (self.write_index + 1) % 3
+            self._seq += 1
+            self._cond.notify_all()
 
     def read(self):
         """Return the latest value by reference, or None before the first write."""
@@ -91,6 +134,17 @@ class TripleRingBuffer:
                 return None  # No data has been written yet
             self.read_index = self.latest_index
         return self.buffer[self.read_index]
+
+    def wait_new(self, last_seq, timeout=None):
+        """Block until a newer value is written; return the write sequence (unchanged on timeout)."""
+        with self._cond:
+            self._cond.wait_for(lambda: self._seq != last_seq, timeout)
+            return self._seq
+
+    @property
+    def seq(self):
+        """Number of writes so far."""
+        return self._seq
 
 
 class TeleImage:

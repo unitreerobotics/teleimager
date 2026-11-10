@@ -25,7 +25,10 @@ from typing import Dict
 import threading
 import time
 
+import platform
+
 import logging_mp
+from . import __version__
 
 from .transport.zmq_request import ZMQ_Requester
 from .transport.zmq_subscriber import STALL_SECONDS, ZMQ_SubscriberManager
@@ -173,6 +176,7 @@ class TeleImageClient:
 
 def main():
     """Discover live ZMQ cameras and display their decoded frames until quit."""
+    logger_mp.info(f"[Teleimager] TeleImager v{__version__} on {platform.system()} {platform.machine()}")
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', type=str, default='192.168.123.164', help='IP address of image server')

@@ -136,7 +136,7 @@ class ZMQ_SubscriberThread(threading.Thread):
 
         self._socket = None
         self._running = True
-        self._started = threading.Event()
+        self._socket_ready = threading.Event()
 
         self._jpg_3ring_buffer = TripleRingBuffer()
         self._fps_monitor = SimpleFPSMonitor(window_size=10)
@@ -187,7 +187,7 @@ class ZMQ_SubscriberThread(threading.Thread):
 
     def _wait_for_start(self, timeout: float = 1.0) -> bool:
         """Wait for socket setup and return whether the subscriber became ready."""
-        return self._started.wait(timeout=timeout)
+        return self._socket_ready.wait(timeout=timeout)
 
     # Public API.
     def recv(self) -> TeleImage:
@@ -236,7 +236,7 @@ class ZMQ_SubscriberThread(threading.Thread):
             poller = zmq.Poller()
             poller.register(self._socket, zmq.POLLIN)
 
-            self._started.set()
+            self._socket_ready.set()
 
             empty_polls = 0
             stall_threshold = max(1, int(STALL_SECONDS * 1000 / 100))

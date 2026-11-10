@@ -15,6 +15,7 @@
 """Configure Linux camera permissions, UVC driver reloads, and CPU affinity."""
 
 import grp
+import glob
 import os
 import pwd
 import shutil
@@ -49,15 +50,26 @@ def reload_uvcvideo_module():
     sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
     try:
         # Non-interactive sudo fails immediately if permissions are missing.
-        subprocess.run([*sudo, "modprobe", "-r", "uvcvideo"], timeout=30)
-        subprocess.run([*sudo, "modprobe", "uvcvideo"], check=True, timeout=30)
+        subprocess.run([*sudo, "modprobe", "-r", "uvcvideo"], capture_output=True, timeout=30)
+        subprocess.run([*sudo, "modprobe", "uvcvideo"], check=True, capture_output=True, timeout=30)
         # Waiting for udev does not need the modprobe privilege grant.
-        subprocess.run(["udevadm", "settle"], timeout=30)
+        subprocess.run(["udevadm", "settle"], capture_output=True, timeout=30)
         logger_mp.info("[Teleimager] UVC driver reloaded.")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         logger_mp.error(f"[Teleimager] Failed to reload driver: {e}")
-        logger_mp.error('[Teleimager] Grant it once with:\n'
-                        '    sudo "$(which teleimager-server)" --setup-permissions')
+        if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+            logger_mp.error("[Teleimager] " + e.stderr.decode(errors="replace").strip())
+        rel = os.uname().release
+        if glob.glob(f"/lib/modules/{rel}/**/uvcvideo.ko*", recursive=True):
+            logger_mp.error('[Teleimager] Grant it once with:\n'
+                            '    sudo "$(which teleimager-server)" --setup-permissions')
+        else:
+            logger_mp.error(
+                f"[Teleimager] No uvcvideo driver for kernel {rel}, so this machine cannot serve UVC cameras as-is.\n"
+                "    On Debian/Ubuntu it is a separate module package; please install it with:\n"
+                f"      sudo apt install linux-modules-extra-{rel}\n"
+                "    If apt has no candidate for that version, the driver cannot be added to this kernel."
+            )
 
 
 def _run(argv):

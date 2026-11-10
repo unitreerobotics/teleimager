@@ -70,10 +70,21 @@ class UVCCamera(BaseCamera):
 
         try:
             self.cap.frame_mode = self._choose_mode(self.cap, width=self._img_shape[1], height=self._img_shape[0], fps=self._fps)
-            logger_mp.info(str(self))
         except Exception as e:
             self.cap = None
             raise RuntimeError(f"[UVCCamera] Failed to set mode for {self._cam_topic}: {e}")
+
+        # Keep the frame rate constant in low light when the camera supports it.
+        control = next((c for c in self.cap.controls if c.display_name == "Auto Exposure Priority"), None)
+        if control is None:
+            logger_mp.debug(f"[UVCCamera] {cam_topic}: Auto Exposure Priority not supported")
+        else:
+            try:
+                control.value = 0
+            except Exception as e:
+                logger_mp.debug(f"[UVCCamera] {cam_topic}: failed to set Auto Exposure Priority=0: {e}")
+
+        logger_mp.info(str(self))
 
     @staticmethod
     def get_uvc_module():
@@ -83,12 +94,9 @@ class UVCCamera(BaseCamera):
             return uvc
         except ImportError:
             msg = (
-                "[UVC] pupil-labs-uvc (import name 'uvc') not installed.\n"
-                f"  Interpreter: {sys.executable}\n"
-                "  [1/2] System libraries pyuvc links against (before a source build):\n"
-                "      sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev\n"
-                "  [2/2] The Python binding, from PyPI:\n"
-                "      pip install \"teleimager[uvc]\"\n"
+                f"[UVC] pupil-labs-uvc (import name 'uvc') not installed, for interpreter {sys.executable}.  You can try:\n"
+                "    [1/2] sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev\n"
+                "    [2/2] pip install \"teleimager[uvc]\"\n"
             )
             logger_mp.error(msg)
             sys.exit(1)
@@ -106,7 +114,7 @@ class UVCCamera(BaseCamera):
         raise ValueError("[UVCCamera] No matching uvc mode found")
 
     def _update_frame(self):
-        """Capture one frame and refresh enabled JPEG and BGR buffers."""
+        """Capture one frame and refresh the enabled JPEG, WebRTC and BGR buffers."""
         if self.cap is not None:
             frame = self.cap.get_frame_robust()
             if frame is not None:
@@ -117,6 +125,12 @@ class UVCCamera(BaseCamera):
                 if self._enable_bgr_output:
                     if frame.bgr is not None:
                         self._bgr_buffer.write(frame.bgr)
+
+                if self.webrtc_wanted():
+                    if frame.jpeg_buffer is not None:
+                        self._write_webrtc_jpeg(bytes(frame.jpeg_buffer))
+                    elif frame.bgr is not None:
+                        self._write_webrtc_bgr(frame.bgr)
 
                 if not self._ready.is_set():
                     self._ready.set()

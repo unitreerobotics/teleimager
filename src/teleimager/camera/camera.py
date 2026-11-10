@@ -16,23 +16,23 @@
 
 import threading
 
-from turbojpeg import TurboJPEG
 import logging_mp
 
-from ..frame import TripleRingBuffer
+from ..frame import TripleRingBuffer, bgr_to_video_frame, get_turbojpeg, jpeg_to_yuv_frame
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
 
 
-_turbojpeg = TurboJPEG()
+_turbojpeg = get_turbojpeg()
 
 
 class BaseCamera:
     """Define the capture interface and latest-frame output buffers.
 
     Subclasses update enabled buffers in _update_frame() and own their capture
-    resources. JPEG output serves ZMQ; BGR output serves WebRTC and App streams.
+    resources. JPEG output serves ZMQ; VideoFrame output serves WebRTC (written only while a WebRTC client is
+    connected); BGR output serves App streams (enabled by enable_bgr_output()).
     The display output serves the App's immersive stream: backends that decode
     a frame larger than image_shape fill it at the requested display shape;
     the others return their BGR output. Buffer reads return references without
@@ -61,15 +61,20 @@ class BaseCamera:
             self._zmq_buffer = TripleRingBuffer()
         else:
             self._zmq_buffer = None
+        self._zmq_seq = 0
 
         self._enable_webrtc = server_cfg.get("enable_webrtc", False)
         self._webrtc_port = server_cfg.get("webrtc_port", None)
         self._webrtc_codec = server_cfg.get("webrtc_codec", None)
-        self._enable_bgr_output = self._enable_webrtc
-        if self._enable_bgr_output:
-            self._bgr_buffer = TripleRingBuffer()
+        if self._enable_webrtc:
+            self._webrtc_buffer = TripleRingBuffer()
         else:
-            self._bgr_buffer = None
+            self._webrtc_buffer = None
+        self._webrtc_seq = 0
+        self._webrtc_connected = threading.Event()  # set while a WebRTC client is connected
+        # BGR output serves the App stream only; it is enabled by enable_bgr_output()
+        self._enable_bgr_output = False
+        self._bgr_buffer = None
         self._display_shape = None
         self._display_buffer = None
 
@@ -99,10 +104,50 @@ class BaseCamera:
         """Return whether ZMQ output is configured."""
         return self._enable_zmq
 
-    def get_jpeg_bytes(self):
-        """Return the latest JPEG bytes, or None if disabled or unavailable."""
-        jpeg_bytes = self._zmq_buffer.read() if self._enable_zmq and self._zmq_buffer else None
-        return jpeg_bytes
+    def set_webrtc_connected(self, event):
+        """Share the publisher's connection state with the capture thread."""
+        self._webrtc_connected = event
+
+    def webrtc_wanted(self):
+        """Whether a WebRTC frame should be produced now (a client is connected)."""
+        return self._enable_webrtc and self._webrtc_connected.is_set()
+
+    def _write_webrtc_jpeg(self, jpeg_bytes):
+        """Feed WebRTC from a JPEG (decoded straight to YUV) while a client is connected."""
+        if self.webrtc_wanted():
+            self._webrtc_buffer.write(jpeg_to_yuv_frame(jpeg_bytes))
+
+    def _write_webrtc_bgr(self, bgr):
+        """Feed WebRTC from a BGR array while a client is connected."""
+        if self.webrtc_wanted():
+            self._webrtc_buffer.write(bgr_to_video_frame(bgr))
+
+    def get_jpeg_bytes(self, timeout=None):
+        """Return JPEG bytes for ZMQ, or None if disabled or unavailable.
+
+        Args:
+            timeout: None returns the latest frame immediately. A number waits up to ``timeout`` seconds for a
+                frame newer than the last one returned (frames are published on arrival).
+        """
+        if not self._enable_zmq or self._zmq_buffer is None:
+            return None
+        if timeout is None:
+            return self._zmq_buffer.read()
+        seq = self._zmq_buffer.wait_new(self._zmq_seq, timeout=timeout)
+        if seq == self._zmq_seq:
+            return None
+        self._zmq_seq = seq
+        return self._zmq_buffer.read()
+
+    def get_webrtc_frame(self, timeout=None):
+        """Wait for the next new WebRTC VideoFrame; None on timeout."""
+        if not self._enable_webrtc or self._webrtc_buffer is None:
+            return None
+        seq = self._webrtc_buffer.wait_new(self._webrtc_seq, timeout=timeout)
+        if seq == self._webrtc_seq:
+            return None
+        self._webrtc_seq = seq
+        return self._webrtc_buffer.read()
 
     def get_bgr_frame(self):
         """Return the latest BGR array, or None if disabled or unavailable."""

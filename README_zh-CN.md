@@ -280,6 +280,11 @@ teleimager-server --config /path/to/server.yaml
 
 `--streaming-config <路径>` 选择输出设置，`--no-affinity` 跳过 CPU 核心绑定，`--isaacsim` 从共享内存读取图像。TLS 证书仍默认读取 `~/.config/teleimager/cert.pem` 和 `key.pem`；客户端仍保留最近一次成功获取的配置缓存。
 
+### Isaac Sim 仿真（unitree_sim_isaaclab）
+
+`isaacsim` 类型的相机读取仿真写入共享内存的图像（`isaac_<name>_image_shm`：`head` / `head_right` 为头部双目左 / 右眼，`left` / `right` 为腕部相机）。双目相机会把头部左右眼左右拼接后发布。仿真通过 `teleimager.server.run_isaacsim_server()` 启动服务，未指定配置路径或 `$TELEIMAGER_CONFIG` 时使用包内自带的 `teleimager_server_isaacsim.yaml`（话题和端口与真机一致）。端口被占用时启动直接报错。配置应答同时包含 1.x 格式（相机话题在顶层），1.x 客户端（`teleimager.image_client.ImageClient`，如当前的 xr_teleoperate）可以继续使用。如果 `~/.config/teleimager/cert.pem` 不存在，会使用 `~/.config/xr_teleoperate/` 中的证书。
+
+
 ### 2.3 开机自启动
 
 一切验证无误后，如有需要，可安装为[开机启动服务](setup_autostart.sh)：

@@ -27,10 +27,10 @@ classifiers = [
 # system lib: `apt install libturbojpeg`. No GUI / libGL is pulled in at this level.
 dependencies = [
     "logging_mp>=0.2.2",
-    "numpy>=1.21,<2",
+    "numpy>=1.21",
     "pyyaml",
     "pyzmq",
-    "PyTurboJPEG",
+    "PyTurboJPEG>=1.5.0",
 ]
 [project.optional-dependencies]
 # CLI viewer: on-screen windows (opencv pulls in the GUI stack). Decode already in core.
@@ -76,7 +76,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # Bundle the WebRTC page logo into the wheel.
-teleimager = ["unitree_logo.svg"]
+teleimager = ["unitree_logo.svg", "teleimager_server_isaacsim.yaml"]
 
 [build-system]
 requires = ["setuptools>=77.0.3"]

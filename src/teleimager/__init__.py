@@ -1,1 +1,1 @@
-__version__ = "2.0.5+robotree.2"
+__version__ = "2.0.8+robotree.2.sim"

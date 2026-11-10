@@ -280,6 +280,11 @@ Alternatively, use `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`. `
 
 Useful flags: `--streaming-config <path>` selects streaming settings; `--no-affinity` skips CPU-core pinning; `--isaacsim` reads frames from shared memory. TLS certificates still default to `~/.config/teleimager/cert.pem` and `key.pem`, and the client retains its last successful configuration cache.
 
+### Isaac Sim simulator (unitree_sim_isaaclab)
+
+Cameras of type `isaacsim` read the images the simulator writes to shared memory (`isaac_<name>_image_shm`: `head` / `head_right` = head stereo left / right eye, `left` / `right` = wrist cameras). A binocular camera publishes the head pair side by side. The simulator starts the server with `teleimager.server.run_isaacsim_server()`, which uses the bundled `teleimager_server_isaacsim.yaml` (same topics and ports as the real robot) unless a config path or `$TELEIMAGER_CONFIG` is given. Port conflicts raise at startup. The configuration response also carries the 1.x layout (camera topics at the top level), so 1.x clients (`teleimager.image_client.ImageClient`, e.g. current xr_teleoperate) keep working. If `~/.config/teleimager/cert.pem` is missing, the certificate in `~/.config/xr_teleoperate/` is used.
+
+
 ### 2.3 Auto-start on boot
 
 Once everything is verified, you can optionally install it as a [boot service](setup_autostart.sh):

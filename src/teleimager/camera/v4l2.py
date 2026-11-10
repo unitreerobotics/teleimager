@@ -46,6 +46,12 @@ class V4L2Camera(BaseCamera):
         self._passthrough = "MJPG" in formats
         input_format = "mjpeg" if self._passthrough else "yuyv422"
 
+        # Keep the frame rate constant in low light if the control exists.
+        result = subprocess.run(["v4l2-ctl", "-d", self._video_path, "--set-ctrl=exposure_dynamic_framerate=0"],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            logger_mp.debug(f"[V4L2Camera] {cam_topic}: exposure_dynamic_framerate not supported")
+
         self.container = av.open(self._video_path, format="v4l2", options={
             "input_format": input_format,
             "video_size": f"{self._img_shape[1]}x{self._img_shape[0]}",
@@ -77,7 +83,7 @@ class V4L2Camera(BaseCamera):
             return False
 
     def _update_frame(self):
-        """Capture a packet and refresh enabled JPEG and BGR output buffers."""
+        """Capture a packet and refresh the enabled JPEG, WebRTC and BGR output buffers."""
         if self.container is None:
             return
         packet = next(self._demux)
@@ -90,16 +96,21 @@ class V4L2Camera(BaseCamera):
                 self._zmq_buffer.write(jpeg_bytes)
             if self._enable_bgr_output:
                 self._bgr_buffer.write(_turbojpeg.decode(jpeg_bytes))
+            self._write_webrtc_jpeg(jpeg_bytes)
         else:
             # YUYV requires conversion to BGR and JPEG encoding for ZMQ.
             frames = packet.decode()
             if not frames:
                 return
-            bgr_numpy = frames[0].to_ndarray(format="bgr24")
-            if self._enable_bgr_output:
-                self._bgr_buffer.write(bgr_numpy)
-            if self._enable_zmq:
-                self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
+            frame = frames[0]
+            if self.webrtc_wanted():
+                self._webrtc_buffer.write(frame)
+            if self._enable_bgr_output or self._enable_zmq:
+                bgr_numpy = frame.to_ndarray(format="bgr24")
+                if self._enable_bgr_output:
+                    self._bgr_buffer.write(bgr_numpy)
+                if self._enable_zmq:
+                    self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
 
         if not self._ready.is_set():
             self._ready.set()

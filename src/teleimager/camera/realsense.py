@@ -60,6 +60,14 @@ class RealSenseCamera(BaseCamera):
                 depth_sensor = self._device.first_depth_sensor()
                 self.g_depth_scale = depth_sensor.get_depth_scale()
 
+            # Disable auto exposure priority to avoid flickering in some RealSense cameras
+            color_sensor = self._device.first_color_sensor() if self._device is not None else None
+            if color_sensor is not None:
+                try:
+                    color_sensor.set_option(rs.option.auto_exposure_priority, 0)
+                except Exception as e:
+                    logger_mp.debug(f"[RealSenseCamera] {cam_topic}: auto_exposure_priority not supported: {e}")
+
             self.intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
             logger_mp.info(str(self))
         except Exception as e:
@@ -94,6 +102,7 @@ class RealSenseCamera(BaseCamera):
 
         if self._enable_bgr_output:
             self._bgr_buffer.write(bgr_numpy)
+        self._write_webrtc_bgr(bgr_numpy)
 
         if self._enable_zmq:
             self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))

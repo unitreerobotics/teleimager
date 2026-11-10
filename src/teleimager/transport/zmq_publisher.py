@@ -51,7 +51,10 @@ class ZMQ_PublisherThread(threading.Thread):
         self._socket = None
         self._running = True
         self._queue = queue.Queue(maxsize=1)  # Bound latency by keeping one payload.
-        self._started = threading.Event()
+        # NOTE: must not be named `_started` - that shadows threading.Thread's own "started" event, which
+        # Thread sets as soon as the thread runs, so wait_for_start() returned True even if bind() failed.
+        self._socket_ready = threading.Event()
+        self._error: Optional[BaseException] = None  # set if the socket could not be created / bound
 
     def send(self, data: Any) -> None:
         """Queue the latest byte payload, dropping an older queued message.
@@ -100,7 +103,7 @@ class ZMQ_PublisherThread(threading.Thread):
             self._socket.setsockopt(zmq.LINGER, 0)
             self._socket.bind(f"tcp://{self._host}:{self._port}")
 
-            self._started.set()
+            self._socket_ready.set()
             while self._running:
                 try:
                     # Wake periodically to observe shutdown requests.
@@ -126,6 +129,10 @@ class ZMQ_PublisherThread(threading.Thread):
 
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to initialize publisher socket: {e}")
+            if not self._socket_ready.is_set():
+                # wake up wait_for_start() so the caller can raise instead of timing out
+                self._error = e
+                self._socket_ready.set()
         finally:
             if self._socket:
                 try:
@@ -136,7 +143,7 @@ class ZMQ_PublisherThread(threading.Thread):
 
     def wait_for_start(self, timeout: float = 1.0) -> bool:
         """Wait for the PUB socket to bind and return whether it became ready."""
-        return self._started.wait(timeout=timeout)
+        return self._socket_ready.wait(timeout=timeout)
 
 
 class ZMQ_PublisherManager:
@@ -158,6 +165,12 @@ class ZMQ_PublisherManager:
             publisher_thread.start()
             if not publisher_thread.wait_for_start(timeout=5.0):
                 raise ConnectionError(f"Publisher thread failed to start for {host}:{port}")
+            if publisher_thread._error is not None:
+                publisher_thread.join(timeout=1.0)
+                raise OSError(
+                    f"Failed to bind ZMQ publisher on tcp://{host}:{port}: {publisher_thread._error}. "
+                    f"Check which process holds the port: `ss -tanp | grep :{port}`"
+                ) from publisher_thread._error
 
             return publisher_thread
         except Exception as e:
@@ -191,6 +204,14 @@ class ZMQ_PublisherManager:
                 if cls._instance is None:
                     cls._instance = cls()
         return cls._instance
+
+    def bind(self, port: int, host: str = "0.0.0.0") -> None:
+        """Create (bind) the publisher for ``host:port`` now instead of on the first publish.
+
+        Raises:
+            OSError: if the port cannot be bound (e.g. already in use).
+        """
+        self._get_publisher_thread(port, host)
 
     def publish(self, data: Any, port: int, host: str = "0.0.0.0") -> None:
         """Queue bytes for an endpoint, creating its publisher on first use.

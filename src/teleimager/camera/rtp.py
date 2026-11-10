@@ -204,15 +204,17 @@ class RtpCamera(BaseCamera):
                     self._zmq_buffer.write(buf.tobytes())
             if self._enable_bgr_output:
                 self._bgr_buffer.write(output)
+            self._write_webrtc_bgr(output)
             self._last_frame_time = time.monotonic()
             self._ready.set()
             return
 
-    def get_jpeg_bytes(self):
-        """Return buffered JPEG bytes only while the last frame is fresh."""
+    def get_jpeg_bytes(self, timeout=None):
+        """Return buffered JPEG bytes only while the last frame is fresh (see BaseCamera.get_jpeg_bytes)."""
+        jpeg = super().get_jpeg_bytes(timeout=timeout)
         if self._last_frame_time is None or time.monotonic() - self._last_frame_time >= self._receive_timeout:
             return None
-        return super().get_jpeg_bytes()
+        return jpeg
 
     def get_bgr_frame(self):
         """Return the buffered BGR array only while the last frame is fresh."""

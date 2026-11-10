@@ -78,12 +78,15 @@ class TeleImageServer:
     wait_until_stopped() waits for that request and performs cleanup.
     """
 
-    def __init__(self, server_config, enable_isaacsim=False):
+    def __init__(self, server_config, enable_isaacsim=False, legacy_config_response=None):
         """Initialize cameras, output managers, and optional App streaming.
 
         Args:
             server_config: Resolved native camera and streaming settings.
             enable_isaacsim: Use shared-memory cameras for every active topic.
+            legacy_config_response: Also answer configuration requests in the 1.x format (camera topics at the
+                top level, as read by teleimager 1.x clients such as current xr_teleoperate), in addition to the
+                2.x ``camera`` mapping. Default: on in IsaacSim mode.
         """
         webrtc.CERT_PEM_PATH = CERT_PEM_PATH
         webrtc.KEY_PEM_PATH = KEY_PEM_PATH
@@ -157,7 +160,13 @@ class TeleImageServer:
         ):
             reload_uvcvideo_module()
 
-        self._responser = ZMQ_Responser(self._server_config)
+        if legacy_config_response is None:
+            legacy_config_response = enable_isaacsim
+        response = self._server_config
+        if legacy_config_response:
+            # 1.x clients read config["head_camera"]...; 2.x clients read config["camera"]["head_camera"]
+            response = {**self._server_config["camera"], **self._server_config}
+        self._responser = ZMQ_Responser(response)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
         self._publisher_threads = []  # Retain workers for bounded cleanup joins.
@@ -257,77 +266,50 @@ class TeleImageServer:
             if not isinstance(camera, RtpCamera) and (self._app_stream_layout != "stereo_quad" or cam_topic not in self._app_stream_topics):
                 self._stop_event.set()
 
+    def _soft_camera(self, cam_topic: str, camera: BaseCamera) -> bool:
+        """Whether a missing frame of this camera is tolerated (RTP sources, stereo_quad App stream cameras)."""
+        return isinstance(camera, RtpCamera) or (
+            self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics)
+
     def _zmq_pub(self, cam_topic: str, camera: BaseCamera):
-        """Publish buffered JPEG bytes at the camera FPS until shutdown."""
+        """Publish each new JPEG frame as soon as the capture thread produces it."""
         try:
-            interval = 1.0 / camera.get_fps()
-            next_frame_time = time.monotonic()
-
+            no_frame_warned = False
             while not self._stop_event.is_set():
-                if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                    if time.monotonic() - self._camera_frame_times.get(cam_topic, float("-inf")) >= 2.0:
-                        self._stop_event.wait(interval)
-                        continue
-                jpeg_bytes = camera.get_jpeg_bytes()
-                if jpeg_bytes is not None:
-                    self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_zmq_port())
-                else:
-                    if isinstance(camera, RtpCamera):
-                        self._stop_event.wait(interval)
-                        continue
-                    logger_mp.warning(f"[Image Server] {cam_topic} returned no frame.")
-                    if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                        self._stop_event.wait(interval)
-                        continue
-                    self._stop_event.set()
-                    break
-
-                next_frame_time += interval
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
+                jpeg_bytes = camera.get_jpeg_bytes(timeout=0.5)
+                if jpeg_bytes is None:
+                    if not no_frame_warned and not self._soft_camera(cam_topic, camera):
+                        logger_mp.warning(f"[Teleimager] {cam_topic} produced no new frame for 0.5s.")
+                        no_frame_warned = True
+                    continue
+                no_frame_warned = False
+                self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_zmq_port())
         except Exception as e:
-            logger_mp.error(f"[Image Server] Failed to publish zmq frame from {cam_topic} camera.")
-            if not isinstance(camera, RtpCamera) and (self._app_stream_layout != "stereo_quad" or cam_topic not in self._app_stream_topics):
+            logger_mp.error(f"[Teleimager] Failed to publish zmq frame from {cam_topic} camera: {e}")
+            if not self._soft_camera(cam_topic, camera):
                 self._stop_event.set()
 
     def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
-        """Submit buffered BGR arrays to WebRTC at the camera FPS."""
+        """Publish each new WebRTC frame while a client is connected (frames are produced only then)."""
         try:
-            interval = 1.0 / camera.get_fps()
             webrtc_codec = camera.get_webrtc_codec()
-            next_frame_time = time.monotonic()
+            connected = self._webrtc_publisher_manager.connected_event(camera.get_webrtc_port(), codec_pref=webrtc_codec)
+            camera.set_webrtc_connected(connected)
+            no_frame_warned = False
             while not self._stop_event.is_set():
-                if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                    if time.monotonic() - self._camera_frame_times.get(cam_topic, float("-inf")) >= 2.0:
-                        self._stop_event.wait(interval)
-                        continue
-                bgr_frame = camera.get_bgr_frame()
-
-                if bgr_frame is not None:
-                    self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
-                else:
-                    if isinstance(camera, RtpCamera):
-                        self._stop_event.wait(interval)
-                        continue
-                    logger_mp.info(f"[Image Server] {cam_topic} returned no frame.")
-                    if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                        self._stop_event.wait(interval)
-                        continue
-                    self._stop_event.set()
-                    break
-
-                next_frame_time += interval
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
+                if not connected.is_set():
+                    connected.wait(0.1)
+                    continue
+                frame = camera.get_webrtc_frame(timeout=0.5)
+                if frame is not None:
+                    no_frame_warned = False
+                    self._webrtc_publisher_manager.publish(frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
+                elif connected.is_set() and not no_frame_warned and not self._soft_camera(cam_topic, camera):
+                    logger_mp.warning(f"[Teleimager] {cam_topic} produced no new frame for 0.5s.")
+                    no_frame_warned = True
         except Exception as e:
-            logger_mp.error(f"[Image Server] Failed to publish rtc frame from {cam_topic} camera.")
-            if not isinstance(camera, RtpCamera) and (self._app_stream_layout != "stereo_quad" or cam_topic not in self._app_stream_topics):
+            logger_mp.error(f"[Teleimager] Failed to publish rtc frame from {cam_topic} camera: {e}")
+            if not self._soft_camera(cam_topic, camera):
                 self._stop_event.set()
 
     def _app_stream_pub(self):
@@ -519,6 +501,22 @@ class TeleImageServer:
         logger_mp.info("[Image Server] Clean up completed. Server stopped.")
 
     # Public API.
+    def bind_ports(self):
+        """Bind every ZMQ / WebRTC publisher port now (they are otherwise bound on first use), so that a port
+        conflict fails at startup instead of being logged by a publisher thread later.
+
+        Raises:
+            OSError: if a port cannot be bound (e.g. already in use).
+        """
+        for cam_topic, camera in self._cameras.items():
+            if camera is None:
+                continue
+            if camera.enable_zmq():
+                self._zmq_publisher_manager.bind(camera.get_zmq_port())
+            if camera.enable_webrtc():
+                self._webrtc_publisher_manager.bind(camera.get_webrtc_port(), codec_pref=camera.get_webrtc_codec())
+            logger_mp.info(f"[Teleimager] {cam_topic} publisher ports bound.")
+
     def start(self):
         """Launch capture workers, check readiness, and start enabled outputs.
 
@@ -590,11 +588,49 @@ def signal_handler(server, signum, frame):
     server.stop()
 
 
-def run_isaacsim_server(config_path=None, *, streaming_config=None):
-    """Load settings and return a started server using shared-memory cameras."""
+def _use_legacy_certificates():
+    """Fall back to the certificate of xr_teleoperate / teleimager 1.x (~/.config/xr_teleoperate) when none is
+    in the teleimager config dir, so existing simulator setups keep working."""
+    global CERT_PEM_PATH, KEY_PEM_PATH
+    if CERT_PEM_PATH.exists() and KEY_PEM_PATH.exists():
+        return
+    legacy = Path.home() / ".config" / "xr_teleoperate"
+    if (legacy / "cert.pem").exists() and (legacy / "key.pem").exists():
+        CERT_PEM_PATH, KEY_PEM_PATH = legacy / "cert.pem", legacy / "key.pem"
+        logger_mp.info(f"[Teleimager] Using the WebRTC certificate in {legacy}")
+
+
+def run_isaacsim_server(config_path=None, *, streaming_config=None, bind_ports=True):
+    """Start a server whose cameras read the Isaac Sim simulator's shared-memory images (unitree_sim_isaaclab).
+
+    Args:
+        config_path: server YAML; default: $TELEIMAGER_CONFIG, else the bundled teleimager_server_isaacsim.yaml.
+        streaming_config: optional streaming output settings (see streaming_config.yaml).
+        bind_ports: bind every publisher port before starting, so a port conflict raises here.
+
+    Returns:
+        The started TeleImageServer.
+
+    Raises:
+        OSError: a port is already in use.
+        RuntimeError: the server could not start.
+    """
+    if config_path is None and not os.environ.get("TELEIMAGER_CONFIG"):
+        from importlib import resources
+
+        config_path = str(resources.files("teleimager").joinpath("teleimager_server_isaacsim.yaml"))
+    _use_legacy_certificates()
     server_config = load_server_config(config_path, streaming_config=streaming_config)
     server = TeleImageServer(server_config, enable_isaacsim=True)
+    if bind_ports:
+        try:
+            server.bind_ports()
+        except Exception:
+            server._clean_up()
+            raise
     server.start()
+    if server._stop_event.is_set():
+        raise RuntimeError("[Teleimager] IsaacSim image server failed to start (see the log above)")
     return server
 
 
