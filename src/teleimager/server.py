@@ -48,6 +48,8 @@ logger_mp.setLevel(logging_mp.INFO)
 CONFIG_DIR = webrtc.CONFIG_DIR
 CERT_PEM_PATH = webrtc.CERT_PEM_PATH
 KEY_PEM_PATH = webrtc.KEY_PEM_PATH
+# A camera whose last capture is this old is not live; its outputs skip it.
+STALE_FRAME_AGE = 2.0  # s
 
 
 def load_server_config(cli_path=None, *, streaming_config=None):
@@ -189,27 +191,16 @@ class TeleImageServer:
                         logger_mp.error(f"[Teleimager] Unknown camera type {cam_type} for {cam_topic}, skipping...")
                         continue
                 except Exception as exc:
-                    if cam_type == "rtp":
-                        raise
-                    if self._app_stream_layout != "stereo_quad" or cam_topic not in self._app_stream_topics:
-                        raise
+                    # One camera out of order does not stop the others: it stays
+                    # out, every output skips it, and the health check names it.
                     self._cameras[cam_topic] = None
-                    logger_mp.warning(f"[App Stream] {cam_topic} initialization failed: {exc}; using nocarema tile.")
-
-            for head_topic in ("head_mono_camera", "head_stereo_camera"):
-                if (
-                    self._server_config["camera"].get(head_topic, {}).get("enable_zmq", False)
-                    and self._cameras.get(head_topic) is None
-                ):
-                    raise RuntimeError(f"Required ZMQ {head_topic} failed to initialize.")
+                    logger_mp.error(f"[Image Server] {cam_topic} unavailable: {exc}; the other cameras keep running.")
 
             for camera_topic in self._app_stream_topics:
                 camera = self._cameras.get(camera_topic)
                 if camera is None:
-                    if self._app_stream_layout == "stereo_quad":
-                        logger_mp.warning(f"[App Stream] {camera_topic} unavailable; using nocarema tile.")
-                        continue
-                    raise ValueError(f"App stream camera topic {camera_topic!r} is not available.")
+                    logger_mp.warning(f"[App Stream] {camera_topic} unavailable; using nocarema tile.")
+                    continue
                 camera.enable_bgr_output()
         except Exception:
             logger_mp.error("[Teleimager] Initialization failed", exc_info=True)
@@ -234,15 +225,11 @@ class TeleImageServer:
                     self._camera_frame_times[cam_topic] = time.monotonic()
                 except Exception as e:
                     logger_mp.error(f"[Image Server] Error updating frame for {cam_topic} camera: {e}")
-                    if isinstance(camera, RtpCamera):
-                        self._camera_frame_times.pop(cam_topic, None)
-                        if isinstance(e, TimeoutError):
-                            continue
-                        break
-                    if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                        self._camera_frame_times.pop(cam_topic, None)
-                        break
-                    self._stop_event.set()
+                    self._camera_frame_times.pop(cam_topic, None)
+                    if isinstance(camera, RtpCamera) and isinstance(e, TimeoutError):
+                        continue
+                    # This camera stops here; the others keep serving.
+                    logger_mp.error(f"[Image Server] {cam_topic} stopped; the other cameras keep running.")
                     break
                 if not interval:
                     continue
@@ -254,8 +241,7 @@ class TeleImageServer:
                     next_frame_time = time.monotonic()
         except Exception as e:
             logger_mp.error(f"[Image Server] Failed to update frames for {cam_topic} camera: {e}")
-            if not isinstance(camera, RtpCamera) and (self._app_stream_layout != "stereo_quad" or cam_topic not in self._app_stream_topics):
-                self._stop_event.set()
+            logger_mp.error(f"[Image Server] {cam_topic} stopped; the other cameras keep running.")
 
     def _zmq_pub(self, cam_topic: str, camera: BaseCamera):
         """Publish buffered JPEG bytes at the camera FPS until shutdown."""
@@ -264,23 +250,20 @@ class TeleImageServer:
             next_frame_time = time.monotonic()
 
             while not self._stop_event.is_set():
-                if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                    if time.monotonic() - self._camera_frame_times.get(cam_topic, float("-inf")) >= 2.0:
-                        self._stop_event.wait(interval)
-                        continue
+                # The buffers keep a stopped camera's last frame; never send it
+                # as if it were live.
+                if time.monotonic() - self._camera_frame_times.get(cam_topic, float("-inf")) >= STALE_FRAME_AGE:
+                    self._stop_event.wait(interval)
+                    continue
                 jpeg_bytes = camera.get_jpeg_bytes()
                 if jpeg_bytes is not None:
                     self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_zmq_port())
                 else:
-                    if isinstance(camera, RtpCamera):
-                        self._stop_event.wait(interval)
-                        continue
-                    logger_mp.warning(f"[Image Server] {cam_topic} returned no frame.")
-                    if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                        self._stop_event.wait(interval)
-                        continue
-                    self._stop_event.set()
-                    break
+                    # No frame yet, or this camera stopped: skip it and keep
+                    # publishing the others.
+                    logger_mp.debug(f"[Image Server] {cam_topic} returned no frame.")
+                    self._stop_event.wait(interval)
+                    continue
 
                 next_frame_time += interval
                 sleep_time = next_frame_time - time.monotonic()
@@ -289,9 +272,7 @@ class TeleImageServer:
                 else:
                     next_frame_time = time.monotonic()
         except Exception as e:
-            logger_mp.error(f"[Image Server] Failed to publish zmq frame from {cam_topic} camera.")
-            if not isinstance(camera, RtpCamera) and (self._app_stream_layout != "stereo_quad" or cam_topic not in self._app_stream_topics):
-                self._stop_event.set()
+            logger_mp.error(f"[Image Server] Failed to publish zmq frame from {cam_topic} camera: {e}")
 
     def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
         """Submit buffered BGR arrays to WebRTC at the camera FPS."""
@@ -300,24 +281,21 @@ class TeleImageServer:
             webrtc_codec = camera.get_webrtc_codec()
             next_frame_time = time.monotonic()
             while not self._stop_event.is_set():
-                if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                    if time.monotonic() - self._camera_frame_times.get(cam_topic, float("-inf")) >= 2.0:
-                        self._stop_event.wait(interval)
-                        continue
+                # The buffers keep a stopped camera's last frame; never send it
+                # as if it were live.
+                if time.monotonic() - self._camera_frame_times.get(cam_topic, float("-inf")) >= STALE_FRAME_AGE:
+                    self._stop_event.wait(interval)
+                    continue
                 bgr_frame = camera.get_bgr_frame()
 
                 if bgr_frame is not None:
                     self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
                 else:
-                    if isinstance(camera, RtpCamera):
-                        self._stop_event.wait(interval)
-                        continue
-                    logger_mp.info(f"[Image Server] {cam_topic} returned no frame.")
-                    if self._app_stream_layout == "stereo_quad" and cam_topic in self._app_stream_topics:
-                        self._stop_event.wait(interval)
-                        continue
-                    self._stop_event.set()
-                    break
+                    # No frame yet, or this camera stopped: skip it and keep
+                    # publishing the others.
+                    logger_mp.debug(f"[Image Server] {cam_topic} returned no frame.")
+                    self._stop_event.wait(interval)
+                    continue
 
                 next_frame_time += interval
                 sleep_time = next_frame_time - time.monotonic()
@@ -326,9 +304,7 @@ class TeleImageServer:
                 else:
                     next_frame_time = time.monotonic()
         except Exception as e:
-            logger_mp.error(f"[Image Server] Failed to publish rtc frame from {cam_topic} camera.")
-            if not isinstance(camera, RtpCamera) and (self._app_stream_layout != "stereo_quad" or cam_topic not in self._app_stream_topics):
-                self._stop_event.set()
+            logger_mp.error(f"[Image Server] Failed to publish rtc frame from {cam_topic} camera: {e}")
 
     def _app_stream_pub(self):
         """Compose and send App frames for the active request's geometry.
@@ -527,12 +503,7 @@ class TeleImageServer:
         """
         for camera_topic, camera in self._cameras.items():
             if camera is None:
-                if self._app_stream_layout == "stereo_quad" and camera_topic in self._app_stream_topics:
-                    continue
-                logger_mp.error(f"[Image Server] Camera {camera_topic} failed to initialize previously, cannot start.")
-                self._stop_event.set()
-                self._clean_up()
-                return
+                continue
             t = threading.Thread(target=self._update_frames, args=(camera_topic, camera), daemon=True)
             t.start()
             self._publisher_threads.append(t)
@@ -540,7 +511,7 @@ class TeleImageServer:
             time.sleep(2.0)  # Allow the simulator to populate shared memory.
 
         for camera_topic, camera in self._cameras.items():
-            if isinstance(camera, RtpCamera) or (self._app_stream_layout == "stereo_quad" and camera_topic in self._app_stream_topics):
+            if camera is None or isinstance(camera, RtpCamera):
                 continue
             # Allow a longer readiness window when forcing simulator backends.
             if self._enable_isaacsim:
@@ -549,10 +520,10 @@ class TeleImageServer:
                 timeout = 5.0
             ready = camera.wait_until_ready(timeout=timeout)
             if not ready:
-                logger_mp.error(f"[Image Server] {camera_topic} ready timeout after {timeout}s.")
-                self._stop_event.set()
-                self._clean_up()
-                return
+                # A camera that never gives a first frame stays out like one
+                # that failed to open; the others keep serving.
+                logger_mp.error(f"[Image Server] {camera_topic} ready timeout after {timeout}s; the other cameras keep running.")
+                continue
             logger_mp.info(f"[Image Server] {camera_topic} is ready.")
 
         if self._app_stream is not None:
