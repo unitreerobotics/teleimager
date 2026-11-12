@@ -1020,7 +1020,7 @@ class CameraFinder:
         if self.enable_uvc or self.enable_v4l2 or self.enable_gstreamer:
             reload_uvcvideo_module()
 
-        rs_cards = RealSenseCamera.scan() if self.enable_realsense else []
+        rs_cards = RealSenseCamera.scan(all_config_modes=True) if self.enable_realsense else []
         rs_video_paths = set(RealSenseCamera._list_video_paths())
         rs_depth_ir_paths = set(RealSenseCamera._list_depth_ir_paths())
 
@@ -1069,23 +1069,32 @@ class CameraFinder:
         for c in cards:
             sn = c.get("serial_number") or "(none)"
             fields = [self._leaf("serial_number : %s" % sn)]
-            modes = c.get("modes") or []
-            if modes:
-                # group by stream (Depth / Color / Infrared ...), then list each mode
-                from collections import defaultdict
-                by_stream = defaultdict(list)
-                for m in modes:
-                    by_stream[m["stream"]].append(m)
-                stream_kids = []
-                for stream in sorted(by_stream):
-                    mode_kids = []
-                    for m in sorted(by_stream[stream], key=lambda x: (x["format"], x["width"], x["height"])):
-                        fps_str = ", ".join(str(f) for f in m["fps"])
-                        mode_kids.append(self._leaf("%-6s %dx%d @ [%s]" % (m["format"], m["width"], m["height"], fps_str)))
-                    stream_kids.append((stream, mode_kids))
-                fields.append(("modes  [format  width x height @ fps]:", stream_kids))
+            by_config = c.get("modes_by_config_mode")
+            if by_config:
+                # Dual-RGB camera: each sensors_config_mode exposes different color
+                # streams, so list them under the `binocular` value that selects them.
+                labels = {1: "binocular: true   (dual RGB, 2C)", 0: "binocular: false  (single RGB, 3C)"}
+                config_kids = [(labels[m], self._group_by_stream(by_config[m])) for m in sorted(by_config, reverse=True)]
+                fields.append(("modes  [format  width x height @ fps]:", config_kids))
+            elif c.get("modes"):
+                fields.append(("modes  [format  width x height @ fps]:", self._group_by_stream(c["modes"])))
             cams.append(("📷 RealSense", fields))
         return ("RealSenseCamera (%d found)   [type: realsense]" % len(cams), cams)
+
+    def _group_by_stream(self, modes):
+        # group by stream (Color / Color 1 / Color 2 ...), then list each mode
+        from collections import defaultdict
+        by_stream = defaultdict(list)
+        for m in modes:
+            by_stream[m["stream"]].append(m)
+        stream_kids = []
+        for stream in sorted(by_stream):
+            mode_kids = []
+            for m in sorted(by_stream[stream], key=lambda x: (x["format"], x["width"], x["height"])):
+                fps_str = ", ".join(str(f) for f in m["fps"])
+                mode_kids.append(self._leaf("%-6s %dx%d @ [%s]" % (m["format"], m["width"], m["height"], fps_str)))
+            stream_kids.append((stream, mode_kids))
+        return stream_kids
 
     def _report_uvc(self, cards):
         cams = []
@@ -1294,16 +1303,30 @@ class RealSenseCamera(BaseCamera):
         rs = self.get_realsense_module()
         super().__init__(cam_topic, server_cfg)
         self._serial_number = serial_number
+        self._binocular = server_cfg.get("binocular", False)
         self._enable_depth = server_cfg.get("enable_depth", False)
+        if self._binocular and self._enable_depth:
+            logger_mp.warning(f"[RealSenseCamera] {cam_topic}: enable_depth is not supported with binocular, ignored")
+            self._enable_depth = False
         self._latest_depth = None
         try:
+            # Dual-RGB cameras: binocular streams the 2C configuration, monocular the 3C one
+            if self._binocular and self._get_config_mode(self._serial_number) is None:
+                raise RuntimeError("binocular requires a dual-RGB RealSense camera")
+            self._set_config_mode(self._serial_number, 1 if self._binocular else 0)
+
             align_to = rs.stream.color
             self.align = rs.align(align_to)
             self.pipeline = rs.pipeline()
             config = rs.config()
             config.enable_device(self._serial_number)
 
-            config.enable_stream(rs.stream.color, self._img_shape[1], self._img_shape[0], rs.format.bgr8, self._fps)
+            if self._binocular:
+                # image_shape is the side-by-side composite, so each eye is half as wide
+                for index in (1, 2):
+                    config.enable_stream(rs.stream.color, index, self._img_shape[1] // 2, self._img_shape[0], rs.format.bgr8, self._fps)
+            else:
+                config.enable_stream(rs.stream.color, self._img_shape[1], self._img_shape[0], rs.format.bgr8, self._fps)
             if self._enable_depth:
                 config.enable_stream(rs.stream.depth, self._img_shape[1], self._img_shape[0], rs.format.z16, self._fps)
 
@@ -1312,7 +1335,8 @@ class RealSenseCamera(BaseCamera):
             if self._device is None:
                 logger_mp.error('[Teleimager] pipe_profile.get_device() is None .')
             # Disable auto exposure priority to avoid flickering in some RealSense cameras
-            color_sensor = self._device.first_color_sensor() if self._device is not None else None
+            # (a dual-RGB camera in 2C mode has no color sensor)
+            color_sensor = self._device.first_color_sensor() if self._device is not None and not self._binocular else None
             if color_sensor is not None:
                 try:
                     color_sensor.set_option(rs.option.auto_exposure_priority, 0)
@@ -1337,23 +1361,30 @@ class RealSenseCamera(BaseCamera):
     def __str__(self):
         zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        return f" 📷 Camera {self._cam_topic!r:<22} realsense, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
+        kind = "realsense binocular" if self._binocular else "realsense"
+        return f" 📷 Camera {self._cam_topic!r:<22} {kind}, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
 
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames()
-        aligned_frames = self.align.process(frames)
-        color_frame = aligned_frames.get_color_frame()
-        if not color_frame:
-            return None
+        if self._binocular:
+            left, right = frames.get_color_frame(1), frames.get_color_frame(2)
+            if not left or not right:
+                return None
+            bgr_numpy = np.hstack((np.asanyarray(left.get_data()), np.asanyarray(right.get_data())))
+        else:
+            aligned_frames = self.align.process(frames)
+            color_frame = aligned_frames.get_color_frame()
+            if not color_frame:
+                return None
 
-        if self._enable_depth:   
-            depth_frame = aligned_frames.get_depth_frame()
-            if depth_frame:
-                self._latest_depth = np.asanyarray(depth_frame.get_data())
-            else:
-                self._latest_depth = None
+            if self._enable_depth:
+                depth_frame = aligned_frames.get_depth_frame()
+                if depth_frame:
+                    self._latest_depth = np.asanyarray(depth_frame.get_data())
+                else:
+                    self._latest_depth = None
 
-        bgr_numpy = np.asanyarray(color_frame.get_data())
+            bgr_numpy = np.asanyarray(color_frame.get_data())
 
         if self._webrtc_connected.is_set():
             self._webrtc_buffer.write(av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24"))
@@ -1403,6 +1434,53 @@ class RealSenseCamera(BaseCamera):
                 )
             logger_mp.error(msg)
             sys.exit(1)
+
+    @classmethod
+    def _find_device(cls, serial_number):
+        rs = cls.get_realsense_module()
+        for dev in rs.context().query_devices():
+            try:
+                if dev.get_info(rs.camera_info.serial_number) == serial_number:
+                    return dev
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def _get_config_mode(cls, serial_number):
+        """Dual-RGB cameras: sensors_config_mode (0 = 3C single RGB, 1 = 2C dual RGB); None for other cameras."""
+        rs = cls.get_realsense_module()
+        try:
+            return int(cls._find_device(serial_number).first_depth_sensor().get_option(rs.option.sensors_config_mode))
+        except Exception:
+            return None
+
+    @classmethod
+    def _set_config_mode(cls, serial_number, mode):
+        """
+        Switch a dual-RGB camera to sensors_config_mode `mode` (no-op for other cameras or when
+        already set). The mode persists on the device and takes effect on a hardware
+        reset, which re-enumerates the USB device.
+        """
+        current = cls._get_config_mode(serial_number)
+        if current is None or current == mode:
+            return
+        rs = cls.get_realsense_module()
+        dev = cls._find_device(serial_number)
+        logger_mp.info(f"[RealSenseCamera] {serial_number}: switching sensors_config_mode {current} -> {mode}, re-enumerating...")
+        dev.first_depth_sensor().set_option(rs.option.sensors_config_mode, mode)
+        dev.hardware_reset()
+        # The old device keeps answering for a moment after the reset (already reporting
+        # the new mode), and opening it then fails with "Couldn't resolve requests":
+        # wait for it to drop off the bus, then for the re-enumerated one to come back.
+        deadline = time.monotonic() + 5
+        while cls._find_device(serial_number) is not None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        deadline = time.monotonic() + 30
+        while cls._find_device(serial_number) is None:
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"{serial_number} did not come back after the sensors_config_mode switch")
+            time.sleep(0.2)
 
     @classmethod
     def _list_serial_numbers(cls):
@@ -1494,13 +1572,30 @@ class RealSenseCamera(BaseCamera):
         return cls._classify_video_nodes()[1]
 
     @classmethod
-    def scan(cls):
+    def scan(cls, all_config_modes=False):
+        """
+        all_config_modes (camera-finder report only): a dual-RGB camera exposes different color
+        streams in each sensors_config_mode, so it is briefly switched to the other
+        mode to list those too, then switched back. This re-enumerates the device,
+        so do not run it while another process is streaming from the camera.
+        """
         serials = cls._list_serial_numbers()
         video_paths = cls._list_video_paths()
         cards = []
         for sn in serials:
-            cards.append({"type": "realsense", "serial_number": sn,
-                          "video_paths": video_paths, "modes": cls._list_modes(sn)})
+            card = {"type": "realsense", "serial_number": sn,
+                    "video_paths": video_paths, "modes": cls._list_modes(sn)}
+            mode = cls._get_config_mode(sn) if all_config_modes else None
+            if mode is not None:
+                card["modes_by_config_mode"] = {mode: card["modes"]}
+                try:
+                    cls._set_config_mode(sn, 1 - mode)
+                    card["modes_by_config_mode"][1 - mode] = cls._list_modes(sn)
+                except Exception as e:
+                    logger_mp.warning(f"[RealSenseCamera] {sn}: cannot list sensors_config_mode {1 - mode} modes: {e}")
+                finally:
+                    cls._set_config_mode(sn, mode)
+            cards.append(card)
         if not serials and video_paths:
             cards.append({"type": "realsense", "serial_number": None,
                           "video_paths": video_paths, "modes": []})
@@ -1511,27 +1606,20 @@ class RealSenseCamera(BaseCamera):
         """
         Color stream profiles the given RealSense exposes, via the pyrealsense2
         SDK. Returns a list of {"stream", "format", "width", "height", "fps"}
-        dicts, one per (format, resolution) with its fps values collapsed.
-        Only the Color (RGB) stream is reported; depth / IR / motion streams
-        are handled by the realsense driver, not surfaced here.
+        dicts, one per (stream, format, resolution) with its fps values collapsed.
+        Only color streams are reported ("Color", or "Color 1" / "Color 2" in
+        dual-RGB mode); depth / IR / motion streams are handled by the
+        realsense driver, not surfaced here.
         """
         rs = cls.get_realsense_module()
-        ctx = rs.context()
-        dev = None
-        for d in ctx.query_devices():
-            try:
-                if d.get_info(rs.camera_info.serial_number) == serial_number:
-                    dev = d
-                    break
-            except Exception:
-                continue
+        dev = cls._find_device(serial_number)
         if dev is None:
             return []
         grouped = {}  # (stream, format, w, h) -> set(fps)
         for sensor in dev.query_sensors():
             for p in sensor.get_stream_profiles():
                 try:
-                    if p.stream_name() != "Color":
+                    if p.stream_type() != rs.stream.color:
                         continue
                     vp = p.as_video_stream_profile()
                     key = (p.stream_name(), str(p.format()).split(".")[-1],
