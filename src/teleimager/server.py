@@ -1509,29 +1509,14 @@ class RealSenseCamera(BaseCamera):
             except Exception:
                 return None
 
-        def _parent_usb_device_sysdir(video_sysdir):
-            d = (Path(video_sysdir) / "device").resolve()
-            for _ in range(10):
-                if not d.is_dir():
-                    break
-                id_vendor = _read_text(d / "idVendor")
-                id_product = _read_text(d / "idProduct")
-                if id_vendor and id_product:
-                    return str(d)
-                if d.parent == d:
-                    break
-                d = d.parent
-            return None
-
         ports = []
         for devnode in sorted(glob.glob("/dev/video*")):
             sysdir = Path("/sys/class/video4linux") / Path(devnode).name
             name = _read_text(sysdir / "name")
-            usb_dir = _parent_usb_device_sysdir(sysdir)
-            vendor_id = _read_text(Path(usb_dir) / "idVendor") if usb_dir else None
 
-            # Match RealSense by name and Intel vendor ID
-            if name and "realsense" in name.lower() and (vendor_id or "").lower() in ("8086", "32902"):
+            # Match RealSense by its USB product name; the vendor ID varies across
+            # OEM / prototype units, so it must not be part of the match.
+            if name and "realsense" in name.lower():
                 ports.append(devnode)
 
         return ports
