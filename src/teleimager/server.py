@@ -1073,26 +1073,32 @@ class CameraFinder:
             if by_config:
                 # Dual-RGB camera: each sensors_config_mode exposes different color
                 # streams, so list them under the `binocular` value that selects them.
+                # binocular streams both eyes side by side, so the per-eye resolution
+                # maps to image_shape [height, 2 x width].
                 labels = {1: "binocular: true   (dual RGB, 2C)", 0: "binocular: false  (single RGB, 3C)"}
-                config_kids = [(labels[m], self._group_by_stream(by_config[m])) for m in sorted(by_config, reverse=True)]
+                config_kids = [(labels[m], self._group_by_stream(by_config[m], composite=(m == 1)))
+                               for m in sorted(by_config, reverse=True)]
                 fields.append(("modes  [format  width x height @ fps]:", config_kids))
             elif c.get("modes"):
                 fields.append(("modes  [format  width x height @ fps]:", self._group_by_stream(c["modes"])))
             cams.append(("📷 RealSense", fields))
         return ("RealSenseCamera (%d found)   [type: realsense]" % len(cams), cams)
 
-    def _group_by_stream(self, modes):
+    def _group_by_stream(self, modes, composite=False):
         # group by stream (Color / Color 1 / Color 2 ...), then list each mode
         from collections import defaultdict
         by_stream = defaultdict(list)
-        for m in modes:
-            by_stream[m["stream"]].append(m)
+        for mode in modes:
+            by_stream[mode["stream"]].append(mode)
         stream_kids = []
         for stream in sorted(by_stream):
             mode_kids = []
-            for m in sorted(by_stream[stream], key=lambda x: (x["format"], x["width"], x["height"])):
-                fps_str = ", ".join(str(f) for f in m["fps"])
-                mode_kids.append(self._leaf("%-6s %dx%d @ [%s]" % (m["format"], m["width"], m["height"], fps_str)))
+            for mode in sorted(by_stream[stream], key=lambda x: (x["format"], x["width"], x["height"])):
+                fps_str = ", ".join(str(f) for f in mode["fps"])
+                text = "%-6s %dx%d @ [%s]" % (mode["format"], mode["width"], mode["height"], fps_str)
+                if composite:
+                    text += "   -> image_shape [%d, %d]" % (mode["height"], mode["width"] * 2)
+                mode_kids.append(self._leaf(text))
             stream_kids.append((stream, mode_kids))
         return stream_kids
 
