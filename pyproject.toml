@@ -54,10 +54,12 @@ server = [
 # execute: pip install -e ".[uvc]"  /  ".[realsense]"  /  ".[all]"
 uvc = ["teleimager[server]", "pupil-labs-uvc"]
 realsense = ["teleimager[server]", "pyrealsense2"]
+# Depth stream over ZMQ (realsense only): zstd-compressed z16 with a small header.
+depth = ["zstandard>=0.21"]
 # gstreamer has no pip dep: PyGObject must match the interpreter running teleimager
 # (conda: conda-forge pygobject; otherwise: apt python3-gi), plus the system GStreamer
 # typelibs and plugins.
-all = ["teleimager[viewer,server,uvc,realsense]"]
+all = ["teleimager[viewer,server,uvc,realsense,depth]"]
 
 [project.urls]
 Homepage = "https://github.com/unitreerobotics/teleimager"

@@ -46,7 +46,7 @@ import subprocess
 import tempfile
 import platform
 from . import __version__
-from .client import TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responser
+from .client import DepthPacket, TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responser
 # Shared JPEG codec (libturbojpeg): encode(BGR)->jpeg bytes, decode(jpeg)->BGR.
 from turbojpeg import TurboJPEG
 _turbojpeg = TurboJPEG()
@@ -1217,13 +1217,26 @@ class BaseCamera:
         self._img_shape = server_cfg.get("image_shape", None) # (H, W)
         self._fps = server_cfg.get("fps", 30)
 
-        self._enable_zmq = server_cfg.get("enable_zmq", False)
-        self._zmq_port = server_cfg.get("zmq_port", None)
+        # Color stream over ZMQ
+        self._enable_zmq = server_cfg.get("enable_color_zmq", False)
+        self._zmq_port = server_cfg.get("color_zmq_port", None)
         if self._enable_zmq:
             self._zmq_buffer = TripleRingBuffer()
         else:
             self._zmq_buffer = None
         self._zmq_seq = 0
+
+        # Depth stream over ZMQ (realsense only): enable_depth_zmq captures the
+        # stream, depth_zmq_port publishes it on a separate port.
+        self._enable_depth_zmq = server_cfg.get("enable_depth_zmq", False)
+        self._depth_zmq_port = server_cfg.get("depth_zmq_port", None)
+        if self._enable_depth_zmq:
+            if self._depth_zmq_port is None:
+                raise ValueError(f"[Teleimager] {cam_topic}: enable_depth_zmq requires depth_zmq_port")
+            if not DepthPacket.available:
+                raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
+        self._depth_buffer = TripleRingBuffer() if self._enable_depth_zmq else None
+        self._depth_seq = 0
 
         self._enable_webrtc = server_cfg.get("enable_webrtc", False)
         self._webrtc_port = server_cfg.get("webrtc_port", None)
@@ -1269,6 +1282,25 @@ class BaseCamera:
         self._zmq_seq = seq
         return self._zmq_buffer.read()
 
+    def get_depth_message(self, timeout=None):
+        """Wait for the next depth frame; returns header + zstd payload bytes, or None."""
+        if self._depth_buffer is None:
+            return None
+        seq = self._depth_buffer.wait_new(self._depth_seq, timeout=timeout)
+        if seq == self._depth_seq:
+            return None
+        self._depth_seq = seq
+        item = self._depth_buffer.read()
+        if item is None:
+            return None
+        return DepthPacket(*item).encode()
+
+    def get_depth_zmq_port(self):
+        return self._depth_zmq_port
+
+    def enable_depth_zmq(self):
+        return self._enable_depth_zmq
+
     def get_webrtc_frame(self, timeout=None):
         """Wait for the next new WebRTC frame; None on timeout."""
         if not self._enable_webrtc or self._webrtc_buffer is None:
@@ -1310,10 +1342,6 @@ class RealSenseCamera(BaseCamera):
         super().__init__(cam_topic, server_cfg)
         self._serial_number = serial_number
         self._binocular = server_cfg.get("binocular", False)
-        self._enable_depth = server_cfg.get("enable_depth", False)
-        if self._binocular and self._enable_depth:
-            logger_mp.warning(f"[RealSenseCamera] {cam_topic}: enable_depth is not supported with binocular, ignored")
-            self._enable_depth = False
         self._latest_depth = None
         try:
             # Dual-RGB cameras: binocular streams the 2C configuration, monocular the 3C one
@@ -1333,10 +1361,17 @@ class RealSenseCamera(BaseCamera):
                     config.enable_stream(rs.stream.color, index, self._img_shape[1] // 2, self._img_shape[0], rs.format.bgr8, self._fps)
             else:
                 config.enable_stream(rs.stream.color, self._img_shape[1], self._img_shape[0], rs.format.bgr8, self._fps)
-            if self._enable_depth:
-                config.enable_stream(rs.stream.depth, self._img_shape[1], self._img_shape[0], rs.format.z16, self._fps)
+            if self._enable_depth_zmq:
+                # Depth matches the per-eye color resolution ([H, W] composite splits in two)
+                depth_w = self._img_shape[1] // 2 if self._binocular else self._img_shape[1]
+                config.enable_stream(rs.stream.depth, depth_w, self._img_shape[0], rs.format.z16, self._fps)
 
-            profile = self.pipeline.start(config)
+            try:
+                profile = self.pipeline.start(config)
+            except RuntimeError as e:
+                if self._enable_depth_zmq and "cannot stream together" in str(e):
+                    raise RuntimeError(f"{e} — with depth enabled, color+depth are limited to 45 fps or lower")
+                raise
             self._device = profile.get_device()
             if self._device is None:
                 logger_mp.error('[Teleimager] pipe_profile.get_device() is None .')
@@ -1349,10 +1384,10 @@ class RealSenseCamera(BaseCamera):
                 except Exception as e:
                     logger_mp.debug(f"[RealSenseCamera] {cam_topic}: auto_exposure_priority not supported: {e}")
             
-            if self._enable_depth:
+            if self._enable_depth_zmq:
                 assert self._device is not None
-                depth_sensor = self._device.first_depth_sensor()
-                self.g_depth_scale = depth_sensor.get_depth_scale()
+                self._depth_scale = self._device.first_depth_sensor().get_depth_scale()
+                self._align_warned = False
 
             self.intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
             logger_mp.info(str(self))
@@ -1365,32 +1400,46 @@ class RealSenseCamera(BaseCamera):
             raise RuntimeError(f"[RealSenseCamera] Failed to initialize RealSense camera {self._serial_number}: {e}")
 
     def __str__(self):
-        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        color = f"color_zmq=on (port={self._zmq_port})" if self._enable_zmq else "color_zmq=off"
+        depth = f"depth_zmq=on (port={self._depth_zmq_port})" if self._depth_buffer is not None else "depth_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
         kind = "realsense binocular" if self._binocular else "realsense"
-        return f" 📷 Camera {self._cam_topic!r:<22} {kind}, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} {kind}, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {color}, {depth}, {webrtc}"
 
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames()
+        aligned = False
+        if self._enable_depth_zmq:
+            # Depth is published aligned to the color frame (SDK align); on a dual-RGB
+            # camera it is natively registered to Color 1, so this is near-identity.
+            try:
+                frames = self.align.process(frames)
+                aligned = True
+            except RuntimeError as e:
+                if not self._align_warned:
+                    logger_mp.warning(f"[RealSenseCamera] {self._cam_topic}: depth align failed, "
+                                      f"dropping depth frames until it recovers: {e}")
+                    self._align_warned = True
+
         if self._binocular:
             left, right = frames.get_color_frame(1), frames.get_color_frame(2)
             if not left or not right:
                 return None
+            color_frame_no = left.get_frame_number()
             bgr_numpy = np.hstack((np.asanyarray(left.get_data()), np.asanyarray(right.get_data())))
         else:
-            aligned_frames = self.align.process(frames)
-            color_frame = aligned_frames.get_color_frame()
+            color_frame = frames.get_color_frame()
             if not color_frame:
                 return None
-
-            if self._enable_depth:
-                depth_frame = aligned_frames.get_depth_frame()
-                if depth_frame:
-                    self._latest_depth = np.asanyarray(depth_frame.get_data())
-                else:
-                    self._latest_depth = None
-
+            color_frame_no = color_frame.get_frame_number()
             bgr_numpy = np.asanyarray(color_frame.get_data())
+
+        if self._enable_depth_zmq and aligned:
+            depth_frame = frames.get_depth_frame()
+            if depth_frame is not None:
+                self._latest_depth = np.asanyarray(depth_frame.get_data()).copy()
+                if self._depth_buffer is not None:
+                    self._depth_buffer.write((color_frame_no, self._latest_depth, self._depth_scale))
 
         if self._webrtc_connected.is_set():
             self._webrtc_buffer.write(av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24"))
@@ -2492,21 +2541,30 @@ class TeleImageServer:
         try:
             # Load cameras from self._server_config["camera"]
             for cam_topic, server_cfg in self._server_config["camera"].items():
-                if not server_cfg.get("enable_zmq", False) and not server_cfg.get("enable_webrtc", False):
+                # Breaking rename: fail loudly instead of silently ignoring old keys
+                for old, new in (("type", "driver_type"), ("enable_zmq", "enable_color_zmq"),
+                                 ("zmq_port", "color_zmq_port"), ("enable_depth", "enable_depth_zmq")):
+                    if old in server_cfg:
+                        raise ValueError(f"[Teleimager] {cam_topic}: config key '{old}' was renamed to '{new}'")
+
+                driver_type = server_cfg.get("driver_type", "uvc").lower()
+                enable_color_zmq = server_cfg.get("enable_color_zmq", False)
+                enable_depth_zmq = server_cfg.get("enable_depth_zmq", False)
+                if enable_depth_zmq and driver_type != "realsense":
+                    raise ValueError(f"[Teleimager] {cam_topic}: enable_depth_zmq is only supported for realsense cameras")
+                if not enable_color_zmq and not server_cfg.get("enable_webrtc", False) and not enable_depth_zmq:
                     continue
 
-                cam_type = server_cfg.get("type", "uvc").lower()
-
-                if cam_type == "v4l2":
+                if driver_type == "v4l2":
                     self._cameras[cam_topic] = V4L2Camera.from_config(cam_topic, server_cfg)
-                elif cam_type == "realsense":
+                elif driver_type == "realsense":
                     self._cameras[cam_topic] = RealSenseCamera.from_config(cam_topic, server_cfg)
-                elif cam_type == "uvc":
+                elif driver_type == "uvc":
                     self._cameras[cam_topic] = UVCCamera.from_config(cam_topic, server_cfg)
-                elif cam_type == "gstreamer":
+                elif driver_type == "gstreamer":
                     self._cameras[cam_topic] = GStreamerCamera.from_config(cam_topic, server_cfg)
                 else:
-                    logger_mp.error(f"[Teleimager] Unknown camera type {cam_type} for {cam_topic}, skipping...")
+                    logger_mp.error(f"[Teleimager] Unknown driver_type {driver_type} for {cam_topic}, skipping...")
                     continue
         except Exception:
             logger_mp.error("[Teleimager] Initialization failed", exc_info=True)
@@ -2545,7 +2603,25 @@ class TeleImageServer:
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to publish zmq frame from {cam_topic} camera.")
             self._stop_event.set()
-    
+
+    def _depth_pub(self, cam_topic: str, camera: BaseCamera):
+        try:
+            no_frame_warned = False
+            while not self._stop_event.is_set():
+                depth_bytes = camera.get_depth_message(timeout=0.5)
+
+                if depth_bytes is None:
+                    if not no_frame_warned:
+                        logger_mp.warning(f"[Teleimager] {cam_topic} produced no new depth frame for 0.5s.")
+                        no_frame_warned = True
+                    continue
+
+                no_frame_warned = False
+                self._zmq_publisher_manager.publish(depth_bytes, camera.get_depth_zmq_port())
+        except Exception as e:
+            logger_mp.error(f"[Teleimager] Failed to publish depth frame from {cam_topic} camera: {e}")
+            self._stop_event.set()
+
     def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
         try:
             webrtc_codec = camera.get_webrtc_codec()
@@ -2619,6 +2695,11 @@ class TeleImageServer:
 
             if camera.enable_zmq():
                 t = threading.Thread(target=self._zmq_pub, args=(camera_topic, camera), daemon=True)
+                t.start()
+                self._publisher_threads.append(t)
+
+            if camera.enable_depth_zmq():
+                t = threading.Thread(target=self._depth_pub, args=(camera_topic, camera), daemon=True)
                 t.start()
                 self._publisher_threads.append(t)
 
