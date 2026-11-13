@@ -360,7 +360,7 @@ class DepthPacket:
     alignment failed are never sent.
     """
 
-    available = zstd is not None
+    available = zstd is not None and hasattr(zstd, "compress") and hasattr(zstd, "decompress")
     _HEADER = struct.Struct("<IHHf")  # frame no, width, height, depth_scale
     _LEVEL = 3
 
@@ -370,15 +370,14 @@ class DepthPacket:
         self.depth_scale = depth_scale
 
     def encode(self) -> bytes:
-        if zstd is None:
+        if not self.available:
             raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
-        header = self._HEADER.pack(self.frame_no & 0xFFFFFFFF,
-                                   self.depth.shape[1], self.depth.shape[0], self.depth_scale)
+        header = self._HEADER.pack(self.frame_no & 0xFFFFFFFF, self.depth.shape[1], self.depth.shape[0], self.depth_scale)
         return header + zstd.compress(np.ascontiguousarray(self.depth).tobytes(), self._LEVEL)
 
     @classmethod
     def decode(cls, packet: bytes) -> "DepthPacket":
-        if zstd is None:
+        if not cls.available:
             raise RuntimeError("[Teleimager] decoding depth requires zstandard: pip install 'teleimager[depth]'")
         frame_no, width, height, scale = cls._HEADER.unpack_from(packet)
         depth = np.frombuffer(zstd.decompress(packet[cls._HEADER.size:]), np.uint16).reshape(height, width)
@@ -410,11 +409,6 @@ class TeleImage:
         # state 3: decoding enabled and data available
         return self._bgr
 
-    def depth_array(self):
-        """Decoded depth: (uint16 ndarray [H, W], depth_scale in meters per unit), or (None, None)."""
-        if self.depth is None:
-            return None, None
-        return self.depth.depth, self.depth.depth_scale
 
     def __bool__(self):
         """ Truth value based on whether jpg byte data is available """
@@ -437,8 +431,7 @@ class TeleImage:
 class ZMQ_SubscriberThread(threading.Thread):
     """Thread that owns a SUB socket and handles receiving the latest message."""
 
-    def __init__(self, host: str, port: int, context: Optional[zmq.Context] = None,
-                 request_bgr: bool = False, transform: Optional[Callable[[bytes], Any]] = None):
+    def __init__(self, host: str, port: int, context: Optional[zmq.Context] = None, request_bgr: bool = False, transform: Optional[Callable[[bytes], Any]] = None):
         """Initialize subscriber thread.
 
         Args:
@@ -465,12 +458,12 @@ class ZMQ_SubscriberThread(threading.Thread):
         if self._request_bgr:
             self._init_bgr_decoder()
         else:
-            self._bgr_3ring_buffer = None
+            self._bgr_buffer = None
             self._bgr_decode_queue = None
             self._decoder_thread = None
 
     def _init_bgr_decoder(self):
-        self._bgr_3ring_buffer = TripleRingBuffer()
+        self._bgr_buffer = TripleRingBuffer()
         self._bgr_decode_queue = queue.Queue(maxsize=1)
         self._decoder_thread = threading.Thread(target=self._decoder_loop, daemon=True)
         self._decoder_thread.start()
@@ -500,7 +493,7 @@ class ZMQ_SubscriberThread(threading.Thread):
                     self._bgr_decode_queue.task_done()
                     continue
                 img_numpy = self._decode_image(jpg_bytes)
-                self._bgr_3ring_buffer.write(img_numpy)
+                self._bgr_buffer.write(img_numpy)
                 self._bgr_decode_queue.task_done()
             except queue.Empty:
                 continue
@@ -513,22 +506,17 @@ class ZMQ_SubscriberThread(threading.Thread):
     # public api
     # --------------------------------------------------------
     def recv(self) -> TeleImage:
-        """Get the latest received message.
+        """Latest received frame as a TeleImage.
 
-        Returns:
-            The latest message as a TeleImage object containing raw bytes, decoded BGR image (if enabled), and FPS.
+        Color subscribers fill jpg/bgr; subscribers with a transform (depth) fill depth.
         """
         current_fps = self._fps_monitor.fps
-        jpg_data = self._payload_buffer.read()
-        if not self._request_bgr:
-            return TeleImage(fps=current_fps, jpg=jpg_data)
-
-        bgr_data = self._bgr_3ring_buffer.read()
-        return TeleImage(fps=current_fps, jpg=jpg_data, bgr=bgr_data)
-
-    def read(self):
-        """Latest stored payload (the raw message, or the transform result)."""
-        return self._payload_buffer.read()
+        payload = self._payload_buffer.read()
+        if self._transform is not None:
+            return TeleImage(fps=current_fps, jpg=None, depth=payload)
+        if self._request_bgr:
+            return TeleImage(fps=current_fps, jpg=payload, bgr=self._bgr_buffer.read())
+        return TeleImage(fps=current_fps, jpg=payload)
 
     def stop(self) -> None:
         """Stop the subscriber thread gracefully."""
@@ -628,9 +616,9 @@ class ZMQ_SubscriberManager:
         self._context = zmq.Context()
         self._running = True
 
-    def _create_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
+    def _create_subscriber_thread(self, host: str, port: int, request_bgr: bool = False, transform=None) -> ZMQ_SubscriberThread:
         try:
-            subscriber_thread = ZMQ_SubscriberThread(host, port, self._context, request_bgr)
+            subscriber_thread = ZMQ_SubscriberThread(host, port, self._context, request_bgr, transform)
             subscriber_thread.start()
             # Wait for the thread to start and socket to be ready
             if not subscriber_thread.wait_for_start(timeout=1.0):
@@ -640,11 +628,11 @@ class ZMQ_SubscriberManager:
             logger_mp.error(f"[Teleimager] Failed to create subscriber thread for {host}:{port}: {e}")
             raise 
 
-    def _get_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
+    def _get_subscriber_thread(self, host: str, port: int, request_bgr: bool = False, transform=None) -> ZMQ_SubscriberThread:
         key = (host, port)
         with self._lock:
             if key not in self._subscriber_threads:
-                self._subscriber_threads[key] = self._create_subscriber_thread(host, port, request_bgr)
+                self._subscriber_threads[key] = self._create_subscriber_thread(host, port, request_bgr, transform)
             elif request_bgr:
                 self._subscriber_threads[key].ensure_bgr_enabled()
             return self._subscriber_threads[key]
@@ -661,20 +649,21 @@ class ZMQ_SubscriberManager:
             cls._ref_count += 1
             return cls._instance
 
-    def subscribe(self, host: str, port: int, request_bgr: bool = False) -> TeleImage:
-        """Receive the latest message from the specified subscriber.
+    def subscribe(self, host: str, port: int, request_bgr: bool = False, transform=None) -> TeleImage:
+        """Receive the latest frame from the specified subscriber.
         Args:
             host: The server address
             port: The port number
             request_bgr: Whether to request BGR decoding
+            transform: Optional message decoder applied when this subscriber is created (e.g. DepthPacket.decode)
 
         Returns:
-            The latest message as a TeleImage object containing current fps, raw bytes and decoded BGR image (if enabled).
+            The latest frame as a TeleImage object.
         """
         if not self._running:
             raise RuntimeError("SubscriberManager is closed.")
 
-        subscriber_thread = self._get_subscriber_thread(host, port, request_bgr=request_bgr)
+        subscriber_thread = self._get_subscriber_thread(host, port, request_bgr=request_bgr, transform=transform)
         return subscriber_thread.recv()
 
     def close(self) -> None:
@@ -701,7 +690,7 @@ class ZMQ_SubscriberManager:
 # ========================================================
 # ZMQ response
 # ========================================================
-class ZMQ_Responser:
+class ZMQ_Responder:
     """ ZMQ REP socket to respond with camera configuration upon request."""
     def __init__(self, server_config, host: str = "0.0.0.0", port: int = 60000):
         """
@@ -721,7 +710,7 @@ class ZMQ_Responser:
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        logger_mp.info(f"[Teleimager] Camera Config Responser initialized at {self._host}:{self._port}")
+        logger_mp.info(f"[Teleimager] Camera Config Responder initialized at {self._host}:{self._port}")
 
     def _run(self):
         poller = zmq.Poller()
@@ -735,9 +724,9 @@ class ZMQ_Responser:
             except zmq.ZMQError as e:
                 if not self._running:
                     break  # normal exit when stopping
-                logger_mp.error(f"[Teleimager] ZMQError in Responser: {e}")
+                logger_mp.error(f"[Teleimager] ZMQError in Responder: {e}")
             except Exception as e:
-                logger_mp.error(f"[Teleimager] Unexpected error in Responser: {e}")
+                logger_mp.error(f"[Teleimager] Unexpected error in Responder: {e}")
     # --------------------------------------------------------
     # public api
     # --------------------------------------------------------
@@ -745,16 +734,16 @@ class ZMQ_Responser:
         return self._port
 
     def stop(self):
-        """Stop the Responser thread and close ZMQ resources."""
+        """Stop the Responder thread and close ZMQ resources."""
         self._running = False
         self._thread.join(timeout=1)
         if self._thread.is_alive():
-            logger_mp.warning("[Teleimager] Responser thread did not stop gracefully")
+            logger_mp.warning("[Teleimager] Responder thread did not stop gracefully")
         try:
             self._socket.close()
             self._context.term()
         except Exception as e:
-            logger_mp.warning(f"[Teleimager] Error closing Responser socket: {e}")
+            logger_mp.warning(f"[Teleimager] Error closing Responder socket: {e}")
 
 # ========================================================
 # ZMQ request
@@ -879,13 +868,10 @@ class TeleImageClient:
         self._subscriber_manager = ZMQ_SubscriberManager.get_instance()
         self._subscriber_manager.subscribe(self._server_host, self._color_port, request_bgr=self._request_bgr)
         self._depth_port = depth_port
-        self._depth_subscriber = None
         if depth_port is not None:
             if not DepthPacket.available:
                 raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
-            self._depth_subscriber = ZMQ_SubscriberThread(self._server_host, depth_port, transform=DepthPacket.decode)
-            self._depth_subscriber.start()
-            self._depth_subscriber.wait_for_start(timeout=2.0)
+            self._subscriber_manager.subscribe(self._server_host, depth_port, transform=DepthPacket.decode)
         # No-frame watchdog state (edge-triggered warning; see get_frame).
         self._last_frame_ts = time.perf_counter()
         self._stalled = False
@@ -966,17 +952,14 @@ class TeleImageClient:
             self._stalled = True
             logger_mp.warning(f" 📷 Camera {self._camera_topic!r:<22} no frames for {STALL_SECONDS:g}s "
                               f"@ {self._server_host}:{self._color_port} — is the server running and this port correct?")
-        if self._depth_subscriber is not None:
-            frame.depth = self._depth_subscriber.read()
+        if self._depth_port is not None:
+            frame.depth = self._subscriber_manager.subscribe(self._server_host, self._depth_port, transform=DepthPacket.decode).depth
         return frame
 
     def close(self):
         if self._closed:
             return
         self._closed = True
-        if self._depth_subscriber is not None:
-            self._depth_subscriber.stop()
-            self._depth_subscriber = None
         self._subscriber_manager.close()
         with type(self)._instances_lock:
             type(self)._instances.pop(self._camera_topic, None)
@@ -984,7 +967,7 @@ class TeleImageClient:
 
 
 # ========================================================
-# Teleimage Client
+# TeleImageClient
 # ========================================================
 
 def main():
@@ -1012,20 +995,19 @@ def main():
         return
     logger_mp.debug(f"[Teleimager] Camera config loaded: {camera_config}")
 
-    topics = [t for t, cfg in camera_config.items() if cfg.get('enable_color_zmq')]
-    if not topics:
+    clients = {}
+    for topic, cfg in camera_config.items():
+        if not cfg.get('enable_color_zmq'):
+            continue
+        depth_port = cfg.get('depth_zmq_port')
+        clients[topic] = TeleImageClient(topic,
+                                         server_host=args.host,
+                                         color_port=cfg['color_zmq_port'],
+                                         request_bgr=True,
+                                         depth_port=depth_port)
+    if not clients:
         logger_mp.warning("[Teleimager] No ZMQ-enabled cameras to stream.")
         return
-
-    # Visualize every ZMQ-enabled camera; press 'q' to quit.
-    clients = {}
-    for topic in topics:
-        cfg = camera_config[topic]
-        clients[topic] = TeleImageClient(
-            topic, server_host=args.host,
-            color_port=cfg.get('color_zmq_port'),
-            request_bgr=True,
-            depth_port=cfg.get('depth_zmq_port'))
 
     running = True
     try:
@@ -1035,6 +1017,13 @@ def main():
                 if frame.bgr is not None:
                     cv2.putText(frame.bgr, f"fps: {frame.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                     cv2.imshow(topic, frame.bgr)
+                if frame.depth is not None:
+                    meters = frame.depth.depth.astype(np.float32) * frame.depth.depth_scale
+                    # 0-5 m maps to the full colormap
+                    vis = cv2.applyColorMap(np.clip(meters * (255.0 / 5.0), 0, 255).astype(np.uint8), cv2.COLORMAP_JET)
+                    vis[frame.depth.depth == 0] = 0  # invalid pixels
+                    cv2.putText(vis, f"fps: {frame.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.imshow(f"{topic}_depth", vis)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 running = False
