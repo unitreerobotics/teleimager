@@ -21,6 +21,7 @@
 - 🆔 五种摄像头识别方式：物理路径、序列号、bcd_device、vid_pid、video 路径
 - ⚙️ 可配置分辨率与帧率
 - 🚀 使用三重环形缓冲区实现高效帧传递
+- 🔁 服务端重启或链路断开后自动重连（ZMTP 心跳）
 
 ---
 
@@ -35,22 +36,22 @@ TeleImager 分为**两种角色**，按需安装即可：
 
 ### 1.0 系统前置依赖（两种角色都需要）
 
-两种角色都通过 **PyTurboJPEG** 做 JPEG 编解码。它是一个 ctypes 绑定,在 import 时加载系统库 **libjpeg-turbo(要求 3.0+)**。这个原生库 pip 无法安装,每台机器安装一次即可。三选一:
+两种角色都通过 **PyTurboJPEG** 做 JPEG 编解码。它是一个 ctypes 绑定，在 import 时加载系统库 **libjpeg-turbo（要求 3.0+）**。这个原生库 pip 无法安装，每台机器安装一次即可。三选一：
 
-**方法 1 —— Conda(推荐,跨平台)**
+**方法 1 —— Conda（推荐，跨平台）**
 
 ```bash
 conda install -c conda-forge libjpeg-turbo
 ```
 
-**方法 2 —— Homebrew(macOS)**
+**方法 2 —— Homebrew（macOS）**
 
 ```bash
 brew install jpeg-turbo
 ```
 
 <details>
-<summary><b>方法 3 —— 从源码编译(Ubuntu/Debian)</b></summary>
+<summary><b>方法 3 —— 从源码编译（Ubuntu/Debian）</b></summary>
 
 ```bash
 git clone https://github.com/libjpeg-turbo/libjpeg-turbo.git
@@ -63,8 +64,8 @@ source ~/.bashrc
 
 </details>
 
-> ⚠️ **不要**用 PyPI 上那个名为 `turbojpeg` 的包——它是另一个不兼容的库；本项目用的是 `PyTurboJPEG`(已随 `pip install teleimager` 装好)。
-> Ubuntu 的 `sudo apt install libturbojpeg` 版本常低于 3.0,因此不推荐。若该库缺失,TeleImager 会在首次 import 时抛出与上面等价的详细安装提示。
+> ⚠️ **不要**用 PyPI 上那个名为 `turbojpeg` 的包——它是另一个不兼容的库；本项目用的是 `PyTurboJPEG`（已随 `pip install teleimager` 装好）。
+> Ubuntu 的 `sudo apt install libturbojpeg` 版本常低于 3.0，因此不推荐。若该库缺失，TeleImager 会在首次 import 时抛出与上面等价的详细安装提示。
 
 ### 1.1 环境准备（conda）
 
@@ -86,6 +87,7 @@ conda activate teleimager
 |------|------|
 | **无界面（headless）** —— 订阅 ZMQ → BGR `ndarray`（喂给你自己的代码） | `pip install teleimager` |
 | **+ 可视化窗口** —— OpenCV 开窗显示 | `pip install "teleimager[viewer]"` |
+| **+ 深度** —— 解码 z16 深度流（zstd） | `pip install "teleimager[depth]"` |
 
 > 可视化会拉入 `opencv-python`
 
@@ -101,11 +103,12 @@ conda activate teleimager
 |------|---------|------|
 | 基座（V4L2） | `[server]` | 需要 `v4l2-ctl`：`sudo apt install -y v4l-utils` |
 | + UVC | `[uvc]` | 需 USB 权限——安装后执行一次 `sudo "$(which teleimager-server)" --setup-permissions`；wheel 已自带 `libturbojpeg`、`libusb`，无需 apt |
-| + RealSense | `[realsense]` |  |
-| + 全部（不含 GStreamer） | `[all]` | 等价于 UVC + RealSense |
+| + RealSense | `[realsense]` | 也支持双彩色机型的 2C/3C 模式——见 2.2 |
+| + RealSense 深度 | `[depth]` | 增加 `zstandard`；仅在开启 `enable_depth_zmq` 时需要 |
+| + 全部（不含 GStreamer） | `[all]` | 等价于 viewer + server + UVC + RealSense + depth |
 | + GStreamer | 无 pip 包 | PyGObject + 系统插件——见表格下方的引用块 |
 
-> `type: gstreamer` 是唯一没有 pip extra 的后端：PyGObject 必须跟解释器走，GStreamer 本体来自系统。
+> `driver_type: gstreamer` 是唯一没有 pip extra 的后端：PyGObject 必须跟解释器走，GStreamer 本体来自系统。
 >
 > ```bash
 > conda install -c conda-forge pygobject   # 即 1.1 建的 env；apt 的 python3-gi 只服务系统 python
@@ -142,7 +145,7 @@ sudo "$(which teleimager-server)" --setup-permissions   # $(which ...) 才能在
 
 跳过的话，服务端启动时会提示你并给出同一条命令。执行完之后 SSH 需重连，桌面终端需重新登录。
 
-#### 1.3.3 配置 TLS 证书（仅 WebRTC）
+#### 1.3.4 配置 TLS 证书（仅 WebRTC）
 
 详情参见 [CA 说明](https://github.com/unitreerobotics/xr_teleoperate/wiki/CA)。也可用 openssl 快速生成一份自签名证书：
 
@@ -258,11 +261,40 @@ teleimager-server --cf --uvc --v4l2        # RealSense 加 --rs，GStreamer 加 
          └─ YUYV   1920x1080 @ [8.0]
 ```
 
+> 报告里的 `type:` 就是配置中 `driver_type:` 的取值。
+
 ### 2.2 启动服务端
 
 首次启动时，服务器会在 `~/.config/teleimager/teleimager_server.yaml` 生成默认配置。
 
-根据2.1节的相机搜索报告结果编辑该文件，然后启动服务：
+> ⚠️ **从 2.0.x 升级：** 2.1.0 起配置 schema 有破坏性变更。`type`、`enable_zmq`、`zmq_port`、`enable_depth` 会在启动时报错并提示新键名，请改用 `driver_type`、`enable_color_zmq`、`color_zmq_port`、`enable_depth_zmq`。
+
+根据 2.1 节的相机搜索报告结果编辑该文件，关键键如下：
+
+```yaml
+camera:
+  head_camera:
+    driver_type: uvc            # uvc / v4l2 / gstreamer / realsense
+    image_shape: [480, 640]     # [高, 宽]
+    binocular: false            # true = 双彩色，左右目并排在同一帧
+    fps: 30
+    enable_color_zmq: true
+    color_zmq_port: 55555
+  left_wrist_camera:
+    driver_type: realsense
+    image_shape: [480, 640]
+    fps: 30
+    enable_color_zmq: true
+    color_zmq_port: 55556
+    enable_depth_zmq: true      # 仅 RealSense
+    depth_zmq_port: 56001
+```
+
+生成的配置还包含识别字段（`serial_number`、`physical_path`、`bcd_device`、`vid_pid`、`video_id`）和 WebRTC 相关键。
+
+**双彩色（dual-RGB）RealSense。** `binocular: true` 时 `image_shape` 要填左右拼接后的合成尺寸，例如 `[480, 1280]`（每目 640×480）。服务端会切到 `sensors_config_mode` 2C（Color 1 + Color 2）并发布一帧合成图；`binocular: false` 则是 3C（单路 RGB）。`teleimager-server --cf --rs` 会为每台设备列出两种配置。彩色+深度同开受 SDK 限制为 45 fps，纯彩色最高 60 fps。
+
+然后启动服务：
 
 ```bash
 teleimager-server
@@ -294,9 +326,37 @@ sudo "$(which teleimager-server)" --setup-service
 teleimager-client --host 192.168.123.164        # 默认：192.168.123.164
 ```
 
-每路摄像头会各自弹出一个 OpenCV 窗口（需要 `teleimager[viewer]`）。
+每路摄像头会各自弹出一个 OpenCV 窗口（需要 `teleimager[viewer]`）；服务端在 `depth_zmq_port` 上发布深度后，会自动多出一个深度窗口。
 
-若做无界面订阅，请参照 [`client.py`](src/teleimager/client.py) 中`TeleImageClient` 的 `# public api` 从自己的代码里订阅。
+> **彩色编码。** MJPEG 相机（UVC/V4L2 的 MJPG 模式）原样转发，质量由相机固件决定；RealSense 和仅有 YUYV 的相机由主机以 JPEG q95（4:2:2）编码。1280×480 双目 @45fps 时彩色约 55 Mbps、深度约 40 Mbps，请按此规划链路。
+
+无界面订阅示例：
+
+```python
+from teleimager.client import TeleImageClient
+
+cam = TeleImageClient("head_camera", server_host="192.168.123.164", color_port=55555)
+frame = cam.get_frame()
+if frame.jpg is not None:
+    open("frame.jpg", "wb").write(frame.jpg)
+```
+
+`frame.jpg` 是 JPEG 字节；需要解码后的 `ndarray` 时传 `request_bgr=True`，从 `frame.bgr` 取。
+
+#### 通过 ZMQ 订阅深度（RealSense）
+
+服务端开启 `enable_depth_zmq` 并设置 `depth_zmq_port`，解码端安装 `teleimager[depth]`。深度是 SDK 对齐后的 z16 帧，用 zstd 无损压缩后走独立端口，不影响彩色链路。对齐不是可选项：每条发布的深度帧都会经过 SDK `align`，对齐失败的帧会被直接丢弃，不会发出未对齐数据。彩色+深度同开受 SDK 限制为 45 fps。
+
+```python
+from teleimager.client import TeleImageClient
+
+cam = TeleImageClient("head_camera", server_host="192.168.123.164", color_port=55555, depth_port=56001)
+frame = cam.get_frame()
+if frame.depth is not None:
+    depth_m = frame.depth.depth.astype("float32") * frame.depth.depth_scale
+```
+
+`frame.depth` 是 `DepthPacket`（`depth`、`depth_scale`、`frame_no`）；首帧到达前或缺少 zstandard 时为 `None`。
 
 ### 3.2 WebRTC 方式
 
@@ -332,7 +392,7 @@ https://<host_ip>:<webrtc_port>        # 例如 https://192.168.123.164:60001
 
 服务端有两大用途，对延迟/带宽的要求不同：
 
-- **ZeroMQ PUB–SUB** —— 通过局域网传输。高质量帧、低开销、高吞吐，在不牺牲画质的前提下保持低延迟。适合**录制训练数据**。
+- **ZeroMQ PUB–SUB** —— 通过局域网传输。高质量帧、低开销、高吞吐，在不牺牲太多画质的前提下保持低延迟。适合**录制训练数据**。
 - **WebRTC** —— **实时预览**、VR 遥操作、UI 调试。自动码率控制下的低延迟，H.264（默认）/ VP8，兼容浏览器与 VR 设备。
 
 ### 4.3 三重环形缓冲区的好处
@@ -345,14 +405,16 @@ https://<host_ip>:<webrtc_port>        # 例如 https://192.168.123.164:60001
 ## 5. 🧐 FAQ
 
 1. **`--cf` 输出中序列号等字段显示为 `unknown`？**
-部分摄像头需要更高权限才能读取完整硬件信息，可尝试：
 
-```bash
-sudo $(which teleimager-server) --cf --uvc
-```
+   部分摄像头需要更高权限才能读取完整硬件信息，可尝试：
 
-**启动服务端时报 `No module named 'psutil'`？**
-`psutil`（用于可选的 CPU 亲和性调优）已包含在 `teleimager[server]` 中。若你的环境是零散安装导致缺失，执行 `pip install psutil` 补上，或用 `pip install -e ".[server]"` 重装。现在即使缺失也只会打印警告并跳过该优化，不再导致崩溃。
+   ```bash
+   sudo $(which teleimager-server) --cf --uvc
+   ```
+
+2. **启动服务端时报 `No module named 'psutil'`？**
+
+   `psutil`（用于可选的 CPU 亲和性调优）已包含在 `teleimager[server]` 中。若你的环境是零散安装导致缺失，执行 `pip install psutil` 补上，或用 `pip install -e ".[server]"` 重装。现在即使缺失也只会打印警告并跳过该优化，不再导致崩溃。
 
 ---
 

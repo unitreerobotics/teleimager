@@ -1376,15 +1376,7 @@ class RealSenseCamera(BaseCamera):
             self._device = profile.get_device()
             if self._device is None:
                 logger_mp.error('[Teleimager] pipe_profile.get_device() is None .')
-            # Disable auto exposure priority to avoid flickering in some RealSense cameras
-            # (a dual-RGB camera in 2C mode has no color sensor)
-            color_sensor = self._device.first_color_sensor() if self._device is not None and not self._binocular else None
-            if color_sensor is not None:
-                try:
-                    color_sensor.set_option(rs.option.auto_exposure_priority, 0)
-                except Exception as e:
-                    logger_mp.debug(f"[RealSenseCamera] {cam_topic}: auto_exposure_priority not supported: {e}")
-            
+
             if self._enable_depth_zmq:
                 assert self._device is not None
                 self._depth_scale = self._device.first_depth_sensor().get_depth_scale()
@@ -1445,7 +1437,7 @@ class RealSenseCamera(BaseCamera):
             self._webrtc_buffer.write(av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24"))
 
         if self._enable_color_zmq:
-            self._color_zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
+            self._color_zmq_buffer.write(_turbojpeg.encode(bgr_numpy, quality=95))
 
         if not self._ready.is_set():
             self._ready.set()
@@ -2016,7 +2008,7 @@ class V4L2Camera(BaseCamera):
             if self._webrtc_connected.is_set():
                 self._webrtc_buffer.write(frame)
             if self._enable_color_zmq:
-                self._color_zmq_buffer.write(_turbojpeg.encode(frame.to_ndarray(format="bgr24")))
+                self._color_zmq_buffer.write(_turbojpeg.encode(frame.to_ndarray(format="bgr24"), quality=95))
 
         if not self._ready.is_set():
             self._ready.set()

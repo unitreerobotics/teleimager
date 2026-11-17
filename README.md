@@ -21,6 +21,7 @@
 - 🆔 Five camera identifiers: physical path, serial number, bcd_device, vid_pid, video path
 - ⚙️ Configurable resolution and frame rate
 - 🚀 Efficient frame handoff via a triple ring buffer
+- 🔁 Automatic reconnect after a server reboot or a dropped link (ZMTP heartbeats)
 
 ---
 
@@ -86,6 +87,7 @@ conda activate teleimager
 |----------|---------|
 | **Headless** — subscribe ZMQ → BGR `ndarray` (feed your own code) | `pip install teleimager` |
 | **+ Viewer** — on-screen OpenCV windows | `pip install "teleimager[viewer]"` |
+| **+ Depth** — decode the z16 depth stream (zstd) | `pip install "teleimager[depth]"` |
 
 > The viewer pulls in `opencv-python`.
 
@@ -101,11 +103,12 @@ A *backend* is the capture driver TeleImager uses to talk to a camera. They're l
 |---------|-----------|-------|
 | Base (V4L2) | `[server]` | Needs `v4l2-ctl`: `sudo apt install -y v4l-utils` |
 | + UVC | `[uvc]` | Needs USB access — run `sudo "$(which teleimager-server)" --setup-permissions` once; the wheel already bundles `libturbojpeg` and `libusb`, no apt needed |
-| + RealSense | `[realsense]` |  |
-| + Everything (except GStreamer) | `[all]` | Equivalent to UVC + RealSense |
+| + RealSense | `[realsense]` | Also supports dual-RGB units in 2C/3C mode — see 2.2 |
+| + RealSense depth | `[depth]` | Adds `zstandard`; only needed when `enable_depth_zmq` is enabled |
+| + Everything (except GStreamer) | `[all]` | Equivalent to viewer + server + UVC + RealSense + depth |
 | + GStreamer | no pip package | PyGObject + system plugins — see the note under this table |
 
-> `type: gstreamer` is the one backend with no pip extra: PyGObject must match your interpreter, GStreamer comes from the system.
+> `driver_type: gstreamer` is the one backend with no pip extra: PyGObject must match your interpreter, GStreamer comes from the system.
 >
 > ```bash
 > conda install -c conda-forge pygobject   # the env from 1.1 — apt's python3-gi serves the system python instead
@@ -142,7 +145,7 @@ sudo "$(which teleimager-server)" --setup-permissions   # $(which ...) survives 
 
 Skip it and the server says so when it starts, printing the same command. Afterwards SSH needs a reconnect and a desktop terminal a fresh login.
 
-#### 1.3.3 Configure TLS certificates (WebRTC only)
+#### 1.3.4 Configure TLS certificates (WebRTC only)
 
 See the [CA guide](https://github.com/unitreerobotics/xr_teleoperate/wiki/CA) for details. Or generate a self-signed pair quickly with openssl:
 
@@ -187,7 +190,7 @@ Example output:
 │  │  ├─ video_id      : 0              (/dev/video0)
 │  │  └─ modes (MJPG)  [width x height @ fps]:
 │  │     ├─ 320x240 @ [30, 60]
-│  │     
+│  │     ...
 │  │     └─ 1920x1080 @ [30, 60]
 │  ├─ 📷 Abham Image (HHWei Technology Co., Ltd.)
 │  │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0
@@ -258,11 +261,40 @@ Example output:
          └─ YUYV   1920x1080 @ [8.0]
 ```
 
+> The `type:` label in the report is the backend name to put in the config's `driver_type:` field.
+
 ### 2.2 Start the server
 
 On first run the server writes a default config to `~/.config/teleimager/teleimager_server.yaml`.
 
-Edit it to match the Camera Finder Report from section 2.1, then start the service:
+> ⚠️ **Upgrading from 2.0.x:** the config schema changed in 2.1.0. `type`, `enable_zmq`, `zmq_port` and `enable_depth` are rejected at startup with a rename hint — use `driver_type`, `enable_color_zmq`, `color_zmq_port` and `enable_depth_zmq` instead.
+
+Edit it to match the Camera Finder Report from section 2.1. The keys that matter most:
+
+```yaml
+camera:
+  head_camera:
+    driver_type: uvc            # uvc / v4l2 / gstreamer / realsense
+    image_shape: [480, 640]     # [height, width]
+    binocular: false            # true = dual-RGB, two eyes side by side in one frame
+    fps: 30
+    enable_color_zmq: true
+    color_zmq_port: 55555
+  left_wrist_camera:
+    driver_type: realsense
+    image_shape: [480, 640]
+    fps: 30
+    enable_color_zmq: true
+    color_zmq_port: 55556
+    enable_depth_zmq: true      # RealSense only
+    depth_zmq_port: 56001
+```
+
+The generated file also carries the identifier fields (`serial_number`, `physical_path`, `bcd_device`, `vid_pid`, `video_id`) and the WebRTC keys.
+
+**Dual-RGB RealSense.** Set `binocular: true` and make `image_shape` the side-by-side composite, e.g. `[480, 1280]` — each eye is 640×480. The server then selects `sensors_config_mode` 2C (Color 1 + Color 2) and publishes one composite frame; `binocular: false` selects 3C (single RGB). `teleimager-server --cf --rs` lists both configurations for every unit. Color and depth together are capped at 45 fps by the SDK; pure color runs up to 60 fps.
+
+Then start the service:
 
 ```bash
 teleimager-server
@@ -294,9 +326,37 @@ With the server running, start the client on another terminal (or machine), poin
 teleimager-client --host 192.168.123.164        # default: 192.168.123.164
 ```
 
-Each camera stream opens in its own OpenCV window (requires `teleimager[viewer]`).
+Each camera stream opens in its own OpenCV window (requires `teleimager[viewer]`); the depth window appears automatically once the server publishes depth on its `depth_zmq_port`.
 
-For headless subscription, follow the `# public api` of `TeleImageClient` in [`client.py`](src/teleimager/client.py) and subscribe from your own code.
+> **Color encoding.** MJPEG cameras (UVC/V4L2 MJPG) are forwarded untouched — their quality is set by the camera firmware. RealSense and YUYV-only cameras are encoded on the host at JPEG quality 95 (4:2:2); at 1280×480 stereo and 45 fps that is roughly 55 Mbps for color plus ~40 Mbps for depth, so size the link accordingly.
+
+For headless subscription:
+
+```python
+from teleimager.client import TeleImageClient
+
+cam = TeleImageClient("head_camera", server_host="192.168.123.164", color_port=55555)
+frame = cam.get_frame()
+if frame.jpg is not None:
+    open("frame.jpg", "wb").write(frame.jpg)
+```
+
+`frame.jpg` is the JPEG bytes; pass `request_bgr=True` if you want a decoded `ndarray` in `frame.bgr`.
+
+#### Depth over ZMQ (RealSense)
+
+Enable `enable_depth_zmq` and set `depth_zmq_port` on the server; install `teleimager[depth]` wherever you decode it. Depth is the SDK-aligned z16 frame, compressed losslessly with zstd and published on its own port, so the color path is untouched. Alignment is not optional: every published depth frame goes through SDK `align`, and a frame whose alignment fails is dropped rather than sent unaligned. Color and depth together are capped at 45 fps by the SDK.
+
+```python
+from teleimager.client import TeleImageClient
+
+cam = TeleImageClient("head_camera", server_host="192.168.123.164", color_port=55555, depth_port=56001)
+frame = cam.get_frame()
+if frame.depth is not None:
+    depth_m = frame.depth.depth.astype("float32") * frame.depth.depth_scale
+```
+
+`frame.depth` is a `DepthPacket` (`depth`, `depth_scale`, `frame_no`); it is `None` until the first depth frame arrives or when zstandard is missing.
 
 ### 3.2 Over WebRTC
 
@@ -332,7 +392,7 @@ Each has trade-offs, and manufacturers use these fields inconsistently — a fie
 
 The server serves two purposes with different latency/bandwidth needs:
 
-- **ZeroMQ PUB–SUB** — transport over LAN. High-quality frames, low overhead, high throughput, low latency without sacrificing quality. Best for **recording training data**.
+- **ZeroMQ PUB–SUB** — transport over LAN. High-quality frames, low overhead, high throughput, low latency without sacrificing too much quality. Best for **recording training data**.
 - **WebRTC** — **real-time preview**, VR teleoperation, UI debugging. Low latency with adaptive bitrate, H.264 (default) / VP8, compatible with browsers and VR devices.
 
 ### 4.3 Triple ring buffer benefits
@@ -345,14 +405,16 @@ The server serves two purposes with different latency/bandwidth needs:
 ## 5. 🧐 FAQ
 
 1. **Serial number / other fields show `unknown` in `--cf` output?**
-Some cameras need elevated permissions to expose full hardware metadata. Try:
 
-```bash
-sudo $(which teleimager-server) --cf --uvc
-```
+   Some cameras need elevated permissions to expose full hardware metadata. Try:
 
-**Server reports `No module named 'psutil'` on start?**
-`psutil` (used for optional CPU-affinity tuning) ships with `teleimager[server]`. If a partial install left it missing, add it with `pip install psutil`, or reinstall via `pip install -e ".[server]"`. Missing it now only logs a warning and skips the optimization instead of crashing.
+   ```bash
+   sudo $(which teleimager-server) --cf --uvc
+   ```
+
+2. **Server reports `No module named 'psutil'` on start?**
+
+   `psutil` (used for optional CPU-affinity tuning) ships with `teleimager[server]`. If a partial install left it missing, add it with `pip install psutil`, or reinstall via `pip install -e ".[server]"`. Missing it now only logs a warning and skips the optimization instead of crashing.
 
 ---
 
