@@ -198,21 +198,17 @@ class RtpCamera(BaseCamera):
             output = np.zeros((height, width, 3), dtype=np.uint8)
             x, y = (width - resized_width) // 2, (height - resized_height) // 2
             output[y:y + resized_height, x:x + resized_width] = self._cv2.resize(bgr, (resized_width, resized_height))
-            if self._enable_zmq:
+            if self._enable_color_zmq:
                 ok, buf = self._cv2.imencode(".jpg", output)
                 if ok:
-                    self._zmq_buffer.write(buf.tobytes())
+                    self._color_zmq_buffer.write(buf.tobytes())
+            if self._webrtc_connected.is_set():
+                self._webrtc_buffer.write(av.VideoFrame.from_ndarray(output, format="bgr24"))
             if self._enable_bgr_output:
                 self._bgr_buffer.write(output)
             self._last_frame_time = time.monotonic()
             self._ready.set()
             return
-
-    def get_jpeg_bytes(self):
-        """Return buffered JPEG bytes only while the last frame is fresh."""
-        if self._last_frame_time is None or time.monotonic() - self._last_frame_time >= self._receive_timeout:
-            return None
-        return super().get_jpeg_bytes()
 
     def get_bgr_frame(self):
         """Return the buffered BGR array only while the last frame is fresh."""

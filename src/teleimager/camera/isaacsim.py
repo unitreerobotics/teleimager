@@ -14,6 +14,7 @@
 
 """Read simulator images through the Isaac Lab shared-memory image reader."""
 
+import av
 import logging_mp
 import numpy as np
 
@@ -24,7 +25,7 @@ logger_mp.setLevel(logging_mp.INFO)
 
 
 class IsaacSimCamera(BaseCamera):
-    """Read shared-memory images and expose JPEG and BGR output buffers.
+    """Read shared-memory images and expose color ZMQ, WebRTC, and BGR output buffers.
 
     Binocular mode concatenates the left and right images horizontally.
     Reads do not block for capture, so the server paces them at the configured FPS.
@@ -50,10 +51,10 @@ class IsaacSimCamera(BaseCamera):
         logger_mp.info(str(self))
 
     def __str__(self):
-        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        color_zmq = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
         extra = f"source={self._image_source!r}, {'binocular' if self._binocular else 'monocular'}"
-        return f" 📷 Camera {self._cam_topic!r:<22} isaacsim, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {extra}, {zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} isaacsim, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {extra}, {color_zmq}, {webrtc}"
 
     def _update_frame(self):
         """Read available source images and refresh enabled buffers without waiting."""
@@ -72,8 +73,11 @@ class IsaacSimCamera(BaseCamera):
                 logger_mp.debug(f"[Teleimager] {self._cam_topic} - no data for source '{self._image_source}'")
 
         if frame_data is not None:
-            if self._enable_zmq:
-                self._zmq_buffer.write(_turbojpeg.encode(frame_data))
+            if self._enable_color_zmq:
+                self._color_zmq_buffer.write(_turbojpeg.encode(frame_data))
+
+            if self._webrtc_connected.is_set():
+                self._webrtc_buffer.write(av.VideoFrame.from_ndarray(frame_data, format="bgr24"))
 
             if self._enable_bgr_output:
                 self._bgr_buffer.write(frame_data)

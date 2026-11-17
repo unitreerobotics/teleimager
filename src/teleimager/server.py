@@ -18,6 +18,7 @@ from pathlib import Path
 import argparse
 import functools
 import os
+import platform
 import signal
 import sys
 import threading
@@ -26,6 +27,7 @@ import time
 import logging_mp
 import numpy as np
 
+from . import __version__
 from .camera.camera import BaseCamera
 from .camera_finder import CameraFinder
 from .camera.gstreamer import GStreamerCamera
@@ -35,11 +37,11 @@ from .camera.rtp import RtpCamera
 from .camera.uvc import UVCCamera
 from .camera.v4l2 import V4L2Camera
 from .config import read_server_config
-from .host import reload_uvcvideo_module, set_performance_mode, setup_permissions
+from .host import reload_uvcvideo_module, set_performance_mode, setup_permissions, setup_service
 from .transport import webrtc
 from .transport.webrtc import WebRTC_PublisherManager
 from .transport.zmq_publisher import ZMQ_PublisherManager
-from .transport.zmq_request import ZMQ_Responser
+from .transport.zmq_request import ZMQ_Responder
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
@@ -48,8 +50,11 @@ logger_mp.setLevel(logging_mp.INFO)
 CONFIG_DIR = webrtc.CONFIG_DIR
 CERT_PEM_PATH = webrtc.CERT_PEM_PATH
 KEY_PEM_PATH = webrtc.KEY_PEM_PATH
-# A camera whose last capture is this old is not live; its outputs skip it.
-STALE_FRAME_AGE = 2.0  # s
+# Publishers wait this long for a new frame before warning once about a stall.
+PUBLISH_TIMEOUT = 0.5  # s
+# Camera keys renamed in TeleImager 2.1.0, as (old, new).
+RENAMED_CAMERA_KEYS = (("type", "driver_type"), ("enable_zmq", "enable_color_zmq"),
+                       ("zmq_port", "color_zmq_port"), ("enable_depth", "enable_depth_zmq"))
 
 
 def load_server_config(cli_path=None, *, streaming_config=None):
@@ -86,7 +91,19 @@ class TeleImageServer:
         Args:
             server_config: Resolved native camera and streaming settings.
             enable_isaacsim: Use shared-memory cameras for every active topic.
+
+        Raises:
+            ValueError: A camera uses a renamed key, or enables depth without
+                driver_type realsense.
         """
+        for cam_topic, server_cfg in server_config["camera"].items():
+            # Renamed keys fail loudly instead of being ignored.
+            for old, new in RENAMED_CAMERA_KEYS:
+                if old in server_cfg:
+                    raise ValueError(f"[Teleimager] {cam_topic}: config key '{old}' was renamed to '{new}'")
+            if server_cfg.get("enable_depth_zmq", False) and server_cfg.get("driver_type", "uvc").lower() != "realsense":
+                raise ValueError(f"[Teleimager] {cam_topic}: enable_depth_zmq is only supported for realsense cameras")
+
         webrtc.CERT_PEM_PATH = CERT_PEM_PATH
         webrtc.KEY_PEM_PATH = KEY_PEM_PATH
         webrtc._apply_webrtc_config(server_config)
@@ -154,12 +171,12 @@ class TeleImageServer:
             )
 
         if not self._enable_isaacsim and any(
-            cfg.get("type", "uvc").lower() in ("uvc", "v4l2", "realsense")
+            cfg.get("driver_type", "uvc").lower() in ("uvc", "v4l2", "realsense")
             for cfg in self._server_config["camera"].values()
         ):
             reload_uvcvideo_module()
 
-        self._responser = ZMQ_Responser(self._server_config)
+        self._responder = ZMQ_Responder(self._server_config)
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
         self._publisher_threads = []  # Retain workers for bounded cleanup joins.
@@ -167,28 +184,31 @@ class TeleImageServer:
         try:
             # Open only cameras needed by an enabled output.
             for cam_topic, server_cfg in self._server_config["camera"].items():
-                if not server_cfg.get("enable_zmq", False) and not server_cfg.get("enable_webrtc", False) and cam_topic not in self._app_stream_topics:
+                if (not server_cfg.get("enable_color_zmq", False) and not server_cfg.get("enable_depth_zmq", False)
+                        and not server_cfg.get("enable_webrtc", False) and cam_topic not in self._app_stream_topics):
                     continue
 
-                cam_type = server_cfg.get("type", "uvc").lower()
-                if self._enable_isaacsim and cam_type!="isaacsim":
-                    cam_type = "isaacsim"
+                driver_type = server_cfg.get("driver_type", "uvc").lower()
+                if self._enable_isaacsim and driver_type != "isaacsim":
+                    driver_type = "isaacsim"
 
                 try:
-                    if cam_type == "v4l2":
+                    if driver_type == "v4l2":
                         self._cameras[cam_topic] = V4L2Camera.from_config(cam_topic, server_cfg)
-                    elif cam_type == "realsense":
+                    elif driver_type == "realsense":
+                        rs = RealSenseCamera.get_realsense_module()
+                        logger_mp.info(f"[Teleimager] RealSense SDK {rs.__version__} ({rs.__file__})")
                         self._cameras[cam_topic] = RealSenseCamera.from_config(cam_topic, server_cfg)
-                    elif cam_type == "uvc":
+                    elif driver_type == "uvc":
                         self._cameras[cam_topic] = UVCCamera.from_config(cam_topic, server_cfg)
-                    elif cam_type == "gstreamer":
+                    elif driver_type == "gstreamer":
                         self._cameras[cam_topic] = GStreamerCamera.from_config(cam_topic, server_cfg)
-                    elif cam_type == "rtp":
+                    elif driver_type == "rtp":
                         self._cameras[cam_topic] = RtpCamera.from_config(cam_topic, server_cfg)
-                    elif cam_type == "isaacsim":
+                    elif driver_type == "isaacsim":
                         self._cameras[cam_topic] = IsaacSimCamera.from_config(cam_topic, server_cfg)
                     else:
-                        logger_mp.error(f"[Teleimager] Unknown camera type {cam_type} for {cam_topic}, skipping...")
+                        logger_mp.error(f"[Teleimager] Unknown driver_type {driver_type} for {cam_topic}, skipping...")
                         continue
                 except Exception as exc:
                     # One camera out of order does not stop the others: it stays
@@ -243,66 +263,69 @@ class TeleImageServer:
             logger_mp.error(f"[Image Server] Failed to update frames for {cam_topic} camera: {e}")
             logger_mp.error(f"[Image Server] {cam_topic} stopped; the other cameras keep running.")
 
-    def _zmq_pub(self, cam_topic: str, camera: BaseCamera):
-        """Publish buffered JPEG bytes at the camera FPS until shutdown."""
+    def _color_zmq_pub(self, cam_topic: str, camera: BaseCamera):
+        """Publish each new color JPEG frame over ZMQ as it arrives, until shutdown.
+
+        A stopped camera writes no new frame, so nothing stale is sent; a stall
+        is logged once until frames return. A failure ends this output only.
+        """
         try:
-            interval = 1.0 / camera.get_fps()
-            next_frame_time = time.monotonic()
-
+            no_frame_warned = False
             while not self._stop_event.is_set():
-                # The buffers keep a stopped camera's last frame; never send it
-                # as if it were live.
-                if time.monotonic() - self._camera_frame_times.get(cam_topic, float("-inf")) >= STALE_FRAME_AGE:
-                    self._stop_event.wait(interval)
+                jpeg_bytes = camera.get_color_jpeg_bytes(timeout=PUBLISH_TIMEOUT)
+                if jpeg_bytes is None:
+                    # Shutdown stops capture first; that is not a stall.
+                    if not no_frame_warned and not self._stop_event.is_set():
+                        logger_mp.warning(f"[Image Server] {cam_topic} produced no new frame for {PUBLISH_TIMEOUT}s.")
+                        no_frame_warned = True
                     continue
-                jpeg_bytes = camera.get_jpeg_bytes()
-                if jpeg_bytes is not None:
-                    self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_zmq_port())
-                else:
-                    # No frame yet, or this camera stopped: skip it and keep
-                    # publishing the others.
-                    logger_mp.debug(f"[Image Server] {cam_topic} returned no frame.")
-                    self._stop_event.wait(interval)
-                    continue
-
-                next_frame_time += interval
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
+                no_frame_warned = False
+                self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_color_zmq_port())
         except Exception as e:
             logger_mp.error(f"[Image Server] Failed to publish zmq frame from {cam_topic} camera: {e}")
 
-    def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
-        """Submit buffered BGR arrays to WebRTC at the camera FPS."""
+    def _depth_zmq_pub(self, cam_topic: str, camera: BaseCamera):
+        """Publish each new depth packet over ZMQ as it arrives, until shutdown.
+
+        A stall is logged once until depth returns. A failure ends this output only.
+        """
         try:
-            interval = 1.0 / camera.get_fps()
-            webrtc_codec = camera.get_webrtc_codec()
-            next_frame_time = time.monotonic()
+            no_frame_warned = False
             while not self._stop_event.is_set():
-                # The buffers keep a stopped camera's last frame; never send it
-                # as if it were live.
-                if time.monotonic() - self._camera_frame_times.get(cam_topic, float("-inf")) >= STALE_FRAME_AGE:
-                    self._stop_event.wait(interval)
+                depth_bytes = camera.get_depth_zmq_message(timeout=PUBLISH_TIMEOUT)
+                if depth_bytes is None:
+                    if not no_frame_warned and not self._stop_event.is_set():
+                        logger_mp.warning(f"[Image Server] {cam_topic} produced no new depth frame for {PUBLISH_TIMEOUT}s.")
+                        no_frame_warned = True
                     continue
-                bgr_frame = camera.get_bgr_frame()
+                no_frame_warned = False
+                self._zmq_publisher_manager.publish(depth_bytes, camera.get_depth_zmq_port())
+        except Exception as e:
+            logger_mp.error(f"[Image Server] Failed to publish depth frame from {cam_topic} camera: {e}")
 
-                if bgr_frame is not None:
-                    self._webrtc_publisher_manager.publish(bgr_frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
-                else:
-                    # No frame yet, or this camera stopped: skip it and keep
-                    # publishing the others.
-                    logger_mp.debug(f"[Image Server] {cam_topic} returned no frame.")
-                    self._stop_event.wait(interval)
+    def _webrtc_pub(self, cam_topic: str, camera: BaseCamera):
+        """Submit each new WebRTC video frame as it arrives while a client is connected.
+
+        The camera converts frames for WebRTC only while the publisher's
+        connected event is set. A stall is logged once until frames return.
+        A failure ends this output only.
+        """
+        try:
+            webrtc_codec = camera.get_webrtc_codec()
+            connected = self._webrtc_publisher_manager.connected_event(camera.get_webrtc_port(), codec_pref=webrtc_codec)
+            camera.set_webrtc_connected(connected)
+            no_frame_warned = False
+            while not self._stop_event.is_set():
+                if not connected.is_set():
+                    connected.wait(0.1)
                     continue
-
-                next_frame_time += interval
-                sleep_time = next_frame_time - time.monotonic()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                else:
-                    next_frame_time = time.monotonic()
+                frame = camera.get_color_webrtc_frame(timeout=PUBLISH_TIMEOUT)
+                if frame is not None:
+                    no_frame_warned = False
+                    self._webrtc_publisher_manager.publish(frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)
+                elif connected.is_set() and not no_frame_warned and not self._stop_event.is_set():
+                    logger_mp.warning(f"[Image Server] {cam_topic} produced no new frame for {PUBLISH_TIMEOUT}s.")
+                    no_frame_warned = True
         except Exception as e:
             logger_mp.error(f"[Image Server] Failed to publish rtc frame from {cam_topic} camera: {e}")
 
@@ -471,7 +494,7 @@ class TeleImageServer:
         """Stop outputs, join workers briefly, and release camera resources."""
         if self._app_stream is not None:
             self._app_stream.stop()
-        self._responser.stop()
+        self._responder.stop()
         for t in self._publisher_threads:
             if t.is_alive():
                 t.join(timeout=1.0)
@@ -540,8 +563,13 @@ class TeleImageServer:
                 t.start()
                 self._publisher_threads.append(t)
 
-            if camera.enable_zmq():
-                t = threading.Thread(target=self._zmq_pub, args=(camera_topic, camera), daemon=True)
+            if camera.enable_color_zmq():
+                t = threading.Thread(target=self._color_zmq_pub, args=(camera_topic, camera), daemon=True)
+                t.start()
+                self._publisher_threads.append(t)
+
+            if camera.enable_depth_zmq():
+                t = threading.Thread(target=self._depth_zmq_pub, args=(camera_topic, camera), daemon=True)
                 t.start()
                 self._publisher_threads.append(t)
 
@@ -570,8 +598,10 @@ def run_isaacsim_server(config_path=None, *, streaming_config=None):
 
 
 def main():
-    # ANSI colors for --help, only when stdout is a real terminal (skipped when piped/redirected).
     """Run camera discovery, host setup, or streaming from command-line options."""
+    logger_mp.info(f"[Teleimager] TeleImager v{__version__} on {platform.system()} {platform.machine()}")
+
+    # ANSI colors for --help, only when stdout is a real terminal (skipped when piped/redirected).
     _tty = sys.stdout.isatty()
     C = (lambda s, code: f"\033[{code}m{s}\033[0m" if _tty else s)
     head = lambda s: C(s, "1;36")   # bold cyan  — section / step titles
@@ -579,6 +609,9 @@ def main():
     flag = lambda s: C(s, "33")     # yellow     — flags / params
     dim  = lambda s: C(s, "2")      # dim        — notes / hints
     url  = lambda s: C(s, "4;34")   # underline blue — links
+    # $(which ...) survives sudo's secure_path; kept out of the f-string below,
+    # which cannot hold a backslash-escaped quote.
+    setup_cmd = cmd('sudo "$(which teleimager-server)" --setup-service')
 
     guide = (
         f"{head('Getting started:')}\n"
@@ -600,6 +633,9 @@ def main():
         f"  {head('Step 4')} — Receive the streams:\n"
         f"      {flag('ZMQ')}    : {cmd('teleimager-client --host <server_ip>')}\n"
         f"      {flag('WebRTC')} : open {url('https://<server_ip>:<webrtc_port>')} in a browser\n"
+        "\n"
+        f"  {head('Step 5')} — Optional: run it as a service, so it comes up on every boot:\n"
+        f"      {setup_cmd} {flag('--config <server.yaml>')}"
     )
     parser = argparse.ArgumentParser(
         description="TeleImager: Unitree multi-camera image streaming service.",
@@ -607,7 +643,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('--setup-permissions', action='store_true', help='Grant camera access to non-root users (run once with sudo), then exit. Installs a udev rule, adds you to the video group, and allows the driver reload without a password.')
-    parser.add_argument('--user', default=None, metavar='USER', help='(with --setup-permissions) Grant camera access to this account instead of $SUDO_USER. Needed from a root shell (`sudo su -`), where $SUDO_USER is unset.')
+    parser.add_argument('--setup-service', action='store_true', help='Install and enable a systemd unit that starts this server on boot (run once with sudo), then exit. Needs --config; the unit passes it, and --streaming-config / --cert / --key when given, as absolute paths.')
+    parser.add_argument('--user', default=None, metavar='USER', help='(with --setup-permissions or --setup-service) Grant camera access / run the boot service as this account instead of $SUDO_USER. Needed from a root shell (`sudo su -`), where $SUDO_USER is unset.')
     parser.add_argument('--cf', action='store_true', help='Camera-finder mode: scan and print all connected cameras, then exit.')
     parser.add_argument('--uvc', action='store_true', help='In --cf, include the UVC (libuvc -> pyuvc) backend in the scan.')
     parser.add_argument('--v4l2', action='store_true', help='In --cf, include the V4L2 (PyAV) backend in the scan.')
@@ -621,9 +658,14 @@ def main():
     parser.add_argument('--key', default=None, metavar='PATH', help='Path to the TLS private key (overrides the default ~/.config/teleimager/key.pem).')
     args = parser.parse_args()
 
-    # Host setup runs independently of server configuration and CPU affinity.
+    # Host setup runs independently of CPU affinity and opens no camera.
     if args.setup_permissions:
         sys.exit(setup_permissions(args.user))
+    if args.setup_service:
+        if not args.config:
+            parser.error("--setup-service needs --config <server.yaml>, the file the service will serve")
+        sys.exit(setup_service(args.config, args.user, streaming_config=args.streaming_config,
+                               cert=args.cert, key=args.key))
 
     if not args.cf and not args.config and not os.environ.get("TELEIMAGER_CONFIG"):
         parser.error("select a server configuration with --config or TELEIMAGER_CONFIG")

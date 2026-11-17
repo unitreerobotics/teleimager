@@ -19,16 +19,22 @@
 # ------------------------------------------------------------------------------
 
 
-"""Discover server camera settings and receive JPEG streams over ZMQ."""
+"""Discover server camera settings and receive color and depth streams over ZMQ."""
 
-from typing import Dict
+from typing import Dict, Optional
+import platform
 import threading
 import time
 
 import logging_mp
+import numpy as np
 
+from . import __version__
+from .frame import DepthPacket, TeleImage
 from .transport.zmq_request import ZMQ_Requester
 from .transport.zmq_subscriber import STALL_SECONDS, ZMQ_SubscriberManager
+
+__all__ = ["DepthPacket", "TeleImage", "TeleImageClient"]
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
@@ -56,29 +62,40 @@ class TeleImageClient:
             cls._instances[topic] = instance
             return instance
 
-    def __init__(self, camera_topic, server_host, zmq_port, request_bgr: bool = False):
-        """Subscribe once to the selected camera endpoint.
+    def __init__(self, camera_topic, server_host, color_port, request_bgr: bool = False,
+                 depth_port: Optional[int] = None):
+        """Subscribe once to the selected camera endpoints.
 
         Args:
             camera_topic: Camera label and per-topic singleton key.
             server_host: Hostname or IP address of the TeleImager server.
-            zmq_port: Port publishing this camera's JPEG stream.
+            color_port: Port publishing this camera's color JPEG stream.
             request_bgr: Enable background JPEG-to-BGR decoding.
+            depth_port: Optional port publishing this camera's depth stream.
+
+        Raises:
+            RuntimeError: depth_port is given but zstandard is not installed.
         """
         if getattr(self, "_initialized", False):
             return  # Reusing a topic must not acquire another subscription.
         self._initialized = True
         self._camera_topic = camera_topic
         self._server_host = server_host
-        self._zmq_port = zmq_port
+        self._color_port = color_port
+        self._depth_port = depth_port
         self._request_bgr = request_bgr
         self._closed = False
         self._subscriber_manager = ZMQ_SubscriberManager.get_instance()
-        self._subscriber_manager.subscribe(self._server_host, self._zmq_port, request_bgr=self._request_bgr)
+        self._subscriber_manager.subscribe(self._server_host, self._color_port, request_bgr=self._request_bgr)
+        if depth_port is not None:
+            if not DepthPacket.available:
+                raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
+            self._subscriber_manager.subscribe(self._server_host, depth_port, transform=DepthPacket.decode)
         # No-frame watchdog state (edge-triggered warning; see get_frame).
         self._last_frame_ts = time.perf_counter()
         self._stalled = False
-        logger_mp.info(f" 📷 Camera {self._camera_topic!r:<22} init ok (host={self._server_host}, zmq_port={self._zmq_port}, request_bgr={self._request_bgr})")
+        logger_mp.info(f" 📷 Camera {self._camera_topic!r:<22} init ok (host={self._server_host}, color_port={self._color_port}, "
+                       f"depth_port={self._depth_port}, request_bgr={self._request_bgr})")
 
     # Public API.
     @classmethod
@@ -108,21 +125,28 @@ class TeleImageClient:
             def _shape(s):
                 return f"{s[0]}x{s[1]}" if isinstance(s, (list, tuple)) and len(s) == 2 else str(s)
             topic_w = max((len(t) for t in camera_config), default=0)
-            type_w = max((len(str(cfg.get('type'))) for cfg in camera_config.values()), default=0)
+            type_w = max((len(str(cfg.get('driver_type'))) for cfg in camera_config.values()), default=0)
             shape_w = max((len(_shape(cfg.get('image_shape'))) for cfg in camera_config.values()), default=0)
             for topic, cfg in camera_config.items():
-                zmq_on = 'on' if cfg.get('enable_zmq') else 'off'
+                color_on = 'on' if cfg.get('enable_color_zmq') else 'off'
+                depth_on = 'on' if cfg.get('enable_depth_zmq') else 'off'
                 webrtc_on = 'on' if cfg.get('enable_webrtc') else 'off'
                 logger_mp.info(
-                    f" 📷 {topic:<{topic_w}}  {str(cfg.get('type')):<{type_w}}  {_shape(cfg.get('image_shape')):>{shape_w}}  "
-                    f"zmq={zmq_on:<3}(port={cfg.get('zmq_port')})  webrtc={webrtc_on:<3}(port={cfg.get('webrtc_port')})"
+                    f" 📷 {topic:<{topic_w}}  {str(cfg.get('driver_type')):<{type_w}}  {_shape(cfg.get('image_shape')):>{shape_w}}  "
+                    f"color_zmq={color_on:<3}(port={cfg.get('color_zmq_port')})  "
+                    f"depth_zmq={depth_on:<3}(port={cfg.get('depth_zmq_port')})  "
+                    f"webrtc={webrtc_on:<3}(port={cfg.get('webrtc_port')})"
                 )
-            # Generate one explicit client per ZMQ-enabled topic.
-            topics = [t for t, cfg in camera_config.items() if cfg.get('enable_zmq')]
+            # Generate one explicit client per color-ZMQ topic, with its depth port when published.
+            topics = [t for t, cfg in camera_config.items() if cfg.get('enable_color_zmq')]
             if topics:
                 lines = ["import cv2, time", "from teleimager.client import TeleImageClient", ""]
                 for t in topics:
-                    lines.append(f'{t} = TeleImageClient("{t}", server_host="{server_host}", zmq_port={camera_config[t]["zmq_port"]}, request_bgr=True)')
+                    cfg = camera_config[t]
+                    depth_port = cfg.get('depth_zmq_port') if cfg.get('enable_depth_zmq') else None
+                    extra = f", depth_port={depth_port}" if depth_port is not None else ""
+                    lines.append(f'{t} = TeleImageClient("{t}", server_host="{server_host}", '
+                                 f'color_port={cfg.get("color_zmq_port")}{extra}, request_bgr=True)')
                 lines.append("try:")
                 lines.append("    while True:")
                 for t in topics:
@@ -143,10 +167,11 @@ class TeleImageClient:
         """Read the latest buffered image without waiting for a new frame.
 
         Returns:
-            A TeleImage with receive FPS, optional JPEG bytes, and optional BGR
-            data. Repeated reads may return the same buffered values.
+            A TeleImage with the color receive FPS, optional JPEG bytes,
+            optional BGR data, and, with a depth port, the latest DepthPacket
+            or None. Repeated reads may return the same buffered values.
         """
-        frame = self._subscriber_manager.subscribe(self._server_host, self._zmq_port, request_bgr=self._request_bgr)
+        frame = self._subscriber_manager.subscribe(self._server_host, self._color_port, request_bgr=self._request_bgr)
         # Log only stall and recovery transitions to avoid repeated warnings.
         now = time.perf_counter()
         if frame.jpg is not None:
@@ -157,7 +182,10 @@ class TeleImageClient:
         elif not self._stalled and now - self._last_frame_ts > STALL_SECONDS:
             self._stalled = True
             logger_mp.warning(f" 📷 Camera {self._camera_topic!r:<22} no frames for {STALL_SECONDS:g}s "
-                              f"@ {self._server_host}:{self._zmq_port} — is the server running and this port correct?")
+                              f"@ {self._server_host}:{self._color_port} — is the server running and this port correct?")
+        if self._depth_port is not None:
+            frame.depth = self._subscriber_manager.subscribe(
+                self._server_host, self._depth_port, transform=DepthPacket.decode).depth
         return frame
 
     def close(self):
@@ -173,6 +201,8 @@ class TeleImageClient:
 
 def main():
     """Discover live ZMQ cameras and display their decoded frames until quit."""
+    logger_mp.info(f"[Teleimager] TeleImager v{__version__} on {platform.system()} {platform.machine()}")
+
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', type=str, default='192.168.123.164', help='IP address of image server')
@@ -194,14 +224,17 @@ def main():
         return
     logger_mp.debug(f"[Teleimager] Camera config loaded: {camera_config}")
 
-    topics = [t for t, cfg in camera_config.items() if cfg.get('enable_zmq')]
-    if not topics:
+    # Visualize every color-ZMQ camera, with its depth when published; press 'q' to quit.
+    clients = {}
+    for topic, cfg in camera_config.items():
+        if not cfg.get('enable_color_zmq'):
+            continue
+        depth_port = cfg.get('depth_zmq_port') if cfg.get('enable_depth_zmq') else None
+        clients[topic] = TeleImageClient(topic, server_host=args.host, color_port=cfg['color_zmq_port'],
+                                         request_bgr=True, depth_port=depth_port)
+    if not clients:
         logger_mp.warning("[Teleimager] No ZMQ-enabled cameras to stream.")
         return
-
-    # Visualize every ZMQ-enabled camera; press 'q' to quit.
-    clients = {topic: TeleImageClient(topic, server_host=args.host, zmq_port=camera_config[topic]['zmq_port'], request_bgr=True)
-               for topic in topics}
 
     running = True
     try:
@@ -211,6 +244,13 @@ def main():
                 if frame.bgr is not None:
                     cv2.putText(frame.bgr, f"fps: {frame.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                     cv2.imshow(topic, frame.bgr)
+                if frame.depth is not None:
+                    meters = frame.depth.depth.astype(np.float32) * frame.depth.depth_scale
+                    # 0-5 m spans the full colormap; farther points saturate.
+                    vis = cv2.applyColorMap(np.clip(meters * (255.0 / 5.0), 0, 255).astype(np.uint8), cv2.COLORMAP_JET)
+                    vis[frame.depth.depth == 0] = 0  # Zero marks an invalid depth pixel.
+                    cv2.putText(vis, f"fps: {frame.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.imshow(f"{topic}_depth", vis)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 running = False

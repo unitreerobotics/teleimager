@@ -23,7 +23,7 @@ import sys
 
 import logging_mp
 
-from .camera import BaseCamera, _turbojpeg
+from .camera import BaseCamera, _jpeg_to_yuv_frame, _turbojpeg
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
@@ -48,9 +48,9 @@ class GStreamerCamera(BaseCamera):
             logger_mp.info(str(self))
 
     def __str__(self):
-        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        color_zmq = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        return f" 📷 Camera {self._cam_topic!r:<22} gstreamer, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} gstreamer, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {color_zmq}, {webrtc}"
 
     @staticmethod
     def get_gstreamer_module():
@@ -73,26 +73,24 @@ class GStreamerCamera(BaseCamera):
             if "Namespace" in str(e):
                 # The distro typelib dirs were added above, so Gst is genuinely absent.
                 logger_mp.error(
-                    f"GStreamer typelibs missing ({e}).\n"
-                    "  Install them system-wide:\n"
-                    "      sudo apt install gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0"
+                    f"GStreamer typelibs missing ({e}).  Install them system-wide:\n"
+                    "    sudo apt install gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0"
                 )
             else:
                 # PyGObject must match the interpreter: conda ships its own, apt's serves the distro python.
                 if os.path.exists(os.path.join(sys.prefix, "conda-meta")):
-                    install = "      conda install -c conda-forge pygobject\n"
+                    install = "        conda install -c conda-forge pygobject\n"
                 elif any(p.endswith("/dist-packages") for p in sys.path):
-                    install = "      sudo apt install python3-gi\n"
+                    install = "        sudo apt install python3-gi\n"
                 else:
-                    install = ("      pip install PyGObject\n"
-                               "      (source build also needs: sudo apt install libgirepository1.0-dev libcairo2-dev)\n")
+                    install = ("        pip install PyGObject\n"
+                               "        (source build also needs: sudo apt install libgirepository1.0-dev libcairo2-dev)\n")
                 logger_mp.error(
-                    f"PyGObject/GStreamer not installed ({e}).\n"
-                    f"  Interpreter: {sys.executable}\n"
-                    "  [1/2] PyGObject — the Python binding, this interpreter only:\n"
+                    f"PyGObject/GStreamer not installed ({e}), for interpreter {sys.executable}.  Both are needed:\n"
+                    "    [1/2] PyGObject — the Python binding, this interpreter only:\n"
                     f"{install}"
-                    "  [2/2] GStreamer — typelibs + plugins, system-wide (always needed):\n"
-                    "      sudo apt install gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-{base,good,bad}"
+                    "    [2/2] GStreamer — typelibs + plugins, system-wide:\n"
+                    "        sudo apt install gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-{base,good,bad}"
                 )
             sys.exit(1)
 
@@ -120,6 +118,27 @@ class GStreamerCamera(BaseCamera):
         sink.set_property("max-buffers", 1)
         sink.set_property("drop", True)
         sink.set_property("caps", Gst.Caps.from_string("image/jpeg"))
+
+        # 0 keeps the frame rate constant in low light instead of lengthening
+        # exposure; only v4l2src sources have the control.
+        applied = False
+        it = pipe.iterate_elements()
+        while True:
+            ok, elem = it.next()
+            if ok != Gst.IteratorResult.OK:
+                break
+            factory = elem.get_factory()
+            if factory is not None and factory.get_name() == "v4l2src":
+                applied = True
+                try:
+                    controls = elem.get_property("extra-controls") or Gst.Structure.new_empty("controls")
+                    controls.set_value("exposure_dynamic_framerate", 0)
+                    elem.set_property("extra-controls", controls)
+                except Exception as e:
+                    logger_mp.info(f"[GStreamerCamera] {self._cam_topic}: exposure_dynamic_framerate not applied ({e})")
+        if not applied:
+            logger_mp.debug("[GStreamerCamera] no v4l2src element; exposure_dynamic_framerate not applied")
+
         pipe.set_state(Gst.State.PLAYING)
         return pipe, sink
 
@@ -144,16 +163,20 @@ class GStreamerCamera(BaseCamera):
         return self._pull_jpeg(self.sink, timeout_ns=5_000_000_000) is not None
 
     def _update_frame(self):
-        """Refresh JPEG and optional BGR buffers, raising if no sample arrives."""
+        """Refresh the color ZMQ, WebRTC, and BGR buffers, raising if no sample arrives."""
         jpeg_bytes = self._pull_jpeg(self.sink)
         if jpeg_bytes is None:
             raise RuntimeError
 
         # Preserve encoded JPEG bytes for ZMQ to avoid re-encoding.
-        if self._enable_zmq:
-            self._zmq_buffer.write(jpeg_bytes)
+        if self._enable_color_zmq:
+            self._color_zmq_buffer.write(jpeg_bytes)
 
-        # Decode only when WebRTC or App streaming requests BGR output.
+        # WebRTC takes YUV planes straight from the JPEG, only while a client watches.
+        if self._webrtc_connected.is_set():
+            self._webrtc_buffer.write(_jpeg_to_yuv_frame(jpeg_bytes))
+
+        # Decode to BGR only for the App stream.
         if self._enable_bgr_output:
             self._bgr_buffer.write(_turbojpeg.decode(jpeg_bytes))
 
@@ -223,14 +246,8 @@ class GStreamerCamera(BaseCamera):
                 launch = mlaunch.group(1).strip()
                 launch = re.sub(r"\s*!\s*\.\.\.\s*$", "", launch).rstrip("! ").strip()
 
+                # RealSense nodes belong to the realsense backend.
                 if "realsense" in (name or "").lower():
-                    cards.append({
-                        "type": "gstreamer",
-                        "name": name,
-                        "video_path": device,
-                        "recommend_backend": "realsense",
-                        "gst_pipeline": None,
-                    })
                     name, device = None, None
                     continue
                 # Prefer a replug-stable device path over the raw /dev/videoN.
@@ -259,6 +276,6 @@ class GStreamerCamera(BaseCamera):
         """Create a pipeline camera, or return None if gst_pipeline is missing."""
         gst_pipeline = server_cfg.get("gst_pipeline")
         if not gst_pipeline:
-            logger_mp.error(f"[Teleimager] type 'gstreamer' for {cam_topic} requires a 'gst_pipeline' (must contain appsink).")
+            logger_mp.error(f"[Teleimager] driver_type 'gstreamer' for {cam_topic} requires a 'gst_pipeline' (must contain appsink).")
             return None
         return cls(cam_topic, gst_pipeline, server_cfg)

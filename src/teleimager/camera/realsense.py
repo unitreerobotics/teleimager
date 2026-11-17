@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 
+import av
 import logging_mp
 import numpy as np
 
@@ -31,15 +32,18 @@ logger_mp.setLevel(logging_mp.INFO)
 
 
 class RealSenseCamera(BaseCamera):
-    """Read color and optional aligned depth frames through the RealSense SDK."""
+    """Read color and optional aligned depth frames through the RealSense SDK.
+
+    With enable_depth_zmq, each depth frame is aligned to its color frame and
+    written with the color frame number and the device depth scale (meters per
+    unit); a frame whose alignment fails publishes no depth.
+    """
 
     def __init__(self, cam_topic, serial_number, server_cfg):
         """Open the selected serial number with BGR color and optional z16 depth."""
         rs = self.get_realsense_module()
         super().__init__(cam_topic, server_cfg)
         self._serial_number = serial_number
-        self._enable_depth = server_cfg.get("enable_depth", False)
-        self._latest_depth = None
         try:
             align_to = rs.stream.color
             self.align = rs.align(align_to)
@@ -48,17 +52,31 @@ class RealSenseCamera(BaseCamera):
             config.enable_device(self._serial_number)
 
             config.enable_stream(rs.stream.color, self._img_shape[1], self._img_shape[0], rs.format.bgr8, self._fps)
-            if self._enable_depth:
+            if self._enable_depth_zmq:
                 config.enable_stream(rs.stream.depth, self._img_shape[1], self._img_shape[0], rs.format.z16, self._fps)
 
-            profile = self.pipeline.start(config)
+            try:
+                profile = self.pipeline.start(config)
+            except RuntimeError as e:
+                if self._enable_depth_zmq and "cannot stream together" in str(e):
+                    raise RuntimeError(f"{e} — with depth enabled, color+depth are limited to 45 fps or lower")
+                raise
             self._device = profile.get_device()
             if self._device is None:
                 logger_mp.error('[Teleimager] pipe_profile.get_device() is None .')
-            if self._enable_depth:
+            # Priority 0 keeps the color frame rate constant in low light
+            # instead of lengthening exposure.
+            color_sensor = self._device.first_color_sensor() if self._device is not None else None
+            if color_sensor is not None:
+                try:
+                    color_sensor.set_option(rs.option.auto_exposure_priority, 0)
+                except Exception as e:
+                    logger_mp.debug(f"[RealSenseCamera] {cam_topic}: auto_exposure_priority not supported: {e}")
+
+            if self._enable_depth_zmq:
                 assert self._device is not None
-                depth_sensor = self._device.first_depth_sensor()
-                self.g_depth_scale = depth_sensor.get_depth_scale()
+                self._depth_scale = self._device.first_depth_sensor().get_depth_scale()
+                self._align_warned = False
 
             self.intrinsics = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
             logger_mp.info(str(self))
@@ -71,45 +89,53 @@ class RealSenseCamera(BaseCamera):
             raise RuntimeError(f"[RealSenseCamera] Failed to initialize RealSense camera {self._serial_number}: {e}")
 
     def __str__(self):
-        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        color = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
+        depth = f"depth_zmq=on (port={self._depth_zmq_port})" if self._enable_depth_zmq else "depth_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        return f" 📷 Camera {self._cam_topic!r:<22} realsense, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} realsense, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {color}, {depth}, {webrtc}"
 
     def _update_frame(self):
-        """Wait for aligned frames and refresh color and optional depth buffers."""
+        """Wait for frames and refresh the color, depth, WebRTC, and BGR buffers.
+
+        Frames are aligned only when depth is enabled; color alone needs no
+        alignment.
+        """
         frames = self.pipeline.wait_for_frames()
-        aligned_frames = self.align.process(frames)
-        color_frame = aligned_frames.get_color_frame()
+        aligned = False
+        if self._enable_depth_zmq:
+            try:
+                frames = self.align.process(frames)
+                aligned = True
+            except RuntimeError as e:
+                if not self._align_warned:
+                    logger_mp.warning(f"[RealSenseCamera] {self._cam_topic}: depth align failed, "
+                                      f"dropping depth frames until it recovers: {e}")
+                    self._align_warned = True
+
+        color_frame = frames.get_color_frame()
         if not color_frame:
             return None
-
-        if self._enable_depth:
-            depth_frame = aligned_frames.get_depth_frame()
-            if depth_frame:
-                self._latest_depth = np.asanyarray(depth_frame.get_data())
-            else:
-                self._latest_depth = None
-
+        color_frame_no = color_frame.get_frame_number()
         bgr_numpy = np.asanyarray(color_frame.get_data())
+
+        if self._enable_depth_zmq and aligned:
+            depth_frame = frames.get_depth_frame()
+            if depth_frame:
+                # Copy: the SDK reuses the frame memory once the frameset is released.
+                depth_image = np.asanyarray(depth_frame.get_data()).copy()
+                self._depth_zmq_buffer.write((color_frame_no, depth_image, self._depth_scale))
+
+        if self._webrtc_connected.is_set():
+            self._webrtc_buffer.write(av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24"))
+
+        if self._enable_color_zmq:
+            self._color_zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
 
         if self._enable_bgr_output:
             self._bgr_buffer.write(bgr_numpy)
 
-        if self._enable_zmq:
-            self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
-
         if not self._ready.is_set():
             self._ready.set()
-
-    def get_depth_frame(self):
-        """Return the latest aligned z16 depth bytes, or None if unavailable.
-
-        Capture updates this data in _update_frame(). The image shape matches the
-        color stream; multiply raw depth values by g_depth_scale to obtain meters.
-        """
-        if self._latest_depth is None:
-            return None
-        return self._latest_depth.tobytes()
 
     def release(self):
         """Stop the SDK pipeline and clear its reference."""
@@ -130,8 +156,6 @@ class RealSenseCamera(BaseCamera):
         except ImportError:
             arch = platform.machine()
             system = platform.system()
-            print(f"[RealSense] Platform: {system} / {arch}")
-
             msg = (
                 "[RealSense] pyrealsense2 not installed. Try pip first:\n"
                 "    pip install pyrealsense2\n"
@@ -165,7 +189,7 @@ class RealSenseCamera(BaseCamera):
 
     @staticmethod
     def _list_video_paths():
-        """Find Linux video nodes with a RealSense name and Intel USB vendor ID."""
+        """Find Linux video nodes whose name contains RealSense."""
         def _read_text(path):
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -173,28 +197,14 @@ class RealSenseCamera(BaseCamera):
             except Exception:
                 return None
 
-        def _parent_usb_device_sysdir(video_sysdir):
-            d = (Path(video_sysdir) / "device").resolve()
-            for _ in range(10):
-                if not d.is_dir():
-                    break
-                id_vendor = _read_text(d / "idVendor")
-                id_product = _read_text(d / "idProduct")
-                if id_vendor and id_product:
-                    return str(d)
-                if d.parent == d:
-                    break
-                d = d.parent
-            return None
-
         ports = []
         for devnode in sorted(glob.glob("/dev/video*")):
             sysdir = Path("/sys/class/video4linux") / Path(devnode).name
             name = _read_text(sysdir / "name")
-            usb_dir = _parent_usb_device_sysdir(sysdir)
-            vendor_id = _read_text(Path(usb_dir) / "idVendor") if usb_dir else None
 
-            if name and "realsense" in name.lower() and (vendor_id or "").lower() in ("8086", "32902"):
+            # Match by USB product name only: the vendor ID varies across OEM
+            # and prototype units.
+            if name and "realsense" in name.lower():
                 ports.append(devnode)
 
         return ports

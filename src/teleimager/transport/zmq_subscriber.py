@@ -19,10 +19,10 @@
 # ------------------------------------------------------------------------------
 
 
-"""Receive the latest JPEG frames and optionally decode BGR in a background worker."""
+"""Receive the latest JPEG or depth messages and optionally decode BGR in a background worker."""
 
 from collections import deque
-from typing import Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 import contextlib
 import queue
 import sys
@@ -39,6 +39,10 @@ logger_mp.setLevel(logging_mp.INFO)
 
 
 STALL_SECONDS = 3.0
+# ZMTP heartbeats: ping an idle peer every 5 s and drop the connection after
+# 15 s without traffic, so a vanished server is noticed and reconnected.
+HEARTBEAT_IVL_MS = 5000
+HEARTBEAT_TIMEOUT_MS = 15000
 
 
 try:
@@ -117,39 +121,44 @@ class SimpleFPSMonitor:
 
 
 class ZMQ_SubscriberThread(threading.Thread):
-    """Own a SUB socket and latest-frame buffers, with optional background decoding."""
+    """Own a SUB socket and latest-message buffers, with optional background decoding."""
 
-    def __init__(self, host: str, port: int, context: Optional[zmq.Context] = None, request_bgr: bool = False):
+    def __init__(self, host: str, port: int, context: Optional[zmq.Context] = None, request_bgr: bool = False,
+                 transform: Optional[Callable[[bytes], Any]] = None):
         """Prepare the subscriber and optional BGR decoder worker.
 
         Args:
             host: Server hostname or IP address to connect to.
-            port: Server JPEG publication port.
+            port: Server publication port (color JPEG or depth packets).
             context: Shared ZMQ context; defaults to Context.instance().
             request_bgr: Start a background JPEG-to-BGR decoder.
+            transform: Optional callable turning a raw message into the stored
+                payload, such as DepthPacket.decode; messages it raises on
+                are dropped.
         """
         super().__init__(daemon=True)
         self._host = host
         self._port = port
         self._context = context or zmq.Context.instance()
         self._request_bgr = request_bgr
+        self._transform = transform
 
         self._socket = None
         self._running = True
         self._started = threading.Event()
 
-        self._jpg_3ring_buffer = TripleRingBuffer()
+        self._payload_buffer = TripleRingBuffer()
         self._fps_monitor = SimpleFPSMonitor(window_size=10)
         if self._request_bgr:
             self._init_bgr_decoder()
         else:
-            self._bgr_3ring_buffer = None
+            self._bgr_buffer = None
             self._bgr_decode_queue = None
             self._decoder_thread = None
 
     def _init_bgr_decoder(self):
         """Create a latest-frame decode queue, output buffer, and decoder thread."""
-        self._bgr_3ring_buffer = TripleRingBuffer()
+        self._bgr_buffer = TripleRingBuffer()
         self._bgr_decode_queue = queue.Queue(maxsize=1)
         self._decoder_thread = threading.Thread(target=self._decoder_loop, daemon=True)
         self._decoder_thread.start()
@@ -180,30 +189,32 @@ class ZMQ_SubscriberThread(threading.Thread):
                     self._bgr_decode_queue.task_done()
                     continue
                 img_numpy = self._decode_image(jpg_bytes)
-                self._bgr_3ring_buffer.write(img_numpy)
+                self._bgr_buffer.write(img_numpy)
                 self._bgr_decode_queue.task_done()
             except queue.Empty:
                 continue
 
-    def _wait_for_start(self, timeout: float = 1.0) -> bool:
+    # Public API.
+    def wait_for_start(self, timeout: float = 1.0) -> bool:
         """Wait for socket setup and return whether the subscriber became ready."""
         return self._started.wait(timeout=timeout)
 
-    # Public API.
     def recv(self) -> TeleImage:
-        """Read the current buffers without waiting for a new frame.
+        """Read the current buffers without waiting for a new message.
 
         Returns:
-            A TeleImage with receive FPS and optional JPEG and BGR data. JPEG and
-            BGR buffers update independently and may represent different frames.
+            A TeleImage with the receive FPS. Color subscribers fill jpg and,
+            with BGR decoding, bgr; JPEG and BGR buffers update independently
+            and may represent different frames. Subscribers with a transform
+            (depth) fill depth and leave jpg None.
         """
         current_fps = self._fps_monitor.fps
-        jpg_data = self._jpg_3ring_buffer.read()
-        if not self._request_bgr:
-            return TeleImage(fps=current_fps, jpg=jpg_data)
-
-        bgr_data = self._bgr_3ring_buffer.read()
-        return TeleImage(fps=current_fps, jpg=jpg_data, bgr=bgr_data)
+        payload = self._payload_buffer.read()
+        if self._transform is not None:
+            return TeleImage(fps=current_fps, jpg=None, depth=payload)
+        if self._request_bgr:
+            return TeleImage(fps=current_fps, jpg=payload, bgr=self._bgr_buffer.read())
+        return TeleImage(fps=current_fps, jpg=payload)
 
     def stop(self) -> None:
         """Request shutdown and wait briefly for the subscriber and decoder threads."""
@@ -222,7 +233,7 @@ class ZMQ_SubscriberThread(threading.Thread):
         """Own the SUB socket and receive into latest-frame buffers.
 
         Keep transport and decode queues short to limit latency. Empty polls clear
-        the JPEG buffer; a sustained stall resets the measured receive rate.
+        the payload buffer; a sustained stall resets the measured receive rate.
         """
         try:
             # Keep socket creation, I/O, and closure on the same worker.
@@ -230,6 +241,8 @@ class ZMQ_SubscriberThread(threading.Thread):
             self._socket.setsockopt(zmq.CONFLATE, 1)  # Only keep latest message
             self._socket.setsockopt(zmq.RCVHWM, 1)    # Limit receive-side backlog
             self._socket.setsockopt(zmq.LINGER, 0)
+            self._socket.setsockopt(zmq.HEARTBEAT_IVL, HEARTBEAT_IVL_MS)
+            self._socket.setsockopt(zmq.HEARTBEAT_TIMEOUT, HEARTBEAT_TIMEOUT_MS)
             self._socket.connect(f"tcp://{self._host}:{self._port}")
             self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
@@ -245,7 +258,11 @@ class ZMQ_SubscriberThread(threading.Thread):
                 if self._socket in events:
                     try:
                         img_bytes = self._socket.recv()
-                        self._jpg_3ring_buffer.write(img_bytes)
+                        try:
+                            payload = self._transform(img_bytes) if self._transform else img_bytes
+                        except Exception:
+                            continue  # Malformed message: keep the previous payload.
+                        self._payload_buffer.write(payload)
                         # Decode independently so JPEG reception stays responsive.
                         if self._request_bgr:
                             try:
@@ -262,7 +279,7 @@ class ZMQ_SubscriberThread(threading.Thread):
                             logger_mp.error(f"[Teleimager] Error in subscriber loop: {e}")
                         break
                 else:
-                    self._jpg_3ring_buffer.write(None)
+                    self._payload_buffer.write(None)
                     if self._request_bgr:
                         try:
                             if self._bgr_decode_queue.full():
@@ -300,24 +317,29 @@ class ZMQ_SubscriberManager:
         self._context = zmq.Context()
         self._running = True
 
-    def _create_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
+    def _create_subscriber_thread(self, host: str, port: int, request_bgr: bool = False,
+                                  transform=None) -> ZMQ_SubscriberThread:
         """Start a subscriber and raise ConnectionError if setup does not complete."""
         try:
-            subscriber_thread = ZMQ_SubscriberThread(host, port, self._context, request_bgr)
+            subscriber_thread = ZMQ_SubscriberThread(host, port, self._context, request_bgr, transform)
             subscriber_thread.start()
-            if not subscriber_thread._wait_for_start(timeout=1.0):
+            if not subscriber_thread.wait_for_start(timeout=1.0):
                 raise ConnectionError(f"Subscriber thread failed to start for {host}:{port}")
             return subscriber_thread
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to create subscriber thread for {host}:{port}: {e}")
             raise
 
-    def _get_subscriber_thread(self, host: str, port: int, request_bgr: bool = False) -> ZMQ_SubscriberThread:
-        """Reuse an endpoint worker and enable BGR decoding if requested."""
+    def _get_subscriber_thread(self, host: str, port: int, request_bgr: bool = False,
+                               transform=None) -> ZMQ_SubscriberThread:
+        """Reuse an endpoint worker and enable BGR decoding if requested.
+
+        The transform applies only when this call creates the worker.
+        """
         key = (host, port)
         with self._lock:
             if key not in self._subscriber_threads:
-                self._subscriber_threads[key] = self._create_subscriber_thread(host, port, request_bgr)
+                self._subscriber_threads[key] = self._create_subscriber_thread(host, port, request_bgr, transform)
             elif request_bgr:
                 self._subscriber_threads[key].ensure_bgr_enabled()
             return self._subscriber_threads[key]
@@ -332,13 +354,15 @@ class ZMQ_SubscriberManager:
             cls._ref_count += 1
             return cls._instance
 
-    def subscribe(self, host: str, port: int, request_bgr: bool = False) -> TeleImage:
-        """Read the latest image, starting an endpoint worker on first use.
+    def subscribe(self, host: str, port: int, request_bgr: bool = False, transform=None) -> TeleImage:
+        """Read the latest frame, starting an endpoint worker on first use.
 
         Args:
             host: Server hostname or IP address.
-            port: Server JPEG publication port.
+            port: Server publication port (color JPEG or depth packets).
             request_bgr: Enable BGR decoding for this shared endpoint.
+            transform: Message decoder applied when this call creates the
+                worker, such as DepthPacket.decode.
 
         Returns:
             A TeleImage containing the current receive rate and buffered data.
@@ -350,7 +374,7 @@ class ZMQ_SubscriberManager:
         if not self._running:
             raise RuntimeError("SubscriberManager is closed.")
 
-        subscriber_thread = self._get_subscriber_thread(host, port, request_bgr=request_bgr)
+        subscriber_thread = self._get_subscriber_thread(host, port, request_bgr=request_bgr, transform=transform)
         return subscriber_thread.recv()
 
     def close(self) -> None:

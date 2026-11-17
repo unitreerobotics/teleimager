@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serve browser previews and publish BGR frames through aiohttp and aiortc."""
+"""Serve browser previews and publish video frames through aiohttp and aiortc."""
 
 from importlib import resources
 from pathlib import Path
@@ -34,7 +34,6 @@ from aiortc.contrib.media import MediaRelay
 from aiortc.rtcrtpsender import RTCRtpSender
 import av
 import logging_mp
-import numpy as np
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
@@ -45,17 +44,42 @@ CERT_PEM_PATH = CONFIG_DIR / "cert.pem"
 KEY_PEM_PATH = CONFIG_DIR / "key.pem"
 
 
-_GOP_LENGTH = 60
+_GOP_LENGTH = 60  # Frames between keyframes; set to 2 s at the configured fps.
+_WEBRTC_FPS = 30  # Encoder frame rate; set from the WebRTC cameras' fps.
+
+# H.264 encoders as (FFmpeg name, options). A hardware encoder is used when
+# this FFmpeg build has it and it opens at startup; otherwise libx264 (CPU).
+_SW_H264 = ("libx264", {"preset": "ultrafast", "tune": "zerolatency", "threads": "1"})
+_HW_H264 = [("h264_nvenc", {"preset": "p1", "tune": "ull", "zerolatency": "1", "bf": "0", "delay": "0"}),
+            ("h264_nvmpi", {}),
+            ("h264_nvv4l2enc", {})]
+_H264_ENCODER = _SW_H264
+
+
+def _open_h264(name, options, width=640, height=480, bitrate=1_000_000):
+    """Open an H.264 encoder; the default size and bitrate form the startup probe frame."""
+    codec = av.CodecContext.create(name, "w")
+    codec.width = width
+    codec.height = height
+    codec.bit_rate = bitrate
+    codec.pix_fmt = "yuv420p"
+    codec.framerate = fractions.Fraction(_WEBRTC_FPS, 1)
+    codec.time_base = fractions.Fraction(1, _WEBRTC_FPS)
+    codec.options = {**options, "g": str(_GOP_LENGTH)}
+    codec.open()
+    return codec
 
 
 def _apply_webrtc_config(server_config):
-    """Apply process-wide codec bitrate limits and the software H264 encoder.
+    """Apply process-wide codec limits, frame rate, GOP and the H.264 encoder.
 
-    Installs the libx264 encoding method on aiortc's H264Encoder and updates
-    module-level bitrate and GOP settings used by publisher threads.
+    Installs h264_encode_frame on aiortc's H264Encoder and updates module-level
+    bitrate settings. With WebRTC cameras, the encoder frame rate follows their
+    fps (30 when they differ), the GOP defaults to 2 s, and an H.264 hardware
+    encoder that opens on a probe frame replaces libx264.
     """
-    global _GOP_LENGTH
-    h264.H264Encoder._encode_frame = jetson_software_encode_frame
+    global _GOP_LENGTH, _WEBRTC_FPS, _H264_ENCODER
+    h264.H264Encoder._encode_frame = h264_encode_frame
     cfg = (server_config or {}).get("webrtc", {})
     bitrate = cfg.get("bitrate", {})
     from aiortc.codecs import vpx
@@ -63,42 +87,52 @@ def _apply_webrtc_config(server_config):
         if key in bitrate and int(bitrate[key]) >= 100_000:
             setattr(h264, attr, int(bitrate[key]))
             setattr(vpx, attr, int(bitrate[key]))
-    if "gop_length" in cfg and int(cfg["gop_length"]) > 0:
-        _GOP_LENGTH = int(cfg["gop_length"])
-    logger_mp.info(f"[Teleimager] bitrate min/default/max={h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}")
+    cameras = [c for c in (server_config or {}).get("camera", {}).values() if c.get("enable_webrtc")]
+    if not cameras:
+        return
+
+    fps = {int(c.get("fps", 30)) for c in cameras}
+    _WEBRTC_FPS = fps.pop() if len(fps) == 1 else 30
+    gop = cfg.get("gop_length")
+    _GOP_LENGTH = int(gop) if gop and int(gop) > 0 else _WEBRTC_FPS * 2
+
+    codecs = {(c.get("webrtc_codec") or "h264").lower() for c in cameras}
+    if codecs - {"vp8"}:
+        for name, options in _HW_H264:
+            try:
+                list(_open_h264(name, options).encode(av.VideoFrame(640, 480, format="yuv420p")))
+                _H264_ENCODER = (name, options)
+                break
+            except Exception:
+                logger_mp.debug(f"[Teleimager] H.264 hardware encoder {name} not available")
+    encoders = ", ".join("vp8 (libvpx)" if c == "vp8" else f"h264 ({_H264_ENCODER[0]})" for c in sorted(codecs))
+    logger_mp.info(f"[Teleimager] WebRTC encoder: {encoders}, bitrate min/default/max="
+                   f"{h264.MIN_BITRATE}/{h264.DEFAULT_BITRATE}/{h264.MAX_BITRATE}, gop={_GOP_LENGTH}, fps={_WEBRTC_FPS}")
 
 
-def jetson_software_encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
-    """Encode a video frame with libx264 and yield H264 bitstream units.
+def h264_encode_frame(self, frame: av.VideoFrame, force_keyframe: bool):
+    """Encode a video frame with the selected H.264 encoder and yield bitstream units.
 
-    Used as aiortc's H264Encoder method, with ultrafast, zerolatency, and one
-    encoder thread at a fixed 30 FPS encoder time base. Recreates the codec on
-    size changes and forces keyframes according to the configured GOP length.
+    Used as aiortc's H264Encoder method. Recreates the codec on size changes,
+    falls back to libx264 when the hardware encoder cannot open (for example
+    at its session limit), and forces keyframes every GOP length.
     """
     if self.codec and (frame.width != self.codec.width or frame.height != self.codec.height):
         self.codec = None
 
     if self.codec is None:
-        try:
-            self.codec = av.CodecContext.create("libx264", "w")
-            self.codec.width = frame.width
-            self.codec.height = frame.height
-            self.codec.bit_rate = self.target_bitrate
-            self.codec.pix_fmt = "yuv420p"
-            self.codec.framerate = fractions.Fraction(30, 1)
-            self.codec.time_base = fractions.Fraction(1, 30)
-
-            self.codec.options = {
-                "preset": "ultrafast",
-                "tune": "zerolatency",
-                "threads": "1",
-                "g": str(_GOP_LENGTH),
-            }
-            self.frame_count = 0
-            force_keyframe = True
-        except Exception as e:
-            logger_mp.error(f"[Teleimager] Initialization failed: {e}")
+        for name, options in (_H264_ENCODER, _SW_H264):
+            try:
+                self.codec = _open_h264(name, options, frame.width, frame.height, self.target_bitrate)
+                if name != _H264_ENCODER[0]:
+                    logger_mp.info(f"[Teleimager] H.264 encoder: {name} ({frame.width}x{frame.height}@{_WEBRTC_FPS})")
+                break
+            except Exception as e:
+                logger_mp.warning(f"[Teleimager] {name} failed to open: {e}")
+        if self.codec is None:
             return
+        self.frame_count = 0
+        force_keyframe = True
 
     if not force_keyframe and hasattr(self, "frame_count") and self.frame_count % _GOP_LENGTH == 0:
         force_keyframe = True
@@ -181,6 +215,7 @@ INDEX_HTML = """
 CLIENT_JS = """
 var pc = null;
 var _fallback = false;
+var FALLBACK_MS = 20000;
 
 function negotiate(codec) {
     pc.addTransceiver('video', { direction: 'recvonly' });
@@ -233,7 +268,7 @@ function start() {
         if (evt.track.kind == 'video') {
             var v = document.getElementById('video');
             v.srcObject = evt.streams[0];
-            // H.264 -> VP8 fallback: if no frames in 5s, reconnect with VP8
+            // H.264 -> VP8 fallback: if no frames in FALLBACK_MS, reconnect with VP8
             if (!_fallback) {
                 var t0 = v.currentTime;
                 setTimeout(function() {
@@ -242,7 +277,7 @@ function start() {
                         _fallback = true;
                         start();
                     }
-                }, 5000);
+                }, FALLBACK_MS);
             }
         } else {
             document.getElementById('audio').srcObject = evt.streams[0];
@@ -266,8 +301,8 @@ function stop() {
 """
 
 
-class BGRArrayVideoStreamTrack(MediaStreamTrack):
-    """Expose queued BGR images as video frames with a 90 kHz RTP time base."""
+class VideoFrameStreamTrack(MediaStreamTrack):
+    """Expose queued video frames, latest first, with a 90 kHz RTP time base."""
 
     kind = "video"
 
@@ -283,29 +318,28 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
         frame = await self._queue.get()
         return frame
 
-    def push_frame(self, bgr_numpy: np.ndarray, loop: Optional[asyncio.AbstractEventLoop] = None):
-        """Convert a BGR array and schedule it on the destination event loop.
+    def push_frame(self, frame: av.VideoFrame, loop: Optional[asyncio.AbstractEventLoop] = None):
+        """Timestamp a video frame and schedule it on the destination event loop.
 
-        Assigns timestamps from elapsed wall time using a 90 kHz clock. Queue
-        replacement runs on the event loop and drops an older queued frame.
+        Assigns timestamps from elapsed monotonic time using a 90 kHz clock, so
+        MediaRelay sees consistent PTS. Queue replacement runs on the event
+        loop and drops an older queued frame.
         """
-        if bgr_numpy is None:
+        if frame is None:
             return
 
         try:
-            video_frame = av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24")
-
             if self._start_time is None:
-                self._start_time = time.time()
+                self._start_time = time.monotonic()
                 self._pts = 0
             else:
-                self._pts = int((time.time() - self._start_time) * 90000)
+                self._pts = int((time.monotonic() - self._start_time) * 90000)
 
-            video_frame.pts = self._pts
-            video_frame.time_base = fractions.Fraction(1, 90000)
+            frame.pts = self._pts
+            frame.time_base = fractions.Fraction(1, 90000)
 
         except Exception as e:
-            logger_mp.debug(f"[Teleimager] Conversion failed: {e}")
+            logger_mp.debug(f"[Teleimager] Timestamping failed: {e}")
             return
 
         # Mutate the asyncio queue only on its owning event loop.
@@ -317,7 +351,7 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
             try:
                 if self._queue.full():
                     self._queue.get_nowait()
-                self._queue.put_nowait(video_frame)
+                self._queue.put_nowait(frame)
             except Exception:
                 pass
 
@@ -327,8 +361,9 @@ class BGRArrayVideoStreamTrack(MediaStreamTrack):
 class WebRTC_PublisherThread(threading.Thread):
     """Run an HTTPS preview and WebRTC peers on a dedicated thread and event loop.
 
-    Threads share input arrays without process serialization. A MediaRelay
+    Threads share input frames without process serialization. A MediaRelay
     shares the source track among peers; each peer negotiates its own codec.
+    The connected event is set while at least one peer is open.
     """
 
     def __init__(self, port: int, host: str = "0.0.0.0", codec_pref: str = None):
@@ -340,11 +375,12 @@ class WebRTC_PublisherThread(threading.Thread):
         self._app = web.Application()
         self._runner: Optional[web.AppRunner] = None
         self._pcs = set()
+        self._connected = threading.Event()  # Set while at least one peer is open.
         self._start_event = threading.Event()
         self._stop_event = threading.Event()
         self._frame_queue = queue.Queue(maxsize=1)
 
-        self._bgr_track: Optional[BGRArrayVideoStreamTrack] = None
+        self._video_track: Optional[VideoFrameStreamTrack] = None
         self._relay: Optional[MediaRelay] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -412,11 +448,12 @@ class WebRTC_PublisherThread(threading.Thread):
 
         pc = RTCPeerConnection()
         self._pcs.add(pc)
+        self._connected.set()
 
         # Relay source frames to peers; this does not share their encoders.
-        if self._bgr_track and self._relay:
+        if self._video_track and self._relay:
             try:
-                relayed_track = self._relay.subscribe(self._bgr_track)
+                relayed_track = self._relay.subscribe(self._video_track)
                 transceiver = pc.addTransceiver(relayed_track, direction="sendonly")
                 capabilities = RTCRtpSender.getCapabilities("video")
                 client_codec = params.get("codec")
@@ -426,7 +463,7 @@ class WebRTC_PublisherThread(threading.Thread):
                     h264_codecs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
                     if h264_codecs:
                         transceiver.setCodecPreferences(h264_codecs)
-                        logger_mp.info(f"[Teleimager] Preferred H264 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred H264 for port:{self._port} (encoder: {_H264_ENCODER[0]})")
                     else:
                         logger_mp.warning(f"[Teleimager] H264 preferred but not found, using auto-negotiation for port:{self._port}")
 
@@ -434,7 +471,7 @@ class WebRTC_PublisherThread(threading.Thread):
                     vp8_codecs = [c for c in capabilities.codecs if c.mimeType == "video/VP8"]
                     if vp8_codecs:
                         transceiver.setCodecPreferences(vp8_codecs)
-                        logger_mp.info(f"[Teleimager] Preferred VP8 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred VP8 for port:{self._port} (encoder: libvpx)")
                     else:
                         logger_mp.warning(f"[Teleimager] VP8 preferred but not found, using auto-negotiation for port:{self._port}")
 
@@ -442,12 +479,14 @@ class WebRTC_PublisherThread(threading.Thread):
                     h264_codecs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
                     if h264_codecs:
                         transceiver.setCodecPreferences(h264_codecs)
-                        logger_mp.info(f"[Teleimager] Preferred codec '{pref}' not found, falling back to H264 for port:{self._port}")
+                        logger_mp.info(f"[Teleimager] Preferred codec '{pref}' not found, falling back to H264 for port:{self._port} (encoder: {_H264_ENCODER[0]})")
                     else:
                         logger_mp.warning(f"[Teleimager] Preferred codec '{pref}' not found, using auto-negotiation for port:{self._port}")
 
             except Exception as e:
                 logger_mp.error(f"[Teleimager] Relay subscription failed: {e}")
+                await self._cleanup_pc(pc)
+                return self._error_response(500, "Relay subscription failed")
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
@@ -476,8 +515,10 @@ class WebRTC_PublisherThread(threading.Thread):
         )
 
     async def _cleanup_pc(self, pc):
-        """Remove a peer from the active set and close its connection."""
+        """Remove a peer from the active set, clear the connected event when none remain, and close it."""
         self._pcs.discard(pc)
+        if not self._pcs:
+            self._connected.clear()
         try:
             await pc.close()
         except: pass
@@ -487,7 +528,11 @@ class WebRTC_PublisherThread(threading.Thread):
         return self._start_event.wait(timeout=timeout)
 
     def run(self):
-        """Own the asyncio loop, start HTTPS, forward frames, and clean up on exit."""
+        """Own the asyncio loop, start HTTPS, and clean up on exit.
+
+        Frames reach the track through call_soon_threadsafe from send(), so
+        the loop only polls for the stop request.
+        """
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
@@ -496,7 +541,7 @@ class WebRTC_PublisherThread(threading.Thread):
             await self._runner.setup()
 
             # Bind asyncio track state to the publisher's event loop.
-            self._bgr_track = BGRArrayVideoStreamTrack()
+            self._video_track = VideoFrameStreamTrack()
             self._relay = MediaRelay()
 
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -505,16 +550,10 @@ class WebRTC_PublisherThread(threading.Thread):
             await site.start()
             self._start_event.set()
 
+            # Forward a frame queued before the track existed.
+            self._drain_frames()
             while not self._stop_event.is_set():
-                try:
-                    if not self._frame_queue.empty():
-                        frame = self._frame_queue.get_nowait()
-                        self._bgr_track.push_frame(frame, loop=self._loop)
-
-                    # Yield so signaling and WebRTC packet tasks can progress.
-                    await asyncio.sleep(0.005)
-                except Exception:
-                    await asyncio.sleep(0.005)
+                await asyncio.sleep(0.1)
 
         try:
             self._loop.run_until_complete(_main())
@@ -529,7 +568,7 @@ class WebRTC_PublisherThread(threading.Thread):
                 self._loop.close()
 
     async def _shutdown(self):
-        """Close active peers and release the aiohttp runner on the worker loop."""
+        """Close active peers, release the aiohttp runner, and cancel leftover tasks."""
         for pc in list(self._pcs):
             try:
                 await pc.close()
@@ -542,8 +581,21 @@ class WebRTC_PublisherThread(threading.Thread):
             except Exception:
                 pass
 
-    def send(self, data: np.ndarray):
-        """Queue a BGR array for the worker, replacing an older queued frame if full."""
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _drain_frames(self):
+        """Move the queued frame, if any, onto the track; runs on the worker loop."""
+        try:
+            frame = self._frame_queue.get_nowait()
+        except queue.Empty:
+            return
+        self._video_track.push_frame(frame, loop=self._loop)
+
+    def send(self, data: Any):
+        """Queue an av.VideoFrame and wake the worker loop, keeping only the latest frame."""
         if not self._frame_queue.full():
             self._frame_queue.put(data)
         else:
@@ -551,6 +603,13 @@ class WebRTC_PublisherThread(threading.Thread):
                 self._frame_queue.get_nowait()
                 self._frame_queue.put(data)
             except: pass
+
+        loop = self._loop
+        if loop is not None and self._video_track is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._drain_frames)
+            except RuntimeError:
+                pass
 
     def stop(self):
         """Request shutdown and wait briefly for the worker thread."""
@@ -594,8 +653,15 @@ class WebRTC_PublisherManager:
                 self._publisher_threads[key] = self._create_publisher(port, host, codec_pref)
             return self._publisher_threads[key]
 
+    def connected_event(self, port, host="0.0.0.0", codec_pref=None):
+        """Return the endpoint's event that is set while a peer is connected.
+
+        Creates and starts the endpoint worker on first use.
+        """
+        return self._get_publisher(port, host, codec_pref)._connected
+
     def publish(self, data: Any, port: int, host: str = "0.0.0.0", codec_pref: str = None) -> None:
-        """Queue BGR data, logging failures and ignoring calls after close."""
+        """Queue a video frame, logging failures and ignoring calls after close."""
         if not self._running: return
         try:
             pub = self._get_publisher(port, host, codec_pref)

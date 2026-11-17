@@ -38,7 +38,7 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
 CLIENT_CONFIG_PATH = str(CONFIG_DIR / "teleimager_client.yaml")
 
 
-class ZMQ_Responser:
+class ZMQ_Responder:
     """Serve native camera configuration as JSON through a background REP loop."""
 
     def __init__(self, server_config, host: str = "0.0.0.0", port: int = 60000):
@@ -59,7 +59,7 @@ class ZMQ_Responser:
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        logger_mp.info(f"[Teleimager] Camera Config Responser initialized at {self._host}:{self._port}")
+        logger_mp.info(f"[Teleimager] Camera Config Responder initialized at {self._host}:{self._port}")
 
     def _run(self):
         """Poll for requests and return the server mapping until stopped."""
@@ -74,9 +74,9 @@ class ZMQ_Responser:
             except zmq.ZMQError as e:
                 if not self._running:
                     break
-                logger_mp.error(f"[Teleimager] ZMQError in Responser: {e}")
+                logger_mp.error(f"[Teleimager] ZMQError in Responder: {e}")
             except Exception as e:
-                logger_mp.error(f"[Teleimager] Unexpected error in Responser: {e}")
+                logger_mp.error(f"[Teleimager] Unexpected error in Responder: {e}")
     # Public API.
     def get_port(self):
         """Return the configured responder port."""
@@ -87,12 +87,12 @@ class ZMQ_Responser:
         self._running = False
         self._thread.join(timeout=1)
         if self._thread.is_alive():
-            logger_mp.warning("[Teleimager] Responser thread did not stop gracefully")
+            logger_mp.warning("[Teleimager] Responder thread did not stop gracefully")
         try:
             self._socket.close()
             self._context.term()
         except Exception as e:
-            logger_mp.warning(f"[Teleimager] Error closing Responser socket: {e}")
+            logger_mp.warning(f"[Teleimager] Error closing Responder socket: {e}")
 
 
 class ZMQ_Requester:

@@ -29,6 +29,13 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
     their settings; selected ZMQ and WebRTC outputs enable only listed topics
     present in the capture mapping. Unknown topics do not create cameras.
 
+    zmq.ports sets enable_color_zmq and color_zmq_port: true with the port
+    for listed captured topics, false for the other captured topics.
+    enable_depth_zmq stays a capture setting (whether a RealSense captures
+    aligned depth); zmq.depth_ports only supplies depth_zmq_port for the
+    captured topics that set it. zmq.enabled false turns color and depth ZMQ
+    off. Active color and depth ports must be unique together.
+
     Args:
         server_config: Native server mapping containing camera settings.
         streaming: Explicit ZMQ, TCP, and WebRTC output settings.
@@ -39,7 +46,8 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
 
     Raises:
         TypeError: Output settings have an unsupported value type.
-        ValueError: Fields, codecs, ports, or encoder settings are invalid.
+        ValueError: Fields, codecs, ports, or encoder settings are invalid, or
+            a captured topic with enable_depth_zmq has no zmq.depth_ports entry.
     """
     if not isinstance(streaming, dict):
         raise TypeError("streaming must contain an output mapping.")
@@ -61,6 +69,8 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
                        "eye_shape", "max_bitrate", "min_bitrate", "vbv_seconds", "intra_refresh", "codecs"}
         else:
             allowed = {"enabled", "codec", "ports"}
+            if protocol == "zmq":
+                allowed.add("depth_ports")
             if protocol == "webrtc":
                 allowed.update({"bitrate", "gop_length"})
         if set(settings) - allowed:
@@ -68,9 +78,13 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
         if not enabled:
             if protocol == "tcp":
                 config["app_stream"] = dict(settings)
+            elif protocol == "zmq":
+                for camera in config["camera"].values():
+                    camera["enable_color_zmq"] = False
+                    camera["enable_depth_zmq"] = False
             else:
                 for camera in config["camera"].values():
-                    camera[f"enable_{protocol}"] = False
+                    camera["enable_webrtc"] = False
             continue
         codec = settings.get("codec")
         choices = {"zmq": {"jpeg"}, "tcp": {"h264"}, "webrtc": {"h264", "vp8"}}[protocol]
@@ -96,29 +110,34 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
             _check_status_settings(settings)
             config["app_stream"] = dict(settings)
             continue
-        ports = settings.get("ports")
-        if not isinstance(ports, dict):
-            raise TypeError(f"streaming.{protocol}.ports must contain a topic-to-port mapping.")
+        ports = _check_topic_ports(settings, protocol, "ports")
+        enable_key, port_key = ("enable_color_zmq", "color_zmq_port") if protocol == "zmq" else ("enable_webrtc", "webrtc_port")
         for camera in config["camera"].values():
-            camera[f"enable_{protocol}"] = False
+            camera[enable_key] = False
         used_ports = set()
         for topic, port in ports.items():
-            if not isinstance(topic, str) or not topic:
-                raise ValueError(f"streaming.{protocol}.ports topic names must be non-empty strings.")
-            if type(port) is not int:
-                raise TypeError(f"streaming.{protocol}.ports[{topic!r}] must be an integer.")
-            if not 1 <= port <= 65535:
-                raise ValueError(f"streaming.{protocol}.ports[{topic!r}] must be in range 1..65535.")
             if topic not in config["camera"]:
                 continue
             if port in used_ports:
                 raise ValueError(f"streaming.{protocol} repeats an active camera port {port}.")
             used_ports.add(port)
             camera = config["camera"][topic]
-            camera[f"enable_{protocol}"] = True
-            camera[f"{protocol}_port"] = port
+            camera[enable_key] = True
+            camera[port_key] = port
             if protocol == "webrtc":
                 camera["webrtc_codec"] = codec
+        if protocol == "zmq":
+            depth_ports = _check_topic_ports(settings, protocol, "depth_ports") if "depth_ports" in settings else {}
+            for topic, camera in config["camera"].items():
+                if not camera.get("enable_depth_zmq", False):
+                    continue
+                if topic not in depth_ports:
+                    raise ValueError(f"streaming.zmq.depth_ports has no port for {topic!r}, which captures depth.")
+                port = depth_ports[topic]
+                if port in used_ports:
+                    raise ValueError(f"streaming.zmq repeats an active camera port {port}.")
+                used_ports.add(port)
+                camera["depth_zmq_port"] = port
         if protocol == "webrtc":
             encoder = {field: settings[field] for field in ("bitrate", "gop_length") if field in settings}
             if "bitrate" in encoder and not isinstance(encoder["bitrate"], dict):
@@ -130,6 +149,26 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
             if encoder:
                 config["webrtc"] = encoder
     return config
+
+
+def _check_topic_ports(settings: dict, protocol: str, field: str) -> dict:
+    """Return a validated topic-to-port mapping from streaming.<protocol>.<field>.
+
+    Raises:
+        TypeError: The field is not a mapping or a port is not an integer.
+        ValueError: A topic name is empty or a port is out of range.
+    """
+    ports = settings.get(field)
+    if not isinstance(ports, dict):
+        raise TypeError(f"streaming.{protocol}.{field} must contain a topic-to-port mapping.")
+    for topic, port in ports.items():
+        if not isinstance(topic, str) or not topic:
+            raise ValueError(f"streaming.{protocol}.{field} topic names must be non-empty strings.")
+        if type(port) is not int:
+            raise TypeError(f"streaming.{protocol}.{field}[{topic!r}] must be an integer.")
+        if not 1 <= port <= 65535:
+            raise ValueError(f"streaming.{protocol}.{field}[{topic!r}] must be in range 1..65535.")
+    return ports
 
 
 def _check_app_stream_settings(settings: dict) -> None:

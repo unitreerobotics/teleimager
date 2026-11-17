@@ -1,13 +1,13 @@
 <div align="center">
   <img src="teleimager_logo.png" alt="Teleimager Logo" width="100%">
   <a href="https://www.unitree.com/" target="_blank">
-    <img src="https://www.unitree.com/images/0079f8938336436e955ea3a98c4e1e59.svg" alt="Unitree LOGO" width="15%">
+    <img src="src/teleimager/unitree_logo.svg" alt="Unitree LOGO" width="15%">
   </a>
   <p align="center">
     <a href="README.md"> English</a> | <a>中文</a>
   </p>
   <p align="center">
-    <a href="https://github.com/unitreerobotics/xr_teleoperate/wiki" target="_blank"> <img src="https://img.shields.io/badge/GitHub-Wiki-181717?logo=github" alt="Unitree LOGO"></a> <a href="https://discord.gg/ZwcVwxv5rq" target="_blank"><img src="https://img.shields.io/badge/-Discord-5865F2?style=flat&logo=Discord&logoColor=white" alt="Unitree LOGO"> <a href="https://deepwiki.com/unitreerobotics/teleimager"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a> </a>
+    <a href="https://github.com/unitreerobotics/xr_teleoperate/wiki" target="_blank"> <img src="https://img.shields.io/badge/GitHub-Wiki-181717?logo=github" alt="Unitree LOGO"></a> <a href="https://discord.gg/ZwcVwxv5rq" target="_blank"><img src="https://img.shields.io/badge/-Discord-5865F2?style=flat&logo=Discord&logoColor=white" alt="Unitree LOGO"> <a href="https://deepwiki.com/unitreerobotics/teleimager"><img src="https://img.shields.io/badge/Ask-DeepWiki-4B8BBE" alt="Ask DeepWiki"></a> </a>
   </p>
 </div>
 
@@ -17,6 +17,7 @@
 
 - 📸 支持多路 UVC / V4L2 / GStreamer / Intel RealSense 摄像头
 - 📢 通过 **ZeroMQ PUB-SUB**（局域网高质量）与 **WebRTC**（低延迟、浏览器）发布视频帧
+- 🌊 通过 ZeroMQ 发布与彩色图对齐的 RealSense 深度图（zstd 压缩的 z16）
 - 💬 通过 **ZeroMQ REQ-REP** 响应图像配置指令
 - 🆔 五种摄像头识别方式：物理路径、序列号、bcd_device、vid_pid、video 路径
 - ⚙️ 可配置分辨率与帧率
@@ -101,11 +102,11 @@ conda activate teleimager
 |------|---------|------|
 | 基座（V4L2） | `[server]` | 需要 `v4l2-ctl`：`sudo apt install -y v4l-utils` |
 | + UVC | `[uvc]` | 需 USB 权限——安装后执行一次 `sudo "$(which teleimager-server)" --setup-permissions`；wheel 已自带 `libturbojpeg`、`libusb`，无需 apt |
-| + RealSense | `[realsense]` |  |
-| + 全部（不含 GStreamer） | `[all]` | 等价于 UVC + RealSense |
+| + RealSense | `[realsense]` | 发布深度图需再加 `[depth]`（zstandard） |
+| + 全部（不含 GStreamer） | `[all]` | 等价于 UVC + RealSense + depth |
 | + GStreamer | 无 pip 包 | PyGObject + 系统插件——见表格下方的引用块 |
 
-> `type: gstreamer` 是唯一没有 pip extra 的后端：PyGObject 必须跟解释器走，GStreamer 本体来自系统。
+> `driver_type: gstreamer` 是唯一没有 pip extra 的后端：PyGObject 必须跟解释器走，GStreamer 本体来自系统。
 >
 > ```bash
 > conda install -c conda-forge pygobject   # 即 1.1 建的 env；apt 的 python3-gi 只服务系统 python
@@ -113,18 +114,22 @@ conda activate teleimager
 > ```
 >
 > pipeline 要解 H.264/H.265 再加 `gstreamer1.0-libav`（`avdec_h264`），要硬件解码加 `gstreamer1.0-plugins-bad`；`v4l2src` 和 MJPG-over-RTP 只要 base + good。用 `python -c "import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst; print(Gst.version_string())"` 确认。
+>
+> **它用来做什么。** 普通 USB 相机用 V4L2 或 UVC 就够了，优先走那两条路。GStreamer 的价值在于接入前两者够不着的相机：嵌入式板上的 GMSL2 / MIPI 模组（如 `nvarguscamerasrc`），以及网络相机（`udpsrc`、RTSP）。这也是该后端接收的是一整条 `gst-launch` pipeline 字符串、而不是设备路径的原因。
+>
+> TeleImager 从 appsink 取出的是 JPEG——ZMQ 发布端原样转发这些编码字节，只有 WebRTC 才需要解码——所以 pipeline 末端必须输出 JPEG：`... ! image/jpeg ! appsink name=sink`。本身已输出 JPEG 的源（`v4l2src` 的 MJPG、JPEG 的 RTP 流）无需额外处理；输出裸数据的源则要在 appsink 前加 `videoconvert ! jpegenc`（或硬件编码器，如 `nvjpegenc`）。
 
 #### 1.3.2 安装
 
 选好后端（把下面的 `[server]` 换成对应选项），二选一执行安装：
 
 ```bash
-# 方式一：从源码（推荐）——顺带获得辅助脚本 setup_autostart.sh 与 WebRTC 资源
+# 方式一：从源码（推荐）
 git clone https://github.com/unitreerobotics/teleimager.git
 cd teleimager
 pip install -e ".[server]"        # 如 ".[uvc]"、".[all]"
 
-# 方式二：从 PyPI（不需要辅助脚本时）
+# 方式二：从 PyPI
 pip install "teleimager[server]"  # 如 "teleimager[uvc]"、"teleimager[all]"
 ```
 
@@ -174,7 +179,7 @@ teleimager-server --cf --uvc --v4l2        # RealSense 加 --rs，GStreamer 加 
 
 ```text
 [Teleimager] 🎯 Camera Finder Report
-├─ UVCCamera (3 found)   [type: uvc]
+├─ UVCCamera (3 found)   [driver_type: uvc]
 │  ├─ 📷 USB HDR Camera (Generic)
 │  │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.1/1-3.1:1.0
 │  │  ├─ serial_number : 200901010001
@@ -209,7 +214,7 @@ teleimager-server --cf --uvc --v4l2        # RealSense 加 --rs，GStreamer 加 
 │        ├─ 1280x480 @ [10, 15, 20, 25, 30, 60, 120]
 |        ...
 │        └─ 3200x1296 @ [10, 15, 20, 25, 30, 60]
-└─ V4L2Camera (4 found)   [type: v4l2]
+└─ V4L2Camera (4 found)   [driver_type: v4l2]
    ├─ 📷 USB HDR Camera (Generic)
    │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.1/1-3.1:1.0
    │  ├─ serial_number : 200901010001
@@ -262,13 +267,25 @@ teleimager-server --cf --uvc --v4l2        # RealSense 加 --rs，GStreamer 加 
 streaming: streaming_config.yaml
 camera:
   head_mono_camera:
-    type: realsense
+    driver_type: realsense
     image_shape: [480, 640]
     binocular: false
     fps: 30
     serial_number: "YOUR_SERIAL_NUMBER"
-    enable_depth: false
+    enable_depth_zmq: false
 ```
+
+每路相机用 `driver_type` 选择采集驱动（`uvc`、`v4l2`、`realsense`、`gstreamer`、`rtp` 或 `isaacsim`，默认 `uvc`），用下表的键选择输出；只有某个输出或 App 推流需要时才打开这路相机：
+
+| 键 | 含义 |
+| --- | --- |
+| `enable_color_zmq` / `color_zmq_port` | 在该端口以 JPEG 经 ZMQ 发布彩色流 |
+| `enable_depth_zmq` / `depth_zmq_port` | 仅 RealSense：采集与彩色图对齐的深度图并在该端口发布；需要 `teleimager[depth]` |
+| `enable_webrtc` / `webrtc_port` / `webrtc_codec` | 经 WebRTC 提供彩色流（`h264` 或 `vp8`） |
+
+启用某个输出却没给端口会报错。使用推流文件时，由 `zmq.ports`、`zmq.depth_ports` 和 `webrtc.ports` 提供端口并启用所列话题，`enable_depth_zmq` 仍写在采集配置里。2.1 之前的键 `type`、`enable_zmq`、`zmq_port`、`enable_depth` 会被拒绝，报错信息给出新键名。各输出在相机交来新帧时发布，没有固定频率的定时器；相机停了就什么都不发，而不是重复最后一帧。
+
+深度消息由 12 字节头（小端 `uint32` 彩色帧号、`uint16` 宽、`uint16` 高、`float32` 深度比例，单位米/刻度）和 zstd 压缩的行优先 `uint16` 深度图组成。深度与彩色共用 `fps`；若 RealSense 拒绝这一组合（"cannot stream together"），请降低 `fps`，报错会提示 45 fps 或更低。
 
 启动时显式指定服务端 YAML：
 
@@ -276,17 +293,21 @@ camera:
 teleimager-server --config /path/to/server.yaml
 ```
 
-也可使用 `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`。`--config` 优先于环境变量；两者都未提供时明确报错，不自动创建或隐式读取服务端配置。相机发现（`--cf`）和权限设置（`--setup-permissions`）不要求配置文件。
+也可使用 `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`。`--config` 优先于环境变量；两者都未提供时明确报错，不自动创建或隐式读取服务端配置。相机发现（`--cf`）和权限设置（`--setup-permissions`）不要求配置文件。服务端启动时会记录版本（`TeleImager v2.1.0+robotree.1 on Linux x86_64`）。
 
 `--streaming-config <路径>` 选择输出设置，`--no-affinity` 跳过 CPU 核心绑定，`--isaacsim` 从共享内存读取图像。TLS 证书仍默认读取 `~/.config/teleimager/cert.pem` 和 `key.pem`；客户端仍保留最近一次成功获取的配置缓存。
 
 ### 2.3 开机自启动
 
-一切验证无误后，如有需要，可安装为[开机启动服务](setup_autostart.sh)：
+一切验证无误后，可将其安装为 systemd 服务，随机器启动：
 
 ```bash
-bash setup_autostart.sh        # 按提示填写服务端 YAML 路径
+sudo "$(which teleimager-server)" --setup-service --config /path/to/server.yaml
 ```
+
+它会把 `teleimager.service` 写入 `/etc/systemd/system`，绑定执行该命令的解释器与你的账户（取自 `$SUDO_USER`），并立即启用。服务以该文件的绝对路径作为 `--config` 启动；若同时给出 `--streaming-config`、`--cert`、`--key`，也一并写入。`--config` 必填。改完服务端 YAML 后执行 `sudo systemctl restart teleimager.service`。若在 root shell（`sudo su -`）中执行，需额外加 `--user <名称>`，因为此时 `$SUDO_USER` 为空。
+
+管理命令：`systemctl status / restart / stop / disable teleimager.service`；查看实时日志输出：`journalctl -u teleimager.service -f`。
 
 ---
 
@@ -302,7 +323,20 @@ teleimager-client --host 192.168.123.164        # 默认：192.168.123.164
 
 每路摄像头会各自弹出一个 OpenCV 窗口（需要 `teleimager[viewer]`）。
 
-若做无界面订阅，请参照 [`client.py`](src/teleimager/client.py) 中`TeleImageClient` 的 `# public api` 从自己的代码里订阅。
+若做无界面订阅，请参照 [`client.py`](src/teleimager/client.py) 中`TeleImageClient` 的 `# public api` 从自己的代码里订阅。传入 `depth_port` 即可同时接收深度图：
+
+```python
+from teleimager.client import TeleImageClient
+
+head = TeleImageClient("head_mono_camera", server_host="192.168.123.164",
+                       color_port=55560, depth_port=56001, request_bgr=True)
+frame = head.get_frame()
+if frame.depth is not None:
+    meters = frame.depth.depth * frame.depth.depth_scale  # 与彩色图对齐的 uint16 [H, W]
+    color_frame_no = frame.depth.frame_no
+```
+
+`frame.depth` 是 `DepthPacket`（也可从 `teleimager.client` 导入）或 `None`；其 `compressed` 属性保存收到的 zstd 数据，存盘时无需再次压缩。查看器会在第二个窗口按 0–5 m 着色显示深度图。
 
 ### 3.2 WebRTC 方式
 
@@ -368,20 +402,21 @@ sudo $(which teleimager-server) --cf --uvc
 
 ## RoboTree 定制功能
 
-版本 `2.0.5+robotree.3`，公版源码基线为 `b80649fbb6520d24aeb767e28d608ec08b60a20d`。
+版本 `2.1.0+robotree.1`，公版基线为 TeleImager 2.1.0，源码提交 `19fdf9329a82c13860da0a7dbfe3ce749f940456`。未采用其中的：双 RGB RealSense 相机（`sensors_config_mode`、RealSense 双目、`all_config_modes` 相机搜索报告）、移除 IsaacSim，以及自动创建默认服务端配置。
 
-- `camera.<topic>.type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
+- `camera.<topic>.driver_type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
 - 顶层 `app_stream`（即推流文件的 `tcp` 段）支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。使用 `stereo_quad` 时，App 还可以请求协议 v2，见下文“App 推流协议”。
-- App BGR 输出独立于 WebRTC；四宫格对缺失、过期画面显示占位。公版客户端 `teleimager.client.TeleImageClient` 保持原实现。
-- 一路相机打不开、5 秒内没有首帧或运行中出错，只停这一路并记一条错误日志，其余相机照常输出，服务不退出。每一路最后一次取图超过 2 秒，ZMQ 和 WebRTC 就不再发它的旧帧，客户端看到的是“没有帧”而不是冻结的画面。`GET_DATA` 仍返回完整配置。
-- 相机发现不再从设备取流，默认模式下不出流的相机不会卡住启动。UVC 发现（`type: uvc` 和 `--cf --uvc`）用 `VIDIOC_ENUM_FMT` 读取每个节点的采集格式，列出 MJPG、YUYV、NV12、H264 等格式时视为彩色相机，红外、深度和元数据节点会被跳过。V4L2 发现保留 `v4l2-ctl` 输出中声明采集并列出格式的节点，不读取数据包。`UVCCamera._list_mjpeg_modes()` 用同样方式（`VIDIOC_ENUM_FRAMESIZES`、`VIDIOC_ENUM_FRAMEINTERVALS`）列出节点的 MJPEG 尺寸和整数帧率，RoboTree 建档向导只给出本后端能打开的模式。
+- App 推流读取自己的 BGR 和显示缓冲；WebRTC 另有一个视频帧缓冲，只在浏览器连接时写入。四宫格对缺失、过期画面显示占位。`teleimager.client.TeleImageClient` 与公版客户端一致。
+- 一路相机打不开、5 秒内没有首帧或运行中出错，只停这一路并记一条错误日志，其余相机照常输出，服务不退出；公版服务端遇到相机错误会整体停止。ZMQ（彩色和深度）和 WebRTC 在新帧到达时发布，停掉的相机什么都不发，客户端看到的是“没有帧”而不是冻结的画面；每个输出每次断流只警告一次。`GET_DATA` 仍返回完整配置。
+- RealSense 深度：采集配置 `enable_depth_zmq: true` 的话题在其 `zmq.depth_ports` 端口发布与彩色图对齐的深度图；采集深度却没有该端口属于配置错误，`zmq.enabled: false` 同时关闭彩色和深度。`DepthPacket.decode()` 把收到的 zstd 数据保存在 `compressed`（本地构造的包为 `None`），录制端可直接存盘，无需再次压缩。
+- 相机发现不再从设备取流，默认模式下不出流的相机不会卡住启动。UVC 发现（`driver_type: uvc` 和 `--cf --uvc`）用 `VIDIOC_ENUM_FMT` 读取每个节点的采集格式，列出 MJPG、YUYV、NV12、H264 等格式时视为彩色相机，红外、深度和元数据节点会被跳过。V4L2 发现保留 `v4l2-ctl` 输出中声明采集并列出格式的节点，不读取数据包。`UVCCamera._list_mjpeg_modes()` 用同样方式（`VIDIOC_ENUM_FRAMESIZES`、`VIDIOC_ENUM_FRAMEINTERVALS`）列出节点的 MJPEG 尺寸和整数帧率，RoboTree 建档向导只给出本后端能打开的模式。
 - 启用 TCP 推流时，`tcp.status_host` / `tcp.status_port` 经 UDP 接收 RoboTree 的 `robotree_teleop_status` v1（默认 `0.0.0.0:13580`；`status_port: null` 关闭中继）。在控制连接上发出 `SUBSCRIBE_TELEOP_STATUS` 的 App，会从它所连接的地址在 UDP `13581` 收到每条已接受的状态，并自行绘制。中继不改动视频；没有发出该命令的 App 收不到状态。相机发布和录制保留源画面。
 - 发送端每个进程使用一个 `session_id`，`sequence` 从 1 递增。中继丢弃已被取代的会话和乱序包，对已接受的包回复 `robotree_overlay_status_ack`（原样带回 `session_id`），只有 App 视频已连接时才报告 `stream_active: true`。重发的包会再次得到 ACK 并转发。新会话只能从 sequence 1 开始取代当前会话；当前状态超过 `tcp.status_timeout`（默认 3 秒）后，任意 sequence 都可接受。
 - 能访问 `status_host` 的任何主机都可以发送状态。Policy 与相机在同一台主机时，绑定 `127.0.0.1`。
 
-`stereo_quad` 的 `app_stream.camera_topics` 使用 `head_mono`、`head_stereo`、`head_left`、`head_right`、`wrist_left`、`wrist_right` 角色映射话题。单话题头部仅在采集配置声明 `binocular: true` 时拆分；单目完整复制到两个眼格，独立双眼分别读取。App 拼图只选择单目头部、拼接双目或独立双眼中的一种来源。所有声明话题使用独立的 ZMQ 和 WebRTC 端口。只初始化已配置相机，无腕部时保留占位格且不启动腕部输出；所有组合共用 `streaming_config.yaml`。
+`stereo_quad` 的 `app_stream.camera_topics` 使用 `head_mono`、`head_stereo`、`head_left`、`head_right`、`wrist_left`、`wrist_right` 角色映射话题。单话题头部仅在采集配置声明 `binocular: true` 时拆分；单目完整复制到两个眼格，独立双眼分别读取。App 拼图只选择单目头部、拼接双目或独立双眼中的一种来源。所有声明话题使用独立的 ZMQ 和 WebRTC 端口；深度端口也不与任何彩色端口重复。只初始化已配置相机，无腕部时保留占位格且不启动腕部输出；所有组合共用 `streaming_config.yaml`。
 
-统一输出参数及字段说明见 [streaming_config.yaml](streaming_config.yaml)。每份 RoboTree 实验在 `robot.drivers.teleimager.camera_streams[].camera_config` 中内联保存相机输入参数，不含发布设置；目录和流名不推导采集参数。实验通过 `streaming_config` 显式选择统一的 `streaming_config.yaml`。文件包含同级的 `zmq`、`tcp`、`webrtc` 区块，各自配置 `enabled`、`codec` 和输出参数。Runtime 只将 ZMQ 设置用于连接校验与指纹；Docker 应用全部输出，预览参数变化不改变 Runtime 身份。统一启动参数为 `--streaming-config`，临时覆盖变量为 `TELEIMAGER_STREAMING_CONFIG`。TCP 的尺寸、FPS、码率与编码选项以推流文件为准，App 提供接收端点。v1 App 必须请求四宫格的 `width`、`height`；v2 的画面几何来自 `RTSI` 消息。`python -B docker/onboard/service.py print-config` 导出最终静态配置，不打开设备。
+统一输出参数及字段说明见 [streaming_config.yaml](streaming_config.yaml)。每份 RoboTree 实验在 `robot.drivers.teleimager.camera_streams[].camera_config` 中内联保存相机输入参数，不含发布设置；目录和流名不推导采集参数。实验通过 `streaming_config` 显式选择统一的 `streaming_config.yaml`。文件包含同级的 `zmq`、`tcp`、`webrtc` 区块，各自配置 `enabled`、`codec` 和输出参数；`zmq.ports` 设置 `enable_color_zmq` 与 `color_zmq_port`，`zmq.depth_ports` 设置 `depth_zmq_port`。Runtime 只将 ZMQ 设置用于连接校验与指纹；Docker 应用全部输出，预览参数变化不改变 Runtime 身份。统一启动参数为 `--streaming-config`，临时覆盖变量为 `TELEIMAGER_STREAMING_CONFIG`。TCP 的尺寸、FPS、码率与编码选项以推流文件为准，App 提供接收端点。v1 App 必须请求四宫格的 `width`、`height`；v2 的画面几何来自 `RTSI` 消息。`python -B docker/onboard/service.py print-config` 导出最终静态配置，不打开设备。
 
 ### App 推流协议
 
@@ -422,7 +457,7 @@ TCP `13579` 上的控制包先是 4 字节大端包长，再是小端长度前�
 
 ### 源码职责
 
-`server.py` 提供 `TeleImageServer` 和服务端 CLI，`client.py` 提供 `TeleImageClient` 和客户端 CLI。`TeleImage`、`TripleRingBuffer` 从 `teleimager.frame` 导入，通信类从 `teleimager.transport` 下各实现模块导入；客户端和服务端不再转导出已移入这些模块的实现。现有命令名保持可用。
+`server.py` 提供 `TeleImageServer` 和服务端 CLI，`client.py` 提供 `TeleImageClient` 和客户端 CLI。`TeleImage`、`DepthPacket`、`TripleRingBuffer` 位于 `teleimager.frame`；`teleimager.client` 与公版客户端一样也导出 `TeleImage` 和 `DepthPacket`。通信类从 `teleimager.transport` 下各实现模块导入，服务端不转导出它们。现有命令名保持可用。
 
 不再支持命名相机 `profiles`、`read_config(profile=...)` 参数及逐相机 `{config, profile}` 选择。原生相机使用完整参数字典或普通相对 YAML 引用；RoboTree 在 `camera_config` 中内联采集参数，再导出原生运行配置。客户端缓存、协议恢复和已支持的相机后端保持可用。
 
@@ -431,11 +466,11 @@ TCP `13579` 上的控制包先是 4 字节大端包长，再是小端长度前�
 | `camera/camera.py` 及各后端文件 | 公共采集生命周期与逐后端实现 |
 | `camera_finder.py` | 相机发现及报告 |
 | `transport/zmq_publisher.py` | ZMQ 发布线程与管理 |
-| `transport/zmq_subscriber.py` | ZMQ 订阅、FPS 统计和 JPEG 解码 |
+| `transport/zmq_subscriber.py` | ZMQ 订阅、FPS 统计、JPEG 解码和深度包 |
 | `transport/zmq_request.py` | 配置请求、响应和客户端缓存 |
 | `transport/webrtc.py` | WebRTC 发布、编码设置及浏览器页面 |
 | `transport/tcp_stream.py` | Robotree App TCP 控制、协议 v2 画面几何、H264 推流与码率控制、预览布局及遥操作状态中继 |
-| `frame.py` | 共享图像数据与最新帧缓冲 |
-| `host.py` | 驱动重载、权限设置和 CPU 亲和性 |
+| `frame.py` | 共享图像数据、深度包与最新帧缓冲 |
+| `host.py` | 驱动重载、权限设置、开机服务和 CPU 亲和性 |
 
 服务端直接引用共享通信模块，不再依赖客户端模块。WebRTC 编码器补丁在构造服务端时应用，不在模块导入时修改；页面 Logo 使用包资源定位。App 推流使用 `teleimager.transport.tcp_stream.TcpStreamServer`，不再提供原模块路径和类名。

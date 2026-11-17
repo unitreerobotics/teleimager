@@ -1,13 +1,13 @@
 <div align="center">
   <img src="teleimager_logo.png" alt="Teleimager Logo" width="100%">
   <a href="https://www.unitree.com/" target="_blank">
-    <img src="https://www.unitree.com/images/0079f8938336436e955ea3a98c4e1e59.svg" alt="Unitree LOGO" width="15%">
+    <img src="src/teleimager/unitree_logo.svg" alt="Unitree LOGO" width="15%">
   </a>
   <p align="center">
     <a> English </a> | <a href="README_zh-CN.md">中文</a>
   </p>
   <p align="center">
-    <a href="https://github.com/unitreerobotics/xr_teleoperate/wiki" target="_blank"> <img src="https://img.shields.io/badge/GitHub-Wiki-181717?logo=github" alt="Unitree LOGO"></a> <a href="https://discord.gg/ZwcVwxv5rq" target="_blank"><img src="https://img.shields.io/badge/-Discord-5865F2?style=flat&logo=Discord&logoColor=white" alt="Unitree LOGO"> <a href="https://deepwiki.com/unitreerobotics/teleimager"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a> </a>
+    <a href="https://github.com/unitreerobotics/xr_teleoperate/wiki" target="_blank"> <img src="https://img.shields.io/badge/GitHub-Wiki-181717?logo=github" alt="Unitree LOGO"></a> <a href="https://discord.gg/ZwcVwxv5rq" target="_blank"><img src="https://img.shields.io/badge/-Discord-5865F2?style=flat&logo=Discord&logoColor=white" alt="Unitree LOGO"> <a href="https://deepwiki.com/unitreerobotics/teleimager"><img src="https://img.shields.io/badge/Ask-DeepWiki-4B8BBE" alt="Ask DeepWiki"></a> </a>
   </p>
 </div>
 
@@ -17,6 +17,7 @@
 
 - 📸 Multiple UVC / V4L2 / GStreamer / Intel RealSense cameras
 - 📢 Publish frames over **ZeroMQ PUB-SUB** (high quality, LAN) and **WebRTC** (low latency, browser)
+- 🌊 Publish RealSense depth aligned to color over ZeroMQ (zstd-compressed z16)
 - 💬 Serve image-config commands over **ZeroMQ REQ-REP**
 - 🆔 Five camera identifiers: physical path, serial number, bcd_device, vid_pid, video path
 - ⚙️ Configurable resolution and frame rate
@@ -101,11 +102,11 @@ A *backend* is the capture driver TeleImager uses to talk to a camera. They're l
 |---------|-----------|-------|
 | Base (V4L2) | `[server]` | Needs `v4l2-ctl`: `sudo apt install -y v4l-utils` |
 | + UVC | `[uvc]` | Needs USB access — run `sudo "$(which teleimager-server)" --setup-permissions` once; the wheel already bundles `libturbojpeg` and `libusb`, no apt needed |
-| + RealSense | `[realsense]` |  |
-| + Everything (except GStreamer) | `[all]` | Equivalent to UVC + RealSense |
+| + RealSense | `[realsense]` | Add `[depth]` (zstandard) to publish depth |
+| + Everything (except GStreamer) | `[all]` | Equivalent to UVC + RealSense + depth |
 | + GStreamer | no pip package | PyGObject + system plugins — see the note under this table |
 
-> `type: gstreamer` is the one backend with no pip extra: PyGObject must match your interpreter, GStreamer comes from the system.
+> `driver_type: gstreamer` is the one backend with no pip extra: PyGObject must match your interpreter, GStreamer comes from the system.
 >
 > ```bash
 > conda install -c conda-forge pygobject   # the env from 1.1 — apt's python3-gi serves the system python instead
@@ -113,18 +114,22 @@ A *backend* is the capture driver TeleImager uses to talk to a camera. They're l
 > ```
 >
 > Add `gstreamer1.0-libav` if your pipeline decodes H.264/H.265 (`avdec_h264`), and `gstreamer1.0-plugins-bad` for hardware decoders; `v4l2src` and MJPG-over-RTP need only base + good. Confirm with `python -c "import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst; print(Gst.version_string())"`.
+>
+> **What it is for.** An ordinary USB camera is best served by V4L2 or UVC — start there. GStreamer is the way in for cameras those two cannot reach: GMSL2 / MIPI modules on embedded boards (`nvarguscamerasrc` and friends), and network cameras (`udpsrc`, RTSP). That is why this backend takes a whole `gst-launch` pipeline string instead of a device path.
+>
+> TeleImager pulls JPEG out of the appsink — the ZMQ publisher forwards those encoded bytes untouched, and only WebRTC decodes them — so the pipeline must end in JPEG: `... ! image/jpeg ! appsink name=sink`. A source that already emits JPEG (MJPG from `v4l2src`, a JPEG RTP stream) needs nothing more; a raw one needs `videoconvert ! jpegenc` (or a hardware encoder such as `nvjpegenc`) in front of the appsink.
 
 #### 1.3.2 Install
 
 Pick your backend (swap the `[server]` below for the matching extra), then choose one of two ways to install:
 
 ```bash
-# Option 1 — from source (recommended): also gets setup_autostart.sh and WebRTC assets
+# Option 1 — from source (recommended)
 git clone https://github.com/unitreerobotics/teleimager.git
 cd teleimager
 pip install -e ".[server]"        # e.g. ".[uvc]", ".[all]"
 
-# Option 2 — from PyPI (when you don't need the helper scripts)
+# Option 2 — from PyPI
 pip install "teleimager[server]"  # e.g. "teleimager[uvc]", "teleimager[all]"
 ```
 
@@ -174,7 +179,7 @@ Example output:
 
 ```text
 [Teleimager] 🎯 Camera Finder Report
-├─ UVCCamera (3 found)   [type: uvc]
+├─ UVCCamera (3 found)   [driver_type: uvc]
 │  ├─ 📷 USB HDR Camera (Generic)
 │  │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.1/1-3.1:1.0
 │  │  ├─ serial_number : 200901010001
@@ -209,7 +214,7 @@ Example output:
 │        ├─ 1280x480 @ [10, 15, 20, 25, 30, 60, 120]
 |        ...
 │        └─ 3200x1296 @ [10, 15, 20, 25, 30, 60]
-└─ V4L2Camera (4 found)   [type: v4l2]
+└─ V4L2Camera (4 found)   [driver_type: v4l2]
    ├─ 📷 USB HDR Camera (Generic)
    │  ├─ physical_path : /sys/devices/pci0000:00/0000:00:14.0/usb1/1-3/1-3.1/1-3.1:1.0
    │  ├─ serial_number : 200901010001
@@ -262,13 +267,25 @@ Create a server YAML matching the Camera Finder Report from section 2.1; output 
 streaming: streaming_config.yaml
 camera:
   head_mono_camera:
-    type: realsense
+    driver_type: realsense
     image_shape: [480, 640]
     binocular: false
     fps: 30
     serial_number: "YOUR_SERIAL_NUMBER"
-    enable_depth: false
+    enable_depth_zmq: false
 ```
+
+Each camera selects its capture driver with `driver_type` (`uvc`, `v4l2`, `realsense`, `gstreamer`, `rtp` or `isaacsim`; default `uvc`) and its outputs with these keys; a camera opens only when one of its outputs, or the App stream, needs it:
+
+| Key | Meaning |
+| --- | --- |
+| `enable_color_zmq` / `color_zmq_port` | Publish the color stream as JPEG over ZMQ on this port |
+| `enable_depth_zmq` / `depth_zmq_port` | RealSense only: capture depth aligned to color and publish it on this port; needs `teleimager[depth]` |
+| `enable_webrtc` / `webrtc_port` / `webrtc_codec` | Serve the color stream over WebRTC (`h264` or `vp8`) |
+
+An enabled output without its port is an error. With a streaming file, `zmq.ports`, `zmq.depth_ports` and `webrtc.ports` supply the ports and enable the listed topics, while `enable_depth_zmq` stays in the capture mapping. The pre-2.1 keys `type`, `enable_zmq`, `zmq_port` and `enable_depth` are rejected with an error naming the new key. Every output publishes a frame when the camera delivers one; there is no fixed-rate timer, so a camera that stops sends nothing instead of repeating its last frame.
+
+A depth message is a 12-byte header (little-endian `uint32` color frame number, `uint16` width, `uint16` height, `float32` depth scale in meters per unit) followed by the zstd-compressed row-major `uint16` depth image. Depth and color share `fps`; if RealSense rejects the pair ("cannot stream together"), lower `fps` — the error suggests 45 fps or lower.
 
 Select the server YAML explicitly:
 
@@ -276,17 +293,21 @@ Select the server YAML explicitly:
 teleimager-server --config /path/to/server.yaml
 ```
 
-Alternatively, use `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`. `--config` takes precedence over the environment variable. Startup fails with a clear error when neither is supplied; no server configuration is generated or read implicitly. Camera discovery (`--cf`) and permission setup (`--setup-permissions`) do not require a server configuration.
+Alternatively, use `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`. `--config` takes precedence over the environment variable. Startup fails with a clear error when neither is supplied; no server configuration is generated or read implicitly. Camera discovery (`--cf`) and permission setup (`--setup-permissions`) do not require a server configuration. The server logs its version (`TeleImager v2.1.0+robotree.1 on Linux x86_64`) at start.
 
 Useful flags: `--streaming-config <path>` selects streaming settings; `--no-affinity` skips CPU-core pinning; `--isaacsim` reads frames from shared memory. TLS certificates still default to `~/.config/teleimager/cert.pem` and `key.pem`, and the client retains its last successful configuration cache.
 
 ### 2.3 Auto-start on boot
 
-Once everything is verified, you can optionally install it as a [boot service](setup_autostart.sh):
+Once everything is verified, you can install it as a systemd service so it starts with the machine:
 
 ```bash
-bash setup_autostart.sh        # provide the server YAML path when prompted
+sudo "$(which teleimager-server)" --setup-service --config /path/to/server.yaml
 ```
+
+It writes `teleimager.service` to `/etc/systemd/system`, pins it to the interpreter that ran the command and to your account (via `$SUDO_USER`), and enables it right away. The unit starts the server with `--config` set to the absolute path of that file, plus `--streaming-config`, `--cert` and `--key` when you pass them; `--config` is required. Edit the server YAML, then `sudo systemctl restart teleimager.service`. From a root shell (`sudo su -`), add `--user <name>` since `$SUDO_USER` is unset there.
+
+Manage it with `systemctl status / restart / stop / disable teleimager.service`, and follow its log output with `journalctl -u teleimager.service -f`.
 
 ---
 
@@ -302,7 +323,20 @@ teleimager-client --host 192.168.123.164        # default: 192.168.123.164
 
 Each camera stream opens in its own OpenCV window (requires `teleimager[viewer]`).
 
-For headless subscription, follow the `# public api` of `TeleImageClient` in [`client.py`](src/teleimager/client.py) and subscribe from your own code.
+For headless subscription, follow the `# public api` of `TeleImageClient` in [`client.py`](src/teleimager/client.py) and subscribe from your own code. Pass `depth_port` to also receive depth:
+
+```python
+from teleimager.client import TeleImageClient
+
+head = TeleImageClient("head_mono_camera", server_host="192.168.123.164",
+                       color_port=55560, depth_port=56001, request_bgr=True)
+frame = head.get_frame()
+if frame.depth is not None:
+    meters = frame.depth.depth * frame.depth.depth_scale  # uint16 [H, W] aligned to color
+    color_frame_no = frame.depth.frame_no
+```
+
+`frame.depth` is a `DepthPacket` (also importable from `teleimager.client`) or `None`; its `compressed` attribute holds the received zstd payload, so the depth can be stored without compressing it again. The viewer shows depth in a second window, colored over 0–5 m.
 
 ### 3.2 Over WebRTC
 
@@ -368,20 +402,21 @@ Some code references: https://github.com/ARCLab-MIT/beavr-bot
 
 ## RoboTree integration
 
-Version `2.0.5+robotree.3`, based on public source commit `b80649fbb6520d24aeb767e28d608ec08b60a20d`.
+Version `2.1.0+robotree.1`, based on public TeleImager 2.1.0, source commit `19fdf9329a82c13860da0a7dbfe3ce749f940456`. Not taken from it: dual-RGB RealSense cameras (`sensors_config_mode`, binocular RealSense, the `all_config_modes` finder report), the removal of IsaacSim, and the automatic creation of a default server configuration.
 
-- `camera.<topic>.type: rtp` receives one RTP/JPEG or RTP/H264 stream per instance. `rtp_port` selects its UDP port and `source_host` filters sender IPs. Eyes publish and recover independently, without pairing or concatenation; expired frames stop publishing.
+- `camera.<topic>.driver_type: rtp` receives one RTP/JPEG or RTP/H264 stream per instance. `rtp_port` selects its UDP port and `source_host` filters sender IPs. Eyes publish and recover independently, without pairing or concatenation; expired frames stop publishing.
 - Top-level `app_stream` (the `tcp` block of the streaming file) provides RoboTree App H264/TCP streaming with single, mosaic, and `stereo_quad` layouts. Control defaults to port `13579`; image connections use the address and port requested by the App. With `stereo_quad`, the App can also request protocol version two; see App stream protocol below.
-- App BGR output works independently of WebRTC. Quad layouts replace missing or stale images with placeholders. The public `teleimager.client.TeleImageClient` implementation is unchanged.
-- A camera that fails to open, gives no first frame within 5 s, or fails while running stops alone with one error in the log; the other cameras keep publishing and the server keeps running. Once a camera's last capture is 2 s old, ZMQ and WebRTC stop sending its old frame, so clients see no frame rather than a frozen one. `GET_DATA` still returns the whole configuration.
-- Camera discovery no longer streams from a device, so a camera that sends nothing in its default mode cannot block startup. UVC discovery (`type: uvc` and `--cf --uvc`) reads each node's capture formats with `VIDIOC_ENUM_FMT` and counts a node as a colour camera when it lists a format such as MJPG, YUYV, NV12 or H264; infrared, depth and metadata nodes are skipped. V4L2 discovery keeps nodes whose `v4l2-ctl` output advertises capture and lists formats, without reading a packet. `UVCCamera._list_mjpeg_modes()` lists a node's MJPEG sizes and whole frame rates the same way (`VIDIOC_ENUM_FRAMESIZES`, `VIDIOC_ENUM_FRAMEINTERVALS`), so RoboTree's hardware wizard offers only modes this backend can open.
+- The App stream reads its own BGR and display buffers; WebRTC has a separate buffer of video frames, filled only while a browser is connected. Quad layouts replace missing or stale images with placeholders. `teleimager.client.TeleImageClient` matches the public client.
+- A camera that fails to open, gives no first frame within 5 s, or fails while running stops alone with one error in the log; the other cameras keep publishing and the server keeps running, unlike the public server, which stops on a camera error. ZMQ (color and depth) and WebRTC publish each frame when it arrives, so a stopped camera sends nothing and clients see no frame rather than a frozen one; each output logs one warning per stall. `GET_DATA` still returns the whole configuration.
+- RealSense depth: a capture with `enable_depth_zmq: true` publishes depth aligned to color on the topic's `zmq.depth_ports` entry; a captured depth topic without one is a configuration error, and `zmq.enabled: false` turns color and depth off. `DepthPacket.decode()` keeps the received zstd payload as `compressed` (`None` for packets built locally), so a recorder can store it without compressing again.
+- Camera discovery no longer streams from a device, so a camera that sends nothing in its default mode cannot block startup. UVC discovery (`driver_type: uvc` and `--cf --uvc`) reads each node's capture formats with `VIDIOC_ENUM_FMT` and counts a node as a colour camera when it lists a format such as MJPG, YUYV, NV12 or H264; infrared, depth and metadata nodes are skipped. V4L2 discovery keeps nodes whose `v4l2-ctl` output advertises capture and lists formats, without reading a packet. `UVCCamera._list_mjpeg_modes()` lists a node's MJPEG sizes and whole frame rates the same way (`VIDIOC_ENUM_FRAMESIZES`, `VIDIOC_ENUM_FRAMEINTERVALS`), so RoboTree's hardware wizard offers only modes this backend can open.
 - With TCP streaming enabled, `tcp.status_host` / `tcp.status_port` receive RoboTree `robotree_teleop_status` version 1 over UDP (default `0.0.0.0:13580`; `status_port: null` disables the relay). An App that sends `SUBSCRIBE_TELEOP_STATUS` on its control connection receives each accepted status on its UDP port `13581`, from the address it connected to, and draws it natively. The relay never modifies the video, and an App without that command receives no status. Camera publishers and recordings keep their source frames.
 - Status senders use one `session_id` per process and increasing `sequence` values from 1. The relay drops packets from replaced sessions and out-of-order packets, acknowledges accepted ones with `robotree_overlay_status_ack` (echoing `session_id`), and reports `stream_active: true` only while the App video is connected. A resend is acknowledged and forwarded again. A new session replaces the current one only from sequence 1, or with any sequence once the current status is older than `tcp.status_timeout` (default 3 s).
 - The relay accepts status from any host that reaches `status_host`. Bind `127.0.0.1` when Policy runs on the camera host.
 
-For `stereo_quad`, `app_stream.camera_topics` maps `head_mono`, `head_stereo`, `head_left`, `head_right`, `wrist_left`, and `wrist_right` roles to topic names. A single head topic is split only when its capture configuration sets `binocular: true`; a mono head is shown intact in both eye tiles. Independent eyes are read separately. Mono-head, stereo-head, and independent-eye capture sources are mutually exclusive in the App grid. Every declared topic has a distinct ZMQ and WebRTC port. Only configured cameras are opened; absent wrists keep placeholder tiles without starting wrist outputs. All combinations share `streaming_config.yaml`.
+For `stereo_quad`, `app_stream.camera_topics` maps `head_mono`, `head_stereo`, `head_left`, `head_right`, `wrist_left`, and `wrist_right` roles to topic names. A single head topic is split only when its capture configuration sets `binocular: true`; a mono head is shown intact in both eye tiles. Independent eyes are read separately. Mono-head, stereo-head, and independent-eye capture sources are mutually exclusive in the App grid. Every declared topic has a distinct ZMQ and WebRTC port; depth ports are distinct from all color ports. Only configured cameras are opened; absent wrists keep placeholder tiles without starting wrist outputs. All combinations share `streaming_config.yaml`.
 
-Shared output settings are documented in [streaming_config.yaml](streaming_config.yaml). Each RoboTree experiment stores its inputs in inline `robot.drivers.teleimager.camera_streams[].camera_config` mappings without publishing settings. The experiment explicitly selects `streaming_config.yaml` through `streaming_config`. This shared file declares peer `zmq`, `tcp`, and `webrtc` blocks with enable flags, codecs, and output settings. Runtime uses only ZMQ for validation and identity; Docker applies all outputs. Use `--streaming-config` or the temporary override `TELEIMAGER_STREAMING_CONFIG`. Camera mappings explicitly declare inputs in `camera_config`; directory and stream names do not imply capture parameters. TCP output dimensions, FPS, bitrate, and encoder options come from the streaming file; the App supplies a receiving endpoint. A version-one App must request the grid's `width` and `height`; version two takes its geometry from the `RTSI` message. `python -B docker/onboard/service.py print-config` exports effective static settings without opening devices.
+Shared output settings are documented in [streaming_config.yaml](streaming_config.yaml). Each RoboTree experiment stores its inputs in inline `robot.drivers.teleimager.camera_streams[].camera_config` mappings without publishing settings. The experiment explicitly selects `streaming_config.yaml` through `streaming_config`. This shared file declares peer `zmq`, `tcp`, and `webrtc` blocks with enable flags, codecs, and output settings; `zmq.ports` sets `enable_color_zmq` and `color_zmq_port`, `zmq.depth_ports` sets `depth_zmq_port`. Runtime uses only ZMQ for validation and identity; Docker applies all outputs. Use `--streaming-config` or the temporary override `TELEIMAGER_STREAMING_CONFIG`. Camera mappings explicitly declare inputs in `camera_config`; directory and stream names do not imply capture parameters. TCP output dimensions, FPS, bitrate, and encoder options come from the streaming file; the App supplies a receiving endpoint. A version-one App must request the grid's `width` and `height`; version two takes its geometry from the `RTSI` message. `python -B docker/onboard/service.py print-config` exports effective static settings without opening devices.
 
 ### App stream protocol
 
@@ -422,7 +457,7 @@ The custom RTP/App paths require OpenCV (the existing `[viewer]` extra). RTP/JPE
 
 ### Source layout
 
-`server.py` provides `TeleImageServer` and the server CLI; `client.py` provides `TeleImageClient` and the client CLI. Import `TeleImage` and `TripleRingBuffer` from `teleimager.frame`, and transport classes from their modules under `teleimager.transport`. Client and server modules no longer re-export implementations moved to those modules. Existing console commands remain available.
+`server.py` provides `TeleImageServer` and the server CLI; `client.py` provides `TeleImageClient` and the client CLI. `TeleImage`, `DepthPacket` and `TripleRingBuffer` live in `teleimager.frame`; `teleimager.client` also exports `TeleImage` and `DepthPacket`, as the public client does. Import transport classes from their modules under `teleimager.transport`; the server module does not re-export them. Existing console commands remain available.
 
 Named camera `profiles`, the `read_config(profile=...)` argument, and per-camera `{config, profile}` selections are not supported. Use a complete native camera mapping or a plain relative YAML reference. RoboTree keeps its capture mapping inline in `camera_config` and exports native server settings. Client caching, protocol recovery, and supported camera backends remain available.
 
@@ -431,11 +466,11 @@ Named camera `profiles`, the `read_config(profile=...)` argument, and per-camera
 | `camera/camera.py` and backend modules | Shared capture lifecycle and one implementation per camera backend |
 | `camera_finder.py` | Camera discovery and reports |
 | `transport/zmq_publisher.py` | ZMQ publication threads and their manager |
-| `transport/zmq_subscriber.py` | ZMQ subscription, FPS monitoring and JPEG decoding |
+| `transport/zmq_subscriber.py` | ZMQ subscription, FPS monitoring, JPEG decoding and depth packets |
 | `transport/zmq_request.py` | Configuration requests, responses and client cache |
 | `transport/webrtc.py` | WebRTC publication, encoder settings and browser page |
 | `transport/tcp_stream.py` | Robotree App TCP control, protocol version two geometry, H264 streaming and bitrate control, preview layouts and teleop status relay |
-| `frame.py` | Shared frame data and latest-frame buffers |
-| `host.py` | Driver reload, permissions and CPU affinity |
+| `frame.py` | Shared frame data, depth packets and latest-frame buffers |
+| `host.py` | Driver reload, permissions, boot service and CPU affinity |
 
 The server imports shared communication directly rather than importing the client module. WebRTC encoder customization is applied when a server is constructed, rather than during module import. The browser logo is loaded as a package resource. App streaming uses `teleimager.transport.tcp_stream.TcpStreamServer`; the previous module path and class name are no longer provided.

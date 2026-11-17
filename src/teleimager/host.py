@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Configure Linux camera permissions, UVC driver reloads, and CPU affinity."""
+"""Configure Linux camera permissions, UVC driver reloads, the boot service, and CPU affinity."""
 
+from pathlib import Path
+import glob
 import grp
 import os
 import pwd
 import shutil
 import subprocess
+import sys
 import tempfile
 
 import logging_mp
@@ -38,26 +41,43 @@ _UDEV_RULE_PATH = "/etc/udev/rules.d/70-teleimager.rules"
 _SUDOERS_PATH = "/etc/sudoers.d/uvc_modprobe"
 
 
+_SERVICE_PATH = "/etc/systemd/system/teleimager.service"
+
+
 def reload_uvcvideo_module():
     """Reload the Linux UVC driver and wait for pending udev events.
 
     A nonzero unload exit status is tolerated; loading requires success.
-    Non-root calls use non-interactive sudo. Command errors and timeouts abort
-    the remaining steps and are logged without propagating to the caller.
+    Non-root calls use non-interactive sudo. Command output is captured; on
+    failure the stderr is logged with a hint: grant the reload once, or, when
+    this kernel has no uvcvideo module at all, install it. Command errors and
+    timeouts abort the remaining steps and are logged without propagating to
+    the caller.
     """
     # Root needs no escalation and may not have a matching sudoers entry.
     sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
     try:
         # Non-interactive sudo fails immediately if permissions are missing.
-        subprocess.run([*sudo, "modprobe", "-r", "uvcvideo"], timeout=30)
-        subprocess.run([*sudo, "modprobe", "uvcvideo"], check=True, timeout=30)
+        subprocess.run([*sudo, "modprobe", "-r", "uvcvideo"], capture_output=True, timeout=30)
+        subprocess.run([*sudo, "modprobe", "uvcvideo"], check=True, capture_output=True, timeout=30)
         # Waiting for udev does not need the modprobe privilege grant.
-        subprocess.run(["udevadm", "settle"], timeout=30)
+        subprocess.run(["udevadm", "settle"], capture_output=True, timeout=30)
         logger_mp.info("[Teleimager] UVC driver reloaded.")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         logger_mp.error(f"[Teleimager] Failed to reload driver: {e}")
-        logger_mp.error('[Teleimager] Grant it once with:\n'
-                        '    sudo "$(which teleimager-server)" --setup-permissions')
+        if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+            logger_mp.error("[Teleimager] " + e.stderr.decode(errors="replace").strip())
+        rel = os.uname().release
+        if glob.glob(f"/lib/modules/{rel}/**/uvcvideo.ko*", recursive=True):
+            logger_mp.error('[Teleimager] Grant it once with:\n'
+                            '    sudo "$(which teleimager-server)" --setup-permissions')
+        else:
+            logger_mp.error(
+                f"[Teleimager] No uvcvideo driver for kernel {rel}, so this machine cannot serve UVC cameras as-is.\n"
+                "    On Debian/Ubuntu it is a separate module package; please install it with:\n"
+                f"      sudo apt install linux-modules-extra-{rel}\n"
+                "    If apt has no candidate for that version, the driver cannot be added to this kernel."
+            )
 
 
 def _run(argv):
@@ -176,6 +196,108 @@ def setup_permissions(requested_user=None):
         logger_mp.info("[Teleimager] SSH: reconnect ('sshd' re-reads groups per "
                        "login).  Desktop terminal: log out and back in.")
     logger_mp.info("[Teleimager] Verify with:  teleimager-server --cf --uvc")
+    return 0
+
+
+def setup_service(config_path, requested_user=None, *, streaming_config=None, cert=None, key=None):
+    """Install and enable a systemd unit that starts the server on boot; requires root.
+
+    The unit runs the interpreter running this command, so no environment
+    activation is needed, as the invoking user, with an explicit --config
+    and any of the other given files as absolute paths.
+
+    Args:
+        config_path: Server YAML the service serves.
+        requested_user: Account the service runs as; defaults to SUDO_USER,
+            then root.
+        streaming_config: Optional streaming settings file passed as
+            --streaming-config.
+        cert: Optional TLS certificate passed as --cert.
+        key: Optional TLS private key passed as --key.
+
+    Returns:
+        Zero on completion, or one when a reported error aborts setup.
+    """
+    if os.geteuid() != 0:
+        logger_mp.error("[Teleimager] This writes to /etc/systemd/system, "
+                        "so it needs root:\n"
+                        '    sudo "$(which teleimager-server)" --setup-service --config <server.yaml>')
+        return 1
+    if not shutil.which("systemctl"):
+        logger_mp.error("[Teleimager] systemctl not found; this machine does not run systemd, "
+                        "so there is nothing this flag can install.")
+        return 1
+
+    user = requested_user or os.environ.get("SUDO_USER") or "root"
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        logger_mp.error(f"[Teleimager] No such user: {user}")
+        return 1
+
+    server_args = []
+    for flag, value in (("--config", config_path), ("--streaming-config", streaming_config),
+                        ("--cert", cert), ("--key", key)):
+        if value is None:
+            continue
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            logger_mp.error(f"[Teleimager] {flag} {path} is not a file; the service would not start.")
+            return 1
+        server_args += [flag, str(path)]
+
+    def _quote(arg):
+        # systemd unquotes double-quoted arguments; % starts a unit specifier.
+        return '"' + arg.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+    # The interpreter running now has teleimager and its camera backends
+    # installed; PYTHONPATH keeps a source checkout importable as well.
+    exe = os.path.abspath(sys.executable)
+    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    exec_start = " ".join(_quote(arg) for arg in [exe, "-m", "teleimager.server", *server_args])
+    unit = (
+        "[Unit]\n"
+        "Description=TeleImager Image Server\n"
+        "After=network.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"User={user}\n"
+        f"WorkingDirectory={pw.pw_dir}\n"
+        f"ExecStart={exec_start}\n"
+        "Restart=always\n"
+        "RestartSec=5\n"
+        f"Environment={_quote('PYTHONPATH=' + pkg_root)}\n"
+        "Environment=PYTHONUNBUFFERED=1\n"
+        "StandardOutput=journal+console\n"
+        "StandardError=journal+console\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+    try:
+        with open(_SERVICE_PATH, "w") as f:
+            f.write(unit)
+        os.chmod(_SERVICE_PATH, 0o644)
+        logger_mp.info(f"[Teleimager] Installed {_SERVICE_PATH}")
+    except OSError as e:
+        logger_mp.error(f"[Teleimager] Cannot write {_SERVICE_PATH}: {e}")
+        return 1
+
+    if not _run(["systemctl", "daemon-reload"]) or not _run(["systemctl", "enable", "--now", "teleimager.service"]):
+        logger_mp.error("[Teleimager] systemctl failed; check 'journalctl -u teleimager.service'.")
+        return 1
+
+    logger_mp.info(f"[Teleimager] teleimager.service enabled and started (runs as {user}).")
+    logger_mp.info(f"[Teleimager] It serves {Path(config_path).expanduser().resolve()} — edit that, then restart.")
+    logger_mp.info(
+        "[Teleimager] Day-to-day management is all systemctl; the ones that change state need sudo:\n"
+        "    🔍 systemctl status teleimager.service       # is it running, plus recent log lines\n"
+        "    📜 journalctl -u teleimager.service -f       # follow the live log\n"
+        "    🔄 sudo systemctl restart teleimager.service # apply edits to the yaml\n"
+        "    🛑 sudo systemctl stop teleimager.service    # stop it now, still starts at boot\n"
+        "    🚫 sudo systemctl disable teleimager.service # stop starting it at boot"
+    )
     return 0
 
 

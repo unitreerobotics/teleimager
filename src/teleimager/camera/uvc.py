@@ -20,9 +20,10 @@ from pathlib import Path
 import struct
 import sys
 
+import av
 import logging_mp
 
-from .camera import BaseCamera
+from .camera import BaseCamera, _jpeg_to_yuv_frame
 from .realsense import RealSenseCamera
 
 logger_mp = logging_mp.getLogger(__name__)
@@ -52,7 +53,7 @@ _MJPG_FOURCC = int.from_bytes(b"MJPG", "little")
 
 
 class UVCCamera(BaseCamera):
-    """Capture MJPEG with libuvc, preserving JPEG bytes and optional BGR output."""
+    """Capture MJPEG with libuvc, forwarding JPEG bytes and decoding only on demand."""
 
     def __init__(self, cam_topic, uid, server_cfg):
         """Open the libuvc UID and select the exact configured MJPEG capture mode."""
@@ -70,10 +71,22 @@ class UVCCamera(BaseCamera):
 
         try:
             self.cap.frame_mode = self._choose_mode(self.cap, width=self._img_shape[1], height=self._img_shape[0], fps=self._fps)
-            logger_mp.info(str(self))
         except Exception as e:
             self.cap = None
             raise RuntimeError(f"[UVCCamera] Failed to set mode for {self._cam_topic}: {e}")
+
+        # Priority 0 keeps the frame rate constant in low light instead of
+        # lengthening exposure, when the camera has the control.
+        control = next((c for c in self.cap.controls if c.display_name == "Auto Exposure Priority"), None)
+        if control is None:
+            logger_mp.debug(f"[UVCCamera] {cam_topic}: Auto Exposure Priority not supported")
+        else:
+            try:
+                control.value = 0
+            except Exception as e:
+                logger_mp.debug(f"[UVCCamera] {cam_topic}: failed to set Auto Exposure Priority=0: {e}")
+
+        logger_mp.info(str(self))
 
     @staticmethod
     def get_uvc_module():
@@ -83,20 +96,17 @@ class UVCCamera(BaseCamera):
             return uvc
         except ImportError:
             msg = (
-                "[UVC] pupil-labs-uvc (import name 'uvc') not installed.\n"
-                f"  Interpreter: {sys.executable}\n"
-                "  [1/2] System libraries pyuvc links against (before a source build):\n"
-                "      sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev\n"
-                "  [2/2] The Python binding, from PyPI:\n"
-                "      pip install \"teleimager[uvc]\"\n"
+                f"[UVC] pupil-labs-uvc (import name 'uvc') not installed, for interpreter {sys.executable}.  You can try:\n"
+                "    [1/2] sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev\n"
+                "    [2/2] pip install \"teleimager[uvc]\"\n"
             )
             logger_mp.error(msg)
             sys.exit(1)
 
     def __str__(self):
-        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        color_zmq = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        return f" 📷 Camera {self._cam_topic!r:<22} uvc, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, MJPG, {zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} uvc, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, MJPG, {color_zmq}, {webrtc}"
 
     def _choose_mode(self, cap, width=None, height=None, fps=None):
         """Return the exact MJPEG resolution and FPS match, or raise ValueError."""
@@ -106,13 +116,20 @@ class UVCCamera(BaseCamera):
         raise ValueError("[UVCCamera] No matching uvc mode found")
 
     def _update_frame(self):
-        """Capture one frame and refresh enabled JPEG and BGR buffers."""
+        """Capture one frame and refresh the color ZMQ, WebRTC, and BGR buffers."""
         if self.cap is not None:
             frame = self.cap.get_frame_robust()
             if frame is not None:
-                if self._enable_zmq:
+                if self._enable_color_zmq:
                     if frame.jpeg_buffer is not None:
-                        self._zmq_buffer.write(bytes(frame.jpeg_buffer))
+                        self._color_zmq_buffer.write(bytes(frame.jpeg_buffer))
+
+                # WebRTC takes YUV planes straight from the JPEG, skipping BGR.
+                if self._webrtc_connected.is_set():
+                    if frame.jpeg_buffer is not None:
+                        self._webrtc_buffer.write(_jpeg_to_yuv_frame(bytes(frame.jpeg_buffer)))
+                    elif frame.bgr is not None:
+                        self._webrtc_buffer.write(av.VideoFrame.from_ndarray(frame.bgr, format="bgr24"))
 
                 if self._enable_bgr_output:
                     if frame.bgr is not None:

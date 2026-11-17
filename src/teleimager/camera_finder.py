@@ -68,13 +68,16 @@ class CameraFinder:
 
         logger_mp.info("[Teleimager] 🎯 Camera Finder Report")
         self._print_children(branches, "")
-        if any([self.enable_uvc, self.enable_v4l2, self.enable_gstreamer, self.enable_realsense]):
+        if not any([self.enable_uvc, self.enable_v4l2, self.enable_gstreamer, self.enable_realsense]):
+            logger_mp.warning(
+                "[Teleimager] 🖼️  No camera backends enabled — nothing to scan.  Add one flag per camera type:\n"
+                "    teleimager-server --cf --uvc --v4l2 --gst --rs\n"
+                "    --uvc (USB UVC)  --v4l2 (V4L2)  --gst (GStreamer)  --rs (RealSense)")
+        elif rs_cards or uvc_cards or v4l2_cards or gst_cards:
             logger_mp.info("[Teleimager] 👉 Use the results above to edit your server config yaml.")
         else:
-            logger_mp.warning("[Teleimager] 🖼️ No camera backends enabled — nothing to scan.")
-            logger_mp.info("[Teleimager] 👉 Add one flag per camera type you want to scan:")
-            logger_mp.info("[Teleimager]      teleimager-server --cf --uvc --v4l2 --gst --rs")
-            logger_mp.info("[Teleimager]      --uvc (USB UVC)   --v4l2 (V4L2)   --gst (GStreamer)   --rs (RealSense)")
+            # A backend ran but found nothing, so there is nothing to configure.
+            logger_mp.warning("[Teleimager] 👉 No cameras found — check the camera is connected and the driver is loaded.")
 
     @staticmethod
     def _print_children(children, prefix):
@@ -113,7 +116,7 @@ class CameraFinder:
                     stream_kids.append((stream, mode_kids))
                 fields.append(("modes  [format  width x height @ fps]:", stream_kids))
             cams.append(("📷 RealSense", fields))
-        return ("RealSenseCamera (%d found)   [type: realsense]" % len(cams), cams)
+        return ("RealSenseCamera (%d found)   [driver_type: realsense]" % len(cams), cams)
 
     def _report_uvc(self, cards):
         """Build the UVC branch, querying libuvc for each camera's modes."""
@@ -170,13 +173,13 @@ class CameraFinder:
                     fields.append(self._leaf("⚠️  modes unavailable: %s" % e))
 
             cams.append(("📷 %s (%s)" % (name, mfr), fields))
-        return ("UVCCamera (%d found)   [type: uvc]" % len(cams), cams)
+        return ("UVCCamera (%d found)   [driver_type: uvc]" % len(cams), cams)
 
     def _report_v4l2(self, cards):
         # Distinguish a missing discovery tool from an empty device list.
         """Build the V4L2 branch, reporting a missing v4l2-ctl explicitly."""
         if not shutil.which("v4l2-ctl"):
-            return ("V4L2Camera (0 found)   [type: v4l2]",
+            return ("V4L2Camera (0 found)   [driver_type: v4l2]",
                     [self._leaf("⚠️  v4l2-ctl not installed, run: sudo apt install -y v4l-utils")])
         cams = []
         for c in cards:
@@ -199,21 +202,22 @@ class CameraFinder:
             name = c.get("name") or c["video_path"]
             mfr = c.get("manufacturer") or "?"
             cams.append(("📷 %s (%s)" % (name, mfr), fields))
-        return ("V4L2Camera (%d found)   [type: v4l2]" % len(cams), cams)
+        return ("V4L2Camera (%d found)   [driver_type: v4l2]" % len(cams), cams)
 
     def _report_gstreamer(self, cards):
-        """Build the GStreamer branch with pipeline and device suggestions."""
+        """Build the GStreamer branch with stable device paths and a usage note."""
         cams = []
         for c in cards:
             fields = []
-            if c.get("recommend_backend"):
-                fields.append(self._leaf("recommend use type: %s (the gstreamer backend can't drive it)" % c["recommend_backend"]))
-                cams.append(("📷 " + (c.get("name") or "?"), fields))
-                continue
             if c.get("device_physical_path"):
                 fields.append(self._leaf("device (physical_path) : %s" % c["device_physical_path"]))
             if c.get("device_serial_number"):
                 fields.append(self._leaf("device (serial_number) : %s" % c["device_serial_number"]))
-            fields.append(self._leaf('gst_pipeline: "%s"' % c.get("gst_pipeline")))
             cams.append(("📷 " + (c.get("name") or "?"), fields))
-        return ("GStreamerCamera (%d found)   [type: gstreamer]" % len(cams), cams)
+        children = cams
+        if cams:
+            children = cams + [
+                self._leaf("⚠️  NOTE: GStreamer is intended for GMSL/MIPI and other non-USB cameras; "
+                           "for USB cameras prefer uvc or v4l2; build gst_pipeline with AI assistance."),
+            ]
+        return ("GStreamerCamera (%d found)   [driver_type: gstreamer]" % len(cams), children)

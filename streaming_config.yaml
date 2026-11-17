@@ -10,13 +10,17 @@
 # =====================================================
 
 # =====================================================
-# ZMQ publishing. Each captured camera publishes one JPEG stream.
-# Only captured topics are enabled; active publisher ports must be unique.
+# ZMQ publishing. Each listed captured camera publishes one JPEG color stream
+# (enable_color_zmq / color_zmq_port). A RealSense capture with
+# enable_depth_zmq: true also publishes aligned depth (a small header plus
+# zstd-compressed z16) on its depth_ports entry; such a capture without one
+# is an error. enabled: false turns color and depth off.
+# Only captured topics are enabled; active color and depth ports must be unique.
 # Each topic has its own port, including alternative head sources.
 # =====================================================
 zmq:
   enabled: true                # Set to true to enable ZMQ publishing, false to disable
-  codec: jpeg                  # ZMQ output codec; currently "jpeg"
+  codec: jpeg                  # ZMQ color output codec; currently "jpeg"
   ports:
     head_stereo_camera: 55555     # Side-by-side stereo head topic
     head_mono_camera: 55560       # Mono head topic
@@ -25,6 +29,8 @@ zmq:
     wrist_left_camera: 55556      # Left wrist publisher TCP port
     wrist_right_camera: 55557     # Right wrist publisher TCP port
     chest_camera: 55561           # Chest publisher TCP port
+  depth_ports:
+    head_mono_camera: 56001       # RealSense mono head depth; used only with enable_depth_zmq: true
 
 # =====================================================
 # TCP streaming. One H264 stream carries the App's camera view.

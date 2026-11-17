@@ -22,7 +22,7 @@ import subprocess
 import av
 import logging_mp
 
-from .camera import BaseCamera, _turbojpeg
+from .camera import BaseCamera, _jpeg_to_yuv_frame, _turbojpeg
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
@@ -46,6 +46,16 @@ class V4L2Camera(BaseCamera):
         self._passthrough = "MJPG" in formats
         input_format = "mjpeg" if self._passthrough else "yuyv422"
 
+        # 0 keeps the frame rate constant in low light instead of lengthening
+        # exposure, when the camera has the control.
+        try:
+            result = subprocess.run(["v4l2-ctl", "-d", self._video_path, "--set-ctrl=exposure_dynamic_framerate=0"],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                logger_mp.debug(f"[V4L2Camera] {cam_topic}: exposure_dynamic_framerate not supported")
+        except (subprocess.SubprocessError, OSError) as e:
+            logger_mp.debug(f"[V4L2Camera] {cam_topic}: exposure_dynamic_framerate not applied ({e})")
+
         self.container = av.open(self._video_path, format="v4l2", options={
             "input_format": input_format,
             "video_size": f"{self._img_shape[1]}x{self._img_shape[0]}",
@@ -65,9 +75,9 @@ class V4L2Camera(BaseCamera):
             logger_mp.info(str(self))
 
     def __str__(self):
-        zmq = f"zmq=on (port={self._zmq_port})" if self._enable_zmq else "zmq=off"
+        color_zmq = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        return f" 📷 Camera {self._cam_topic!r:<22} v4l2, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} v4l2, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {color_zmq}, {webrtc}"
 
     def _can_read_frame(self):
         """Consume one packet and return whether it contains frame data."""
@@ -77,29 +87,36 @@ class V4L2Camera(BaseCamera):
             return False
 
     def _update_frame(self):
-        """Capture a packet and refresh enabled JPEG and BGR output buffers."""
+        """Capture a packet and refresh the color ZMQ, WebRTC, and BGR buffers."""
         if self.container is None:
             return
         packet = next(self._demux)
         if self._passthrough:
-            # Preserve JPEG bytes for ZMQ; decode only for requested BGR output.
+            # Preserve JPEG bytes for ZMQ; decode only for WebRTC and BGR output.
             jpeg_bytes = bytes(packet)
             if not jpeg_bytes:
                 return
-            if self._enable_zmq:
-                self._zmq_buffer.write(jpeg_bytes)
+            if self._enable_color_zmq:
+                self._color_zmq_buffer.write(jpeg_bytes)
+            if self._webrtc_connected.is_set():
+                self._webrtc_buffer.write(_jpeg_to_yuv_frame(jpeg_bytes))
             if self._enable_bgr_output:
                 self._bgr_buffer.write(_turbojpeg.decode(jpeg_bytes))
         else:
-            # YUYV requires conversion to BGR and JPEG encoding for ZMQ.
+            # YUYV: WebRTC takes the decoded frame as is; ZMQ and the App
+            # stream need BGR, and ZMQ a JPEG encoding of it.
             frames = packet.decode()
             if not frames:
                 return
-            bgr_numpy = frames[0].to_ndarray(format="bgr24")
-            if self._enable_bgr_output:
-                self._bgr_buffer.write(bgr_numpy)
-            if self._enable_zmq:
-                self._zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
+            frame = frames[0]
+            if self._webrtc_connected.is_set():
+                self._webrtc_buffer.write(frame)
+            if self._enable_color_zmq or self._enable_bgr_output:
+                bgr_numpy = frame.to_ndarray(format="bgr24")
+                if self._enable_bgr_output:
+                    self._bgr_buffer.write(bgr_numpy)
+                if self._enable_color_zmq:
+                    self._color_zmq_buffer.write(_turbojpeg.encode(bgr_numpy))
 
         if not self._ready.is_set():
             self._ready.set()
@@ -233,19 +250,19 @@ class V4L2Camera(BaseCamera):
 
     @classmethod
     def _resolve_vpath(cls, ids, key, value):
-        """Resolve an identifier, preferring nodes that list capture formats.
+        """Resolve an identifier to the one matching node that lists capture formats.
 
-        Falls back to the original matches if no node lists one. Returns None
-        for no match and raises ValueError if multiple candidates remain.
+        Metadata and control siblings share the USB identifier but list no
+        capture format, so they are dropped. Returns None when no capture node
+        matches and raises ValueError if several remain.
         """
         matches = [r["video_path"] for r in ids if r.get(key) == value]
-        if not matches:
-            return None
         capture = [v for v in matches if cls._lists_capture_formats(v)]
-        pool = capture or matches
-        if len(pool) > 1:
-            raise ValueError(f"Multiple V4L2 capture nodes match {key}={value}: {pool}")
-        return pool[0]
+        if not capture:
+            return None
+        if len(capture) > 1:
+            raise ValueError(f"Multiple V4L2 capture nodes match {key}={value}: {capture}")
+        return capture[0]
 
     @classmethod
     def scan(cls):

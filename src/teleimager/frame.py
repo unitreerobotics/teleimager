@@ -19,9 +19,10 @@
 # ------------------------------------------------------------------------------
 
 
-"""Store the latest frame references and expose client image data."""
+"""Store the latest frame references and expose client image and depth data."""
 
 from typing import Any, Optional
+import struct
 import threading
 
 import cv2
@@ -30,6 +31,13 @@ import numpy as np
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
+
+
+# zstandard is optional: only the depth stream needs it.
+try:
+    import zstandard as zstd
+except ImportError:
+    zstd = None
 
 
 def fit_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -68,21 +76,28 @@ class TripleRingBuffer:
     """
 
     def __init__(self):
-        """Initialize three empty slots and their shared index lock."""
+        """Initialize three empty slots, their shared lock and the write sequence."""
         self.buffer = [None, None, None]
         self.write_index = 0            # Index where the next write will occur
         self.latest_index = -1          # Index of the latest written data
         self.read_index = -1            # Index of the current read data
         self.lock = threading.Lock()
+        self._cond = threading.Condition(self.lock)
+        self._seq = 0                   # Incremented on every write()
 
     def write(self, data):
-        """Replace the latest value while avoiding the current read slot."""
-        with self.lock:
+        """Replace the latest value while avoiding the current read slot.
+
+        Wakes every reader blocked in wait_new().
+        """
+        with self._cond:
             self.buffer[self.write_index] = data
             self.latest_index = self.write_index
             self.write_index = (self.write_index + 1) % 3
             if self.write_index == self.read_index:
                 self.write_index = (self.write_index + 1) % 3
+            self._seq += 1
+            self._cond.notify_all()
 
     def read(self):
         """Return the latest value by reference, or None before the first write."""
@@ -92,18 +107,97 @@ class TripleRingBuffer:
             self.read_index = self.latest_index
         return self.buffer[self.read_index]
 
+    def wait_new(self, last_seq, timeout=None):
+        """Wait until a write newer than last_seq arrives.
+
+        Args:
+            last_seq: Write sequence the caller has already consumed; 0 before
+                the first write.
+            timeout: Longest wait in seconds, or None to wait indefinitely.
+
+        Returns:
+            The current write sequence, equal to last_seq on timeout.
+        """
+        with self._cond:
+            self._cond.wait_for(lambda: self._seq != last_seq, timeout)
+            return self._seq
+
+
+class DepthPacket:
+    """Carry one depth frame on the wire: a small header and a zstd payload.
+
+    The header is struct "<IHHf": color frame number, width, height and
+    depth_scale; the payload is the zstd-compressed row-major uint16 depth
+    image. Depth is aligned to the color frame by the RealSense SDK; frames
+    whose alignment failed are never sent.
+
+    Attributes:
+        frame_no: Number of the color frame this depth is aligned to.
+        depth: uint16 depth image of shape (height, width).
+        depth_scale: Meters per depth unit.
+        compressed: The received zstd frame (the bytes after the header) for
+            decoded packets, so a consumer can store it without recompressing;
+            None for packets built locally.
+    """
+
+    available = zstd is not None and hasattr(zstd, "compress") and hasattr(zstd, "decompress")
+    _HEADER = struct.Struct("<IHHf")  # frame no, width, height, depth_scale
+    _LEVEL = 3  # zstd default level; compression is lossless, so it only trades speed for size
+
+    def __init__(self, frame_no: int, depth: np.ndarray, depth_scale: float, compressed: Optional[bytes] = None):
+        """Store one depth frame without copying it.
+
+        Args:
+            frame_no: Number of the color frame this depth is aligned to.
+            depth: uint16 depth image of shape (height, width).
+            depth_scale: Meters per depth unit.
+            compressed: Received zstd payload, or None for a local packet.
+        """
+        self.frame_no = frame_no
+        self.depth = depth
+        self.depth_scale = depth_scale
+        self.compressed = compressed
+
+    def encode(self) -> bytes:
+        """Return the header followed by the zstd-compressed depth image.
+
+        Raises:
+            RuntimeError: zstandard is not installed.
+        """
+        if not self.available:
+            raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
+        header = self._HEADER.pack(self.frame_no & 0xFFFFFFFF, self.depth.shape[1], self.depth.shape[0], self.depth_scale)
+        return header + zstd.compress(np.ascontiguousarray(self.depth).tobytes(), self._LEVEL)
+
+    @classmethod
+    def decode(cls, packet: bytes) -> "DepthPacket":
+        """Parse one received message and keep its zstd payload as compressed.
+
+        Raises:
+            RuntimeError: zstandard is not installed.
+            struct.error, ValueError: The message is malformed.
+        """
+        if not cls.available:
+            raise RuntimeError("[Teleimager] decoding depth requires zstandard: pip install 'teleimager[depth]'")
+        frame_no, width, height, scale = cls._HEADER.unpack_from(packet)
+        compressed = packet[cls._HEADER.size:]
+        depth = np.frombuffer(zstd.decompress(compressed), np.uint16).reshape(height, width)
+        return cls(frame_no, depth, scale, compressed=compressed)
+
 
 class TeleImage:
-    """Expose JPEG bytes, optional decoded BGR data, and measured receive FPS.
+    """Expose JPEG bytes, optional decoded BGR data, depth, and measured receive FPS.
 
-    BGR decoding may be disabled, pending, or available. JPEG and BGR values
-    come from separate buffers and need not represent the same source frame.
+    BGR decoding may be disabled, pending, or available. JPEG, BGR, and depth
+    values come from separate buffers and need not represent the same source
+    frame; a DepthPacket carries the number of the color frame it belongs to.
     """
 
     _NOT_SET = object()
-    __slots__ = ['jpg', '_bgr', 'fps']
+    __slots__ = ['jpg', '_bgr', 'fps', 'depth']
 
-    def __init__(self, fps: float, jpg: Optional[bytes], bgr: Any = _NOT_SET):
+    def __init__(self, fps: float, jpg: Optional[bytes], bgr: Any = _NOT_SET,
+                 depth: Optional[DepthPacket] = None):
         """Store frame data without copying it.
 
         Args:
@@ -111,10 +205,12 @@ class TeleImage:
             jpg: Latest JPEG bytes, or None when unavailable.
             bgr: Decoded BGR array, None when unavailable, or the default sentinel
                 when decoding is disabled.
+            depth: Latest depth packet, or None when unavailable or not requested.
         """
         self.fps = fps
         self.jpg = jpg
         self._bgr = bgr
+        self.depth = depth
 
     @property
     def bgr(self) -> Optional[np.ndarray]:
@@ -138,7 +234,8 @@ class TeleImage:
         yield (None if self._bgr is TeleImage._NOT_SET else self._bgr)
 
     def __repr__(self):
-        """Return the receive rate, JPEG size, and BGR state for debugging."""
+        """Return the receive rate, JPEG size, BGR state, and depth frame for debugging."""
         size = len(self.jpg) if self.jpg else 0
+        depth_frame = None if self.depth is None else self.depth.frame_no
         state = "DISABLED" if self._bgr is TeleImage._NOT_SET else ("FAILED" if self._bgr is None else "OK")
-        return f"TeleImage(fps={self.fps:.1f}, jpg_byte_size={size}, bgr_state={state})"
+        return f"TeleImage(fps={self.fps:.1f}, jpg_byte_size={size}, bgr_state={state}, depth_frame_no={depth_frame})"

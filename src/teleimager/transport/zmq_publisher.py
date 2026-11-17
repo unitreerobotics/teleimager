@@ -19,7 +19,7 @@
 # ------------------------------------------------------------------------------
 
 
-"""Publish JPEG bytes through per-endpoint ZMQ worker threads."""
+"""Publish byte payloads (JPEG frames, depth packets) through per-endpoint ZMQ worker threads."""
 
 from typing import Any, Dict, Optional, Tuple
 import contextlib
@@ -31,6 +31,12 @@ import zmq
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
+
+
+# ZMTP heartbeats: ping an idle subscriber every 5 s and drop the connection
+# after 15 s without traffic, so a vanished subscriber does not linger.
+HEARTBEAT_IVL_MS = 5000
+HEARTBEAT_TIMEOUT_MS = 15000
 
 
 class ZMQ_PublisherThread(threading.Thread):
@@ -98,6 +104,8 @@ class ZMQ_PublisherThread(threading.Thread):
             self._socket.setsockopt(zmq.CONFLATE, 1)  # Only keep latest message
             self._socket.setsockopt(zmq.SNDHWM, 1)    # Limit send-side backlog
             self._socket.setsockopt(zmq.LINGER, 0)
+            self._socket.setsockopt(zmq.HEARTBEAT_IVL, HEARTBEAT_IVL_MS)
+            self._socket.setsockopt(zmq.HEARTBEAT_TIMEOUT, HEARTBEAT_TIMEOUT_MS)
             self._socket.bind(f"tcp://{self._host}:{self._port}")
 
             self._started.set()
@@ -196,7 +204,7 @@ class ZMQ_PublisherManager:
         """Queue bytes for an endpoint, creating its publisher on first use.
 
         Args:
-            data: Bytes-like payload, normally an encoded JPEG image.
+            data: Bytes-like payload: an encoded JPEG image or a depth packet.
             port: Local publication port.
             host: Local bind address.
 
