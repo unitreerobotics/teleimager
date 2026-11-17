@@ -2554,6 +2554,8 @@ class TeleImageServer:
                 if driver_type == "v4l2":
                     self._cameras[cam_topic] = V4L2Camera.from_config(cam_topic, server_cfg)
                 elif driver_type == "realsense":
+                    rs = RealSenseCamera.get_realsense_module()
+                    logger_mp.info(f"[Teleimager] RealSense SDK {rs.__version__} ({rs.__file__})")
                     self._cameras[cam_topic] = RealSenseCamera.from_config(cam_topic, server_cfg)
                 elif driver_type == "uvc":
                     self._cameras[cam_topic] = UVCCamera.from_config(cam_topic, server_cfg)
