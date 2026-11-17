@@ -177,15 +177,24 @@ class RealSenseCamera(BaseCamera):
     @classmethod
     def _list_serial_numbers(cls):
         """List SDK-visible RealSense device serial numbers."""
+        return [serial_number for serial_number, _ in cls._list_devices()]
+
+    @classmethod
+    def _list_devices(cls):
+        """List SDK-visible RealSense devices as (serial number, product name)."""
         rs = cls.get_realsense_module()
-        ctx = rs.context()
-        serials = []
-        for dev in ctx.query_devices():
+        devices = []
+        for dev in rs.context().query_devices():
             try:
-                serials.append(dev.get_info(rs.camera_info.serial_number))
+                serial_number = dev.get_info(rs.camera_info.serial_number)
             except Exception:
                 continue
-        return serials
+            try:
+                name = dev.get_info(rs.camera_info.name)
+            except Exception:
+                name = None
+            devices.append((serial_number, name))
+        return devices
 
     @staticmethod
     def _list_video_paths():

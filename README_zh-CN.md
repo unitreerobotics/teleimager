@@ -293,7 +293,7 @@ camera:
 teleimager-server --config /path/to/server.yaml
 ```
 
-也可使用 `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`。`--config` 优先于环境变量；两者都未提供时明确报错，不自动创建或隐式读取服务端配置。相机发现（`--cf`）和权限设置（`--setup-permissions`）不要求配置文件。服务端启动时会记录版本（`TeleImager v2.1.0+robotree.1 on Linux x86_64`）。
+也可使用 `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`。`--config` 优先于环境变量；两者都未提供时明确报错，不自动创建或隐式读取服务端配置。相机发现（`--cf`）和权限设置（`--setup-permissions`）不要求配置文件。服务端启动时会记录版本（`TeleImager v2.1.0+robotree.2 on Linux x86_64`）。
 
 `--streaming-config <路径>` 选择输出设置，`--no-affinity` 跳过 CPU 核心绑定，`--isaacsim` 从共享内存读取图像。TLS 证书仍默认读取 `~/.config/teleimager/cert.pem` 和 `key.pem`；客户端仍保留最近一次成功获取的配置缓存。
 
@@ -402,17 +402,14 @@ sudo $(which teleimager-server) --cf --uvc
 
 ## RoboTree 定制功能
 
-版本 `2.1.0+robotree.1`，公版基线为 TeleImager 2.1.0，源码提交 `19fdf9329a82c13860da0a7dbfe3ce749f940456`。未采用其中的：双 RGB RealSense 相机（`sensors_config_mode`、RealSense 双目、`all_config_modes` 相机搜索报告）、移除 IsaacSim，以及自动创建默认服务端配置。
+版本 `2.1.0+robotree.2`，公版基线为 TeleImager 2.1.0，源码提交 `19fdf9329a82c13860da0a7dbfe3ce749f940456`。未采用其中的：双 RGB RealSense 相机（`sensors_config_mode`、RealSense 双目、`all_config_modes` 相机搜索报告）、移除 IsaacSim，以及自动创建默认服务端配置。
 
 - `camera.<topic>.driver_type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
 - 顶层 `app_stream`（即推流文件的 `tcp` 段）支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。使用 `stereo_quad` 时，App 还可以请求协议 v2，见下文“App 推流协议”。
 - App 推流读取自己的 BGR 和显示缓冲；WebRTC 另有一个视频帧缓冲，只在浏览器连接时写入。四宫格对缺失、过期画面显示占位。`teleimager.client.TeleImageClient` 与公版客户端一致。
 - 一路相机打不开、5 秒内没有首帧或运行中出错，只停这一路并记一条错误日志，其余相机照常输出，服务不退出；公版服务端遇到相机错误会整体停止。ZMQ（彩色和深度）和 WebRTC 在新帧到达时发布，停掉的相机什么都不发，客户端看到的是“没有帧”而不是冻结的画面；每个输出每次断流只警告一次。`GET_DATA` 仍返回完整配置。
 - RealSense 深度：采集配置 `enable_depth_zmq: true` 的话题在其 `zmq.depth_ports` 端口发布与彩色图对齐的深度图；采集深度却没有该端口属于配置错误，`zmq.enabled: false` 同时关闭彩色和深度。`DepthPacket.decode()` 把收到的 zstd 数据保存在 `compressed`（本地构造的包为 `None`），录制端可直接存盘，无需再次压缩。
-- 相机发现不再从设备取流，默认模式下不出流的相机不会卡住启动。UVC 发现（`driver_type: uvc` 和 `--cf --uvc`）用 `VIDIOC_ENUM_FMT` 读取每个节点的采集格式，列出 MJPG、YUYV、NV12、H264 等格式时视为彩色相机，红外、深度和元数据节点会被跳过。V4L2 发现保留 `v4l2-ctl` 输出中声明采集并列出格式的节点，不读取数据包。`UVCCamera._list_mjpeg_modes()` 用同样方式（`VIDIOC_ENUM_FRAMESIZES`、`VIDIOC_ENUM_FRAMEINTERVALS`）列出节点的 MJPEG 尺寸和整数帧率，RoboTree 建档向导只给出本后端能打开的模式。
-- 启用 TCP 推流时，`tcp.status_host` / `tcp.status_port` 经 UDP 接收 RoboTree 的 `robotree_teleop_status` v1（默认 `0.0.0.0:13580`；`status_port: null` 关闭中继）。在控制连接上发出 `SUBSCRIBE_TELEOP_STATUS` 的 App，会从它所连接的地址在 UDP `13581` 收到每条已接受的状态，并自行绘制。中继不改动视频；没有发出该命令的 App 收不到状态。相机发布和录制保留源画面。
-- 发送端每个进程使用一个 `session_id`，`sequence` 从 1 递增。中继丢弃已被取代的会话和乱序包，对已接受的包回复 `robotree_overlay_status_ack`（原样带回 `session_id`），只有 App 视频已连接时才报告 `stream_active: true`。重发的包会再次得到 ACK 并转发。新会话只能从 sequence 1 开始取代当前会话；当前状态超过 `tcp.status_timeout`（默认 3 秒）后，任意 sequence 都可接受。
-- 能访问 `status_host` 的任何主机都可以发送状态。Policy 与相机在同一台主机时，绑定 `127.0.0.1`。
+- 相机发现不再从设备取流，默认模式下不出流的相机不会卡住启动。UVC 发现（`driver_type: uvc` 和 `--cf --uvc`）用 `VIDIOC_ENUM_FMT` 读取每个节点的采集格式，列出 MJPG、YUYV、NV12、H264 等格式时视为彩色相机，红外、深度和元数据节点会被跳过。V4L2 发现保留 `v4l2-ctl` 输出中声明采集并列出格式的节点，不读取数据包。`UVCCamera._list_mjpeg_modes()` 用同样方式（`VIDIOC_ENUM_FRAMESIZES`、`VIDIOC_ENUM_FRAMEINTERVALS`）列出节点的 MJPEG 尺寸和整数帧率。`teleimager.camera_finder.find_usb_cameras()` 不取流，以 `UsbCamera` 记录返回本机 USB 相机：UVC 按 USB 接口每个一台、按 USB 口排序，带 `driver_type`、`name`、`serial_number`、`physical_path`、`video_path` 和本后端能打开的 `mjpeg_modes`；装有 `pyrealsense2` 时再列出 SDK 看到的 RealSense 及其型号。`read_brightness()` 经视频节点测量 UVC 相机画面亮度。RoboTree 的硬件信息向导使用这两个函数。
 
 `stereo_quad` 的 `app_stream.camera_topics` 使用 `head_mono`、`head_stereo`、`head_left`、`head_right`、`wrist_left`、`wrist_right` 角色映射话题。单话题头部仅在采集配置声明 `binocular: true` 时拆分；单目完整复制到两个眼格，独立双眼分别读取。App 拼图只选择单目头部、拼接双目或独立双眼中的一种来源。所有声明话题使用独立的 ZMQ 和 WebRTC 端口；深度端口也不与任何彩色端口重复。只初始化已配置相机，无腕部时保留占位格且不启动腕部输出；所有组合共用 `streaming_config.yaml`。
 
@@ -428,7 +425,6 @@ TCP `13579` 上的控制包先是 4 字节大端包长，再是小端长度前�
 | `OPEN_STREAM` | 2 | JSON：`version: 2`、`request_id`、`stream_name`、`render_mode`（`immersive` 或 `window`）、`host`、`port`、`decoders`（`{编码器: {max_width, max_height}}`） | 为请求选定画面几何，新开一条视频连接，第一条消息是 `RTSI` |
 | `REQUEST_KEYFRAME` | 2 | JSON：`request_id` | 为对应请求强制一个 IDR 帧，最快每 0.5 秒一次 |
 | `CLOSE_CAMERA` | 1、2 | 空 | 停止推流 |
-| `SUBSCRIBE_TELEOP_STATUS` | 1、2 | 空 | 转发遥操作状态，见上文 |
 
 `OPEN_STREAM` 需要 `layout: stereo_quad` 提供头部角色映射，否则服务端记一条警告并忽略。RoboTree App 1.2.0 在 3 秒内收不到 `RTSI` 时退回 `OPEN_CAMERA`，并在本次运行中记住这台主机。
 
@@ -464,12 +460,12 @@ TCP `13579` 上的控制包先是 4 字节大端包长，再是小端长度前�
 | 模块 | 职责 |
 | --- | --- |
 | `camera/camera.py` 及各后端文件 | 公共采集生命周期与逐后端实现 |
-| `camera_finder.py` | 相机发现及报告 |
+| `camera_finder.py` | 相机发现：`find_usb_cameras()` 返回数据，`--cf` 打印报告 |
 | `transport/zmq_publisher.py` | ZMQ 发布线程与管理 |
 | `transport/zmq_subscriber.py` | ZMQ 订阅、FPS 统计、JPEG 解码和深度包 |
 | `transport/zmq_request.py` | 配置请求、响应和客户端缓存 |
 | `transport/webrtc.py` | WebRTC 发布、编码设置及浏览器页面 |
-| `transport/tcp_stream.py` | Robotree App TCP 控制、协议 v2 画面几何、H264 推流与码率控制、预览布局及遥操作状态中继 |
+| `transport/tcp_stream.py` | Robotree App TCP 控制、协议 v2 画面几何、H264 推流与码率控制及预览布局 |
 | `frame.py` | 共享图像数据、深度包与最新帧缓冲 |
 | `host.py` | 驱动重载、权限设置、开机服务和 CPU 亲和性 |
 

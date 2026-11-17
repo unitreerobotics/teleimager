@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Scan selected camera backends and print their identifiers and modes."""
+"""Scan camera backends: list USB cameras as data, or print a backend report."""
 
+from dataclasses import dataclass
+import importlib.util
 import shutil
+import time
+from typing import Optional
 
 import logging_mp
 
@@ -26,6 +30,112 @@ from .camera.v4l2 import V4L2Camera
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
+
+
+@dataclass(frozen=True, kw_only=True)
+class UsbCamera:
+    """One USB camera this computer lists, as find_usb_cameras returns it.
+
+    Attributes:
+        driver_type: "uvc" or "realsense", the camera config's driver_type.
+        name: Product name the device reports, or None.
+        serial_number: USB or RealSense serial number, or None.
+        physical_path: Sysfs device path that the uvc backend matches; None for
+            RealSense.
+        video_path: A video node that lists the MJPEG modes, such as
+            "/dev/video0", or None; None for RealSense.
+        mjpeg_modes: MJPEG modes as (width, height, fps), the ones the uvc
+            backend can open, largest frame first; empty for RealSense.
+    """
+
+    driver_type: str
+    name: Optional[str]
+    serial_number: Optional[str]
+    physical_path: Optional[str] = None
+    video_path: Optional[str] = None
+    mjpeg_modes: tuple = ()
+
+
+def find_usb_cameras():
+    """List this computer's USB cameras without streaming from any of them.
+
+    UVC cameras come from sysfs, one per USB interface (its capture and metadata
+    video nodes share it), in USB-port order. RealSense video nodes are never
+    listed as UVC cameras; RealSense cameras come from the RealSense SDK when
+    pyrealsense2 is installed, in SDK order after the UVC ones, and are left out
+    otherwise. A UVC camera that a running server holds through libuvc has no
+    video node and is not listed, so stop the server first.
+
+    Returns:
+        A list of UsbCamera.
+    """
+    realsense_paths = set(RealSenseCamera._list_video_paths())
+    nodes = {}
+    for video_path in UVCCamera._list_video_paths():
+        if video_path not in realsense_paths:
+            nodes.setdefault(UVCCamera._get_ppath_from_vpath(video_path), []).append(video_path)
+    cameras = []
+    for physical_path in sorted(nodes):
+        attrs = UVCCamera._usb_attrs_from_ppath(physical_path)
+        node_modes = {video_path: UVCCamera._list_mjpeg_modes(video_path) for video_path in nodes[physical_path]}
+        modes = {mode for listed in node_modes.values() for mode in listed}
+        cameras.append(UsbCamera(
+            driver_type="uvc",
+            name=attrs["name"],
+            serial_number=attrs["serial_number"],
+            physical_path=physical_path,
+            video_path=next((path for path, listed in node_modes.items() if listed), None),
+            mjpeg_modes=tuple(sorted(modes, key=lambda mode: (-mode[0] * mode[1], -mode[0], -mode[2]))),
+        ))
+    if importlib.util.find_spec("pyrealsense2") is not None:
+        try:
+            devices = RealSenseCamera._list_devices()
+        except (Exception, SystemExit) as e:  # the SDK reports failures of its own kinds
+            logger_mp.warning(f"[Teleimager] Cannot list RealSense cameras: {e}")
+            devices = []
+        cameras.extend(
+            UsbCamera(driver_type="realsense", name=name, serial_number=serial_number)
+            for serial_number, name in devices
+        )
+    return cameras
+
+
+def read_brightness(camera, duration=0.8):
+    """Return the mean brightness, 0-255, of a UVC camera's frames over duration seconds.
+
+    The camera opens through its video node in its smallest MJPEG mode; frames
+    of the first fifth of the time are skipped while exposure settles, and the
+    result is the median of the remaining frames' means. Used to tell which
+    camera a person covers. Returns None when the camera has no video node or
+    MJPEG mode, OpenCV is missing, or no frame arrives.
+    """
+    if camera.video_path is None or not camera.mjpeg_modes:
+        return None
+    try:
+        import cv2
+    except ImportError:
+        return None
+    width, height, fps = min(camera.mjpeg_modes, key=lambda mode: (mode[0] * mode[1], -mode[2]))
+    capture = cv2.VideoCapture(camera.video_path, cv2.CAP_V4L2)
+    try:
+        if not capture.isOpened():
+            return None
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        capture.set(cv2.CAP_PROP_FPS, fps)
+        start = time.monotonic()
+        means = []
+        while (elapsed := time.monotonic() - start) < duration:
+            grabbed, frame = capture.read()
+            if grabbed and frame is not None and elapsed >= duration / 5:
+                means.append(float(frame.mean()))
+    finally:
+        capture.release()
+    if not means:
+        return None
+    means.sort()
+    return means[len(means) // 2]
 
 
 class CameraFinder:

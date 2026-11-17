@@ -119,7 +119,7 @@ class TeleImageServer:
         self._app_stream_layout = self._app_stream_config.get("layout", "default")
         self._camera_frame_times = {}
         if self._app_stream_config.get("enabled", False):
-            from .transport.tcp_stream import DEFAULT_STATUS_PORT, DEFAULT_STREAM_NAME, TcpStreamServer
+            from .transport.tcp_stream import DEFAULT_STREAM_NAME, TcpStreamServer
 
             if self._app_stream_layout not in ("default", "stereo_quad"):
                 raise ValueError(f"Unknown App stream layout: {self._app_stream_layout}")
@@ -162,9 +162,6 @@ class TeleImageServer:
                     "stream_name",
                     DEFAULT_STREAM_NAME,
                 ),
-                status_host=self._app_stream_config.get("status_host", "0.0.0.0"),
-                status_port=self._app_stream_config.get("status_port", DEFAULT_STATUS_PORT),
-                status_timeout=self._app_stream_config.get("status_timeout", 3.0),
                 # Version two places head roles, so it needs the role mapping.
                 stereo_enabled=self._app_stream_layout == "stereo_quad",
                 eye_source_shape=self._eye_source_shape,

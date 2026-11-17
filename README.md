@@ -293,7 +293,7 @@ Select the server YAML explicitly:
 teleimager-server --config /path/to/server.yaml
 ```
 
-Alternatively, use `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`. `--config` takes precedence over the environment variable. Startup fails with a clear error when neither is supplied; no server configuration is generated or read implicitly. Camera discovery (`--cf`) and permission setup (`--setup-permissions`) do not require a server configuration. The server logs its version (`TeleImager v2.1.0+robotree.1 on Linux x86_64`) at start.
+Alternatively, use `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`. `--config` takes precedence over the environment variable. Startup fails with a clear error when neither is supplied; no server configuration is generated or read implicitly. Camera discovery (`--cf`) and permission setup (`--setup-permissions`) do not require a server configuration. The server logs its version (`TeleImager v2.1.0+robotree.2 on Linux x86_64`) at start.
 
 Useful flags: `--streaming-config <path>` selects streaming settings; `--no-affinity` skips CPU-core pinning; `--isaacsim` reads frames from shared memory. TLS certificates still default to `~/.config/teleimager/cert.pem` and `key.pem`, and the client retains its last successful configuration cache.
 
@@ -402,17 +402,14 @@ Some code references: https://github.com/ARCLab-MIT/beavr-bot
 
 ## RoboTree integration
 
-Version `2.1.0+robotree.1`, based on public TeleImager 2.1.0, source commit `19fdf9329a82c13860da0a7dbfe3ce749f940456`. Not taken from it: dual-RGB RealSense cameras (`sensors_config_mode`, binocular RealSense, the `all_config_modes` finder report), the removal of IsaacSim, and the automatic creation of a default server configuration.
+Version `2.1.0+robotree.2`, based on public TeleImager 2.1.0, source commit `19fdf9329a82c13860da0a7dbfe3ce749f940456`. Not taken from it: dual-RGB RealSense cameras (`sensors_config_mode`, binocular RealSense, the `all_config_modes` finder report), the removal of IsaacSim, and the automatic creation of a default server configuration.
 
 - `camera.<topic>.driver_type: rtp` receives one RTP/JPEG or RTP/H264 stream per instance. `rtp_port` selects its UDP port and `source_host` filters sender IPs. Eyes publish and recover independently, without pairing or concatenation; expired frames stop publishing.
 - Top-level `app_stream` (the `tcp` block of the streaming file) provides RoboTree App H264/TCP streaming with single, mosaic, and `stereo_quad` layouts. Control defaults to port `13579`; image connections use the address and port requested by the App. With `stereo_quad`, the App can also request protocol version two; see App stream protocol below.
 - The App stream reads its own BGR and display buffers; WebRTC has a separate buffer of video frames, filled only while a browser is connected. Quad layouts replace missing or stale images with placeholders. `teleimager.client.TeleImageClient` matches the public client.
 - A camera that fails to open, gives no first frame within 5 s, or fails while running stops alone with one error in the log; the other cameras keep publishing and the server keeps running, unlike the public server, which stops on a camera error. ZMQ (color and depth) and WebRTC publish each frame when it arrives, so a stopped camera sends nothing and clients see no frame rather than a frozen one; each output logs one warning per stall. `GET_DATA` still returns the whole configuration.
 - RealSense depth: a capture with `enable_depth_zmq: true` publishes depth aligned to color on the topic's `zmq.depth_ports` entry; a captured depth topic without one is a configuration error, and `zmq.enabled: false` turns color and depth off. `DepthPacket.decode()` keeps the received zstd payload as `compressed` (`None` for packets built locally), so a recorder can store it without compressing again.
-- Camera discovery no longer streams from a device, so a camera that sends nothing in its default mode cannot block startup. UVC discovery (`driver_type: uvc` and `--cf --uvc`) reads each node's capture formats with `VIDIOC_ENUM_FMT` and counts a node as a colour camera when it lists a format such as MJPG, YUYV, NV12 or H264; infrared, depth and metadata nodes are skipped. V4L2 discovery keeps nodes whose `v4l2-ctl` output advertises capture and lists formats, without reading a packet. `UVCCamera._list_mjpeg_modes()` lists a node's MJPEG sizes and whole frame rates the same way (`VIDIOC_ENUM_FRAMESIZES`, `VIDIOC_ENUM_FRAMEINTERVALS`), so RoboTree's hardware wizard offers only modes this backend can open.
-- With TCP streaming enabled, `tcp.status_host` / `tcp.status_port` receive RoboTree `robotree_teleop_status` version 1 over UDP (default `0.0.0.0:13580`; `status_port: null` disables the relay). An App that sends `SUBSCRIBE_TELEOP_STATUS` on its control connection receives each accepted status on its UDP port `13581`, from the address it connected to, and draws it natively. The relay never modifies the video, and an App without that command receives no status. Camera publishers and recordings keep their source frames.
-- Status senders use one `session_id` per process and increasing `sequence` values from 1. The relay drops packets from replaced sessions and out-of-order packets, acknowledges accepted ones with `robotree_overlay_status_ack` (echoing `session_id`), and reports `stream_active: true` only while the App video is connected. A resend is acknowledged and forwarded again. A new session replaces the current one only from sequence 1, or with any sequence once the current status is older than `tcp.status_timeout` (default 3 s).
-- The relay accepts status from any host that reaches `status_host`. Bind `127.0.0.1` when Policy runs on the camera host.
+- Camera discovery no longer streams from a device, so a camera that sends nothing in its default mode cannot block startup. UVC discovery (`driver_type: uvc` and `--cf --uvc`) reads each node's capture formats with `VIDIOC_ENUM_FMT` and counts a node as a colour camera when it lists a format such as MJPG, YUYV, NV12 or H264; infrared, depth and metadata nodes are skipped. V4L2 discovery keeps nodes whose `v4l2-ctl` output advertises capture and lists formats, without reading a packet. `UVCCamera._list_mjpeg_modes()` lists a node's MJPEG sizes and whole frame rates the same way (`VIDIOC_ENUM_FRAMESIZES`, `VIDIOC_ENUM_FRAMEINTERVALS`). `teleimager.camera_finder.find_usb_cameras()` returns this computer's USB cameras as `UsbCamera` records without streaming: one UVC camera per USB interface in USB-port order, with `driver_type`, `name`, `serial_number`, `physical_path`, `video_path` and the `mjpeg_modes` this backend can open, then the RealSense cameras the SDK lists, with their model name, when `pyrealsense2` is installed. `read_brightness()` measures a UVC camera's frame brightness through its video node. RoboTree's hardware wizard uses both.
 
 For `stereo_quad`, `app_stream.camera_topics` maps `head_mono`, `head_stereo`, `head_left`, `head_right`, `wrist_left`, and `wrist_right` roles to topic names. A single head topic is split only when its capture configuration sets `binocular: true`; a mono head is shown intact in both eye tiles. Independent eyes are read separately. Mono-head, stereo-head, and independent-eye capture sources are mutually exclusive in the App grid. Every declared topic has a distinct ZMQ and WebRTC port; depth ports are distinct from all color ports. Only configured cameras are opened; absent wrists keep placeholder tiles without starting wrist outputs. All combinations share `streaming_config.yaml`.
 
@@ -428,7 +425,6 @@ Control packets on TCP `13579` carry a 4-byte big-endian packet length, then a l
 | `OPEN_STREAM` | 2 | JSON: `version: 2`, `request_id`, `stream_name`, `render_mode` (`immersive` or `window`), `host`, `port`, `decoders` (`{codec: {max_width, max_height}}`) | Chooses a geometry for the request and opens a new video connection that starts with an `RTSI` message |
 | `REQUEST_KEYFRAME` | 2 | JSON: `request_id` | Forces an IDR frame for the matching request, at most every 0.5 s |
 | `CLOSE_CAMERA` | 1, 2 | Empty | Stops the stream |
-| `SUBSCRIBE_TELEOP_STATUS` | 1, 2 | Empty | Forwards teleop status, as above |
 
 `OPEN_STREAM` needs `layout: stereo_quad`, which maps the head roles; otherwise the server logs a warning and ignores it. RoboTree App 1.2.0 falls back to `OPEN_CAMERA` when no `RTSI` arrives within 3 s and remembers that host for the rest of its run.
 
@@ -464,12 +460,12 @@ Named camera `profiles`, the `read_config(profile=...)` argument, and per-camera
 | Module | Responsibility |
 | --- | --- |
 | `camera/camera.py` and backend modules | Shared capture lifecycle and one implementation per camera backend |
-| `camera_finder.py` | Camera discovery and reports |
+| `camera_finder.py` | Camera discovery: `find_usb_cameras()` as data, `--cf` reports |
 | `transport/zmq_publisher.py` | ZMQ publication threads and their manager |
 | `transport/zmq_subscriber.py` | ZMQ subscription, FPS monitoring, JPEG decoding and depth packets |
 | `transport/zmq_request.py` | Configuration requests, responses and client cache |
 | `transport/webrtc.py` | WebRTC publication, encoder settings and browser page |
-| `transport/tcp_stream.py` | Robotree App TCP control, protocol version two geometry, H264 streaming and bitrate control, preview layouts and teleop status relay |
+| `transport/tcp_stream.py` | Robotree App TCP control, protocol version two geometry, H264 streaming and bitrate control and preview layouts |
 | `frame.py` | Shared frame data, depth packets and latest-frame buffers |
 | `host.py` | Driver reload, permissions, boot service and CPU affinity |
 
