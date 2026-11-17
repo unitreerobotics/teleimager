@@ -217,6 +217,8 @@ class ZMQ_PublisherThread(threading.Thread):
             self._socket.setsockopt(zmq.CONFLATE, 1)  # Only keep latest message
             self._socket.setsockopt(zmq.SNDHWM, 1)    # Limit send-side backlog
             self._socket.setsockopt(zmq.LINGER, 0)
+            self._socket.setsockopt(zmq.HEARTBEAT_IVL, 5000)
+            self._socket.setsockopt(zmq.HEARTBEAT_TIMEOUT, 15000)
             self._socket.bind(f"tcp://{self._host}:{self._port}")
 
             # Signal that socket is ready
@@ -539,6 +541,8 @@ class ZMQ_SubscriberThread(threading.Thread):
             self._socket.setsockopt(zmq.CONFLATE, 1)  # Only keep latest message
             self._socket.setsockopt(zmq.RCVHWM, 1)    # Limit receive-side backlog
             self._socket.setsockopt(zmq.LINGER, 0)
+            self._socket.setsockopt(zmq.HEARTBEAT_IVL, 5000)
+            self._socket.setsockopt(zmq.HEARTBEAT_TIMEOUT, 15000)
             self._socket.connect(f"tcp://{self._host}:{self._port}")
             self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
