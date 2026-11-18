@@ -1228,8 +1228,7 @@ class BaseCamera:
             self._color_zmq_buffer = None
         self._color_zmq_seq = 0
 
-        # Depth stream over ZMQ (realsense only): enable_depth_zmq captures the
-        # stream, depth_zmq_port publishes it on a separate port.
+        # Depth stream over ZMQ
         self._enable_depth_zmq = server_cfg.get("enable_depth_zmq", False)
         self._depth_zmq_port = server_cfg.get("depth_zmq_port", None)
         if self._enable_depth_zmq:
@@ -1242,6 +1241,7 @@ class BaseCamera:
             self._depth_zmq_buffer = None
         self._depth_zmq_seq = 0
 
+        # WebRTC stream configuration
         self._enable_webrtc = server_cfg.get("enable_webrtc", False)
         self._webrtc_port = server_cfg.get("webrtc_port", None)
         self._webrtc_codec = server_cfg.get("webrtc_codec", None)
@@ -1260,6 +1260,8 @@ class BaseCamera:
     def __repr__(self):
         return self.__str__()
 
+    # Common camera methods
+
     def _update_frame(self):
         """Return a jepg frame as bytes, and a bgr frame as numpy array"""
         raise NotImplementedError
@@ -1268,17 +1270,23 @@ class BaseCamera:
         """Block until the camera is ready (first frame is available) or timeout occurs."""
         return self._ready.wait(timeout=timeout)
 
-    def enable_webrtc(self):
-        return self._enable_webrtc
-    
+    def get_fps(self):
+        """Return the camera FPS setting."""
+        return self._fps
+
+    def release(self):
+        """Release camera resources."""
+        raise NotImplementedError
+
+    # Color related methods
     def enable_color_zmq(self):
         return self._enable_color_zmq
+    
+    def get_color_zmq_port(self):
+        """Return the zmq port number the camera is serving on."""
+        return self._color_zmq_port
 
-    def set_webrtc_connected(self, event):
-        """Share the publisher's connection state with the capture thread."""
-        self._webrtc_connected = event
-
-    def get_color_jpeg_bytes(self, timeout=None):
+    def get_color_zmq_message(self, timeout=None):
         """Wait for the next new ZMQ frame; None if none arrives within timeout."""
         if not self._enable_color_zmq or self._color_zmq_buffer is None:
             return None
@@ -1287,6 +1295,13 @@ class BaseCamera:
             return None
         self._color_zmq_seq = seq
         return self._color_zmq_buffer.read()
+
+    # Depth related methods
+    def enable_depth_zmq(self):
+        return self._enable_depth_zmq
+
+    def get_depth_zmq_port(self):
+        return self._depth_zmq_port
 
     def get_depth_zmq_message(self, timeout=None):
         """Wait for the next depth frame; returns header + zstd payload bytes, or None."""
@@ -1301,13 +1316,15 @@ class BaseCamera:
             return None
         return DepthPacket(*item).encode()
 
-    def get_depth_zmq_port(self):
-        return self._depth_zmq_port
+    # WebRTC related methods
+    def enable_webrtc(self):
+        return self._enable_webrtc
+    
+    def get_webrtc_port(self):
+        """Return the webrtc port number the camera is serving on."""
+        return self._webrtc_port
 
-    def enable_depth_zmq(self):
-        return self._enable_depth_zmq
-
-    def get_color_webrtc_frame(self, timeout=None):
+    def get_webrtc_frame(self, timeout=None):
         """Wait for the next new WebRTC frame; None on timeout."""
         if not self._enable_webrtc or self._webrtc_buffer is None:
             return None
@@ -1317,26 +1334,13 @@ class BaseCamera:
         self._webrtc_seq = seq
         return self._webrtc_buffer.read()
 
-
-    def get_color_zmq_port(self):
-        """Return the zmq port number the camera is serving on."""
-        return self._color_zmq_port
-    
-    def get_webrtc_port(self):
-        """Return the webrtc port number the camera is serving on."""
-        return self._webrtc_port
-    
     def get_webrtc_codec(self):
         """Return the webrtc codec setting."""
         return self._webrtc_codec
 
-    def get_fps(self):
-        """Return the camera FPS setting."""
-        return self._fps
-
-    def release(self):
-        """Release camera resources."""
-        raise NotImplementedError
+    def set_webrtc_connected(self, event):
+        """Share the publisher's connection state with the capture thread."""
+        self._webrtc_connected = event
 
 class RealSenseCamera(BaseCamera):
     def __init__(self, cam_topic, serial_number, server_cfg):
@@ -1418,20 +1422,18 @@ class RealSenseCamera(BaseCamera):
             left, right = frames.get_color_frame(1), frames.get_color_frame(2)
             if not left or not right:
                 return None
-            color_frame_no = left.get_frame_number()
             bgr_numpy = np.hstack((np.asanyarray(left.get_data()), np.asanyarray(right.get_data())))
         else:
             color_frame = frames.get_color_frame()
             if not color_frame:
                 return None
-            color_frame_no = color_frame.get_frame_number()
             bgr_numpy = np.asanyarray(color_frame.get_data())
 
         if self._enable_depth_zmq and aligned:
             depth_frame = frames.get_depth_frame()
             if depth_frame is not None:
                 depth_image = np.asanyarray(depth_frame.get_data()).copy()
-                self._depth_zmq_buffer.write((color_frame_no, depth_image, self._depth_scale))
+                self._depth_zmq_buffer.write((depth_image, self._depth_scale))
 
         if self._webrtc_connected.is_set():
             self._webrtc_buffer.write(av.VideoFrame.from_ndarray(bgr_numpy, format="bgr24"))
@@ -1977,9 +1979,9 @@ class V4L2Camera(BaseCamera):
             logger_mp.info(str(self))
 
     def __str__(self):
-        color_zmq = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
+        color = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        return f" 📷 Camera {self._cam_topic!r:<22} v4l2, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {color_zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} v4l2, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {color}, {webrtc}"
 
     def _update_frame(self):
         if self.container is None:
@@ -2291,9 +2293,9 @@ class GStreamerCamera(BaseCamera):
             logger_mp.info(str(self))
 
     def __str__(self):
-        color_zmq = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
+        color = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        return f" 📷 Camera {self._cam_topic!r:<22} gstreamer, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {color_zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} gstreamer, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, {color}, {webrtc}"
 
     @staticmethod
     def get_gstreamer_module():
@@ -2576,16 +2578,16 @@ class TeleImageServer:
         try:
             no_frame_warned = False
             while not self._stop_event.is_set():
-                jpeg_bytes = camera.get_color_jpeg_bytes(timeout=0.5)
+                message = camera.get_color_zmq_message(timeout=0.5)
 
-                if jpeg_bytes is None:
+                if message is None:
                     if not no_frame_warned:
                         logger_mp.warning(f"[Teleimager] {cam_topic} produced no new frame for 0.5s.")
                         no_frame_warned = True
                     continue
 
                 no_frame_warned = False
-                self._zmq_publisher_manager.publish(jpeg_bytes, camera.get_color_zmq_port())
+                self._zmq_publisher_manager.publish(message, camera.get_color_zmq_port())
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to publish zmq frame from {cam_topic} camera.")
             self._stop_event.set()
@@ -2594,16 +2596,16 @@ class TeleImageServer:
         try:
             no_frame_warned = False
             while not self._stop_event.is_set():
-                depth_bytes = camera.get_depth_zmq_message(timeout=0.5)
+                message = camera.get_depth_zmq_message(timeout=0.5)
 
-                if depth_bytes is None:
+                if message is None:
                     if not no_frame_warned:
                         logger_mp.warning(f"[Teleimager] {cam_topic} produced no new depth frame for 0.5s.")
                         no_frame_warned = True
                     continue
 
                 no_frame_warned = False
-                self._zmq_publisher_manager.publish(depth_bytes, camera.get_depth_zmq_port())
+                self._zmq_publisher_manager.publish(message, camera.get_depth_zmq_port())
         except Exception as e:
             logger_mp.error(f"[Teleimager] Failed to publish depth frame from {cam_topic} camera: {e}")
             self._stop_event.set()
@@ -2619,7 +2621,7 @@ class TeleImageServer:
                     connected.wait(0.1)
                     continue
 
-                frame = camera.get_color_webrtc_frame(timeout=0.5)
+                frame = camera.get_webrtc_frame(timeout=0.5)
                 if frame is not None:
                     no_frame_warned = False
                     self._webrtc_publisher_manager.publish(frame, camera.get_webrtc_port(), codec_pref=webrtc_codec)

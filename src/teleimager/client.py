@@ -362,22 +362,21 @@ class DepthPacket:
     alignment failed are never sent.
     """
 
-    def __init__(self, frame_no: int, depth: np.ndarray, depth_scale: float):
-        self.frame_no = frame_no
+    def __init__(self, depth: np.ndarray, depth_scale: float):
         self.depth = depth            # uint16 ndarray [H, W]
         self.depth_scale = depth_scale
 
     def encode(self) -> bytes:
-        header = struct.Struct("<IHHf")  # frame no, width, height, depth_scale (must match decode())
-        packed = header.pack(self.frame_no & 0xFFFFFFFF, self.depth.shape[1], self.depth.shape[0], self.depth_scale)
+        header = struct.Struct("<HHf")  # width, height, depth_scale (must match decode())
+        packed = header.pack(self.depth.shape[1], self.depth.shape[0], self.depth_scale)
         return packed + zstd.compress(np.ascontiguousarray(self.depth).tobytes(), 3)
 
     @classmethod
     def decode(cls, packet: bytes) -> "DepthPacket":
-        header = struct.Struct("<IHHf")  # frame no, width, height, depth_scale (must match encode())
-        frame_no, width, height, scale = header.unpack_from(packet)
+        header = struct.Struct("<HHf")  # width, height, depth_scale (must match encode())
+        width, height, scale = header.unpack_from(packet)
         depth = np.frombuffer(zstd.decompress(packet[header.size:]), np.uint16).reshape(height, width)
-        return cls(frame_no, depth, scale)
+        return cls(depth, scale)
 
 
 class TeleImage:
@@ -419,9 +418,9 @@ class TeleImage:
     def __repr__(self):
         """ String representation for debugging """
         size = len(self.jpg) if self.jpg else 0
-        depth_frame = None if self.depth is None else self.depth.frame_no
+        has_depth = self.depth is not None
         state = "DISABLED" if self._bgr is TeleImage._NOT_SET else ("FAILED" if self._bgr is None else "OK")
-        return f"TeleImage(fps={self.fps:.1f}, jpg_byte_size={size}, bgr_state={state}, depth_frame_no={depth_frame})"
+        return f"TeleImage(fps={self.fps:.1f}, jpg_byte_size={size}, bgr_state={state}, depth={has_depth})"
         
 
 class ZMQ_SubscriberThread(threading.Thread):
