@@ -651,7 +651,7 @@ class ZMQ_SubscriberManager:
         Args:
             host: The server address
             port: The port number
-            request_bgr: Whether to request BGR decoding
+            request_bgr: Optional flag to request BGR decoding from the subscriber.
             transform: Optional message decoder applied when this subscriber is created (e.g. DepthPacket.decode)
 
         Returns:
