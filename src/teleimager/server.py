@@ -46,7 +46,7 @@ import subprocess
 import tempfile
 import platform
 from . import __version__
-from .client import DepthPacket, TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responder
+from .client import DepthPacket, TripleRingBuffer, ZMQ_PublisherManager, ZMQ_Responder, zstd
 # Shared JPEG codec (libturbojpeg): encode(BGR)->jpeg bytes, decode(jpeg)->BGR.
 from turbojpeg import TurboJPEG
 _turbojpeg = TurboJPEG()
@@ -1235,7 +1235,7 @@ class BaseCamera:
         if self._enable_depth_zmq:
             if self._depth_zmq_port is None:
                 raise ValueError(f"[Teleimager] {cam_topic}: enable_depth_zmq requires depth_zmq_port")
-            if not DepthPacket.available:
+            if zstd is None:
                 raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
             self._depth_zmq_buffer = TripleRingBuffer()
         else:
@@ -1611,8 +1611,7 @@ class RealSenseCamera(BaseCamera):
         video_paths = cls._list_video_paths()
         cards = []
         for sn in serials:
-            card = {"type": "realsense", "serial_number": sn,
-                    "video_paths": video_paths, "modes": cls._list_modes(sn)}
+            card = {"type": "realsense", "serial_number": sn, "video_paths": video_paths, "modes": cls._list_modes(sn)}
             mode = cls._get_config_mode(sn) if all_config_modes else None
             if mode is not None:
                 card["modes_by_config_mode"] = {mode: card["modes"]}
@@ -1625,8 +1624,7 @@ class RealSenseCamera(BaseCamera):
                     cls._set_config_mode(sn, mode)
             cards.append(card)
         if not serials and video_paths:
-            cards.append({"type": "realsense", "serial_number": None,
-                          "video_paths": video_paths, "modes": []})
+            cards.append({"type": "realsense", "serial_number": None, "video_paths": video_paths, "modes": []})
         return cards
 
     @classmethod
@@ -1650,15 +1648,13 @@ class RealSenseCamera(BaseCamera):
                     if p.stream_type() != rs.stream.color:
                         continue
                     vp = p.as_video_stream_profile()
-                    key = (p.stream_name(), str(p.format()).split(".")[-1],
-                           vp.width(), vp.height())
+                    key = (p.stream_name(), str(p.format()).split(".")[-1], vp.width(), vp.height())
                     grouped.setdefault(key, set()).add(p.fps())
                 except Exception:
                     continue
         modes = []
         for (stream, fmt, w, h), fps_set in grouped.items():
-            modes.append({"stream": stream, "format": fmt, "width": w,
-                          "height": h, "fps": sorted(fps_set)})
+            modes.append({"stream": stream, "format": fmt, "width": w, "height": h, "fps": sorted(fps_set)})
         return modes
 
     @classmethod
@@ -1718,9 +1714,9 @@ class UVCCamera(BaseCamera):
             sys.exit(1)
 
     def __str__(self):
-        color_zmq = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
+        color = f"color_zmq=on (port={self._color_zmq_port})" if self._enable_color_zmq else "color_zmq=off"
         webrtc = f"webrtc=on (port={self._webrtc_port})" if self._enable_webrtc else "webrtc=off"
-        return f" 📷 Camera {self._cam_topic!r:<22} uvc, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, MJPG, {color_zmq}, {webrtc}"
+        return f" 📷 Camera {self._cam_topic!r:<22} uvc, {self._img_shape[0]}x{self._img_shape[1]}@{self._fps}fps, MJPG, {color}, {webrtc}"
 
     def _choose_mode(self, cap, width=None, height=None, fps=None):
         for m in cap.available_modes:

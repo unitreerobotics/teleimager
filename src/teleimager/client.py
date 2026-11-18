@@ -362,27 +362,21 @@ class DepthPacket:
     alignment failed are never sent.
     """
 
-    available = zstd is not None and hasattr(zstd, "compress") and hasattr(zstd, "decompress")
-    _HEADER = struct.Struct("<IHHf")  # frame no, width, height, depth_scale
-    _LEVEL = 3
-
     def __init__(self, frame_no: int, depth: np.ndarray, depth_scale: float):
         self.frame_no = frame_no
         self.depth = depth            # uint16 ndarray [H, W]
         self.depth_scale = depth_scale
 
     def encode(self) -> bytes:
-        if not self.available:
-            raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
-        header = self._HEADER.pack(self.frame_no & 0xFFFFFFFF, self.depth.shape[1], self.depth.shape[0], self.depth_scale)
-        return header + zstd.compress(np.ascontiguousarray(self.depth).tobytes(), self._LEVEL)
+        header = struct.Struct("<IHHf")  # frame no, width, height, depth_scale (must match decode())
+        packed = header.pack(self.frame_no & 0xFFFFFFFF, self.depth.shape[1], self.depth.shape[0], self.depth_scale)
+        return packed + zstd.compress(np.ascontiguousarray(self.depth).tobytes(), 3)
 
     @classmethod
     def decode(cls, packet: bytes) -> "DepthPacket":
-        if not cls.available:
-            raise RuntimeError("[Teleimager] decoding depth requires zstandard: pip install 'teleimager[depth]'")
-        frame_no, width, height, scale = cls._HEADER.unpack_from(packet)
-        depth = np.frombuffer(zstd.decompress(packet[cls._HEADER.size:]), np.uint16).reshape(height, width)
+        header = struct.Struct("<IHHf")  # frame no, width, height, depth_scale (must match encode())
+        frame_no, width, height, scale = header.unpack_from(packet)
+        depth = np.frombuffer(zstd.decompress(packet[header.size:]), np.uint16).reshape(height, width)
         return cls(frame_no, depth, scale)
 
 
@@ -842,7 +836,11 @@ class TeleImageClient:
     _instances: Dict[str, "TeleImageClient"] = {}
     _instances_lock = threading.Lock()
 
-    def __new__(cls, topic, *args, **kwargs):
+    def __new__(cls, topic, server_host, color_port, request_bgr: bool = False, depth_port: Optional[int] = None):
+        if color_port is None:
+            raise ValueError(f"[Teleimager] Camera '{topic}' requires color_zmq_port (check enable_color_zmq in the server config)")
+        if depth_port is not None and zstd is None:
+            raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
         with cls._instances_lock:
             existing = cls._instances.get(topic)
             if existing is not None:
@@ -873,8 +871,6 @@ class TeleImageClient:
         self._subscriber_manager.subscribe(self._server_host, self._color_port, request_bgr=self._request_bgr)
         self._depth_port = depth_port
         if depth_port is not None:
-            if not DepthPacket.available:
-                raise RuntimeError("[Teleimager] depth streaming requires zstandard: pip install 'teleimager[depth]'")
             self._subscriber_manager.subscribe(self._server_host, depth_port, transform=DepthPacket.decode)
         # No-frame watchdog state (edge-triggered warning; see get_frame).
         self._last_frame_ts = time.perf_counter()
@@ -1003,12 +999,11 @@ def main():
     for topic, cfg in camera_config.items():
         if not cfg.get('enable_color_zmq'):
             continue
-        depth_port = cfg.get('depth_zmq_port')
         clients[topic] = TeleImageClient(topic,
                                          server_host=args.host,
-                                         color_port=cfg['color_zmq_port'],
+                                         color_port=cfg.get('color_zmq_port'),
                                          request_bgr=True,
-                                         depth_port=depth_port)
+                                         depth_port=cfg.get('depth_zmq_port'))
     if not clients:
         logger_mp.warning("[Teleimager] No ZMQ-enabled cameras to stream.")
         return
