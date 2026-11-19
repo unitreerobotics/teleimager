@@ -243,11 +243,13 @@ def setup_permissions(requested_user=None):
             pass
 
     logger_mp.info("[Teleimager] Done.")
+    # uaccess grants the local desktop session at once; the 'video' group is
+    # what an SSH or headless session uses, and a session keeps the group list
+    # it started with.
     logger_mp.info("[Teleimager] Desktop sessions: UVC works now, nothing to restart.")
     if needs_relogin:
-        # Existing sessions retain their group list until the user logs in again.
-        logger_mp.info("[Teleimager] SSH: reconnect ('sshd' re-reads groups per "
-                       "login).  Desktop terminal: log out and back in.")
+        logger_mp.info("[Teleimager] SSH or headless sessions: the 'video' group "
+                       "applies from the next login, so reconnect SSH.")
     logger_mp.info("[Teleimager] Verify with:  teleimager-server --cf --uvc")
     return 0
 

@@ -141,7 +141,7 @@ V4L2 开箱即用（`/dev/video*` 带 logind 给的 ACL）；USB video class 不
 sudo "$(which teleimager-server)" --setup-permissions   # $(which ...) 才能在 sudo 的 secure_path 下找到
 ```
 
-跳过的话，服务端启动时会提示你并给出同一条命令。执行完之后 SSH 需重连，桌面终端需重新登录。
+跳过的话，服务端启动时会提示你并给出同一条命令。执行完之后桌面会话立即可以用 UVC 相机；SSH 会话要重连才能拿到 `video` 组。
 
 #### 1.3.3 配置 TLS 证书（仅 WebRTC）
 

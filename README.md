@@ -141,7 +141,7 @@ V4L2 works out of the box: `/dev/video*` gets a logind ACL. USB video class does
 sudo "$(which teleimager-server)" --setup-permissions   # $(which ...) survives sudo's secure_path
 ```
 
-Skip it and the server says so when it starts, printing the same command. Afterwards SSH needs a reconnect and a desktop terminal a fresh login.
+Skip it and the server says so when it starts, printing the same command. Afterwards a desktop session can use UVC cameras at once; an SSH session needs a reconnect to get the `video` group.
 
 #### 1.3.3 Configure TLS certificates (WebRTC only)
 
