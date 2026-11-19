@@ -293,7 +293,7 @@ camera:
 teleimager-server --config /path/to/server.yaml
 ```
 
-也可使用 `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`。`--config` 优先于环境变量；两者都未提供时明确报错，不自动创建或隐式读取服务端配置。相机发现（`--cf`）和权限设置（`--setup-permissions`）不要求配置文件。服务端启动时会记录版本（`TeleImager v2.1.0+robotree.2 on Linux x86_64`）。
+也可使用 `TELEIMAGER_CONFIG=/path/to/server.yaml teleimager-server`。`--config` 优先于环境变量；两者都未提供时明确报错，不自动创建或隐式读取服务端配置。相机发现（`--cf`）和权限设置（`--setup-permissions`）不要求配置文件。服务端启动时会记录版本（`TeleImager v2.1.0+robotree.3 on Linux x86_64`）。
 
 `--streaming-config <路径>` 选择输出设置，`--no-affinity` 跳过 CPU 核心绑定，`--isaacsim` 从共享内存读取图像。TLS 证书仍默认读取 `~/.config/teleimager/cert.pem` 和 `key.pem`；客户端仍保留最近一次成功获取的配置缓存。
 
@@ -402,7 +402,7 @@ sudo $(which teleimager-server) --cf --uvc
 
 ## RoboTree 定制功能
 
-版本 `2.1.0+robotree.2`，公版基线为 TeleImager 2.1.0，源码提交 `19fdf9329a82c13860da0a7dbfe3ce749f940456`。未采用其中的：双 RGB RealSense 相机（`sensors_config_mode`、RealSense 双目、`all_config_modes` 相机搜索报告）、移除 IsaacSim，以及自动创建默认服务端配置。
+版本 `2.1.0+robotree.3`，公版基线为 TeleImager 2.1.0，源码提交 `19fdf9329a82c13860da0a7dbfe3ce749f940456`。未采用其中的：双 RGB RealSense 相机（`sensors_config_mode`、RealSense 双目、`all_config_modes` 相机搜索报告）、移除 IsaacSim，以及自动创建默认服务端配置。
 
 - `camera.<topic>.driver_type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
 - 顶层 `app_stream`（即推流文件的 `tcp` 段）支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。使用 `stereo_quad` 时，App 还可以请求协议 v2，见下文“App 推流协议”。
@@ -410,6 +410,7 @@ sudo $(which teleimager-server) --cf --uvc
 - 一路相机打不开、5 秒内没有首帧或运行中出错，只停这一路并记一条错误日志，其余相机照常输出，服务不退出；公版服务端遇到相机错误会整体停止。ZMQ（彩色和深度）和 WebRTC 在新帧到达时发布，停掉的相机什么都不发，客户端看到的是“没有帧”而不是冻结的画面；每个输出每次断流只警告一次。`GET_DATA` 仍返回完整配置。
 - RealSense 深度：采集配置 `enable_depth_zmq: true` 的话题在其 `zmq.depth_ports` 端口发布与彩色图对齐的深度图；采集深度却没有该端口属于配置错误，`zmq.enabled: false` 同时关闭彩色和深度。`DepthPacket.decode()` 把收到的 zstd 数据保存在 `compressed`（本地构造的包为 `None`），录制端可直接存盘，无需再次压缩。
 - 相机发现不再从设备取流，默认模式下不出流的相机不会卡住启动。UVC 发现（`driver_type: uvc` 和 `--cf --uvc`）用 `VIDIOC_ENUM_FMT` 读取每个节点的采集格式，列出 MJPG、YUYV、NV12、H264 等格式时视为彩色相机，红外、深度和元数据节点会被跳过。V4L2 发现保留 `v4l2-ctl` 输出中声明采集并列出格式的节点，不读取数据包。`UVCCamera._list_mjpeg_modes()` 用同样方式（`VIDIOC_ENUM_FRAMESIZES`、`VIDIOC_ENUM_FRAMEINTERVALS`）列出节点的 MJPEG 尺寸和整数帧率。`teleimager.camera_finder.find_usb_cameras()` 不取流，以 `UsbCamera` 记录返回本机 USB 相机：UVC 按 USB 接口每个一台、按 USB 口排序，带 `driver_type`、`name`、`serial_number`、`physical_path`、`video_path` 和本后端能打开的 `mjpeg_modes`；装有 `pyrealsense2` 时再列出 SDK 看到的 RealSense 及其型号。`read_brightness()` 经视频节点测量 UVC 相机画面亮度。RoboTree 的硬件信息向导使用这两个函数。
+- 启动时（以及 `--cf` 扫描前）只在有 UVC 相机没绑定驱动时才重载 UVC 驱动；没关闭 libuvc 就退出的进程会留下这种相机。公版每次都重载。没有 root 也没有 `sudo` 时（例如在容器里）跳过重载，并提示到宿主机上绑定相机；只有看得到 `/lib/modules/<内核>` 且其中没有 `uvcvideo` 模块时，才报告缺驱动。
 
 `stereo_quad` 的 `app_stream.camera_topics` 使用 `head_mono`、`head_stereo`、`head_left`、`head_right`、`wrist_left`、`wrist_right` 角色映射话题。单话题头部仅在采集配置声明 `binocular: true` 时拆分；单目完整复制到两个眼格，独立双眼分别读取。App 拼图只选择单目头部、拼接双目或独立双眼中的一种来源。所有声明话题使用独立的 ZMQ 和 WebRTC 端口；深度端口也不与任何彩色端口重复。只初始化已配置相机，无腕部时保留占位格且不启动腕部输出；所有组合共用 `streaming_config.yaml`。
 

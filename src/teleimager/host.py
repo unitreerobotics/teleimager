@@ -44,16 +44,56 @@ _SUDOERS_PATH = "/etc/sudoers.d/uvc_modprobe"
 _SERVICE_PATH = "/etc/systemd/system/teleimager.service"
 
 
-def reload_uvcvideo_module():
-    """Reload the Linux UVC driver and wait for pending udev events.
+_USB_INTERFACES = "/sys/bus/usb/devices"
 
-    A nonzero unload exit status is tolerated; loading requires success.
-    Non-root calls use non-interactive sudo. Command output is captured; on
-    failure the stderr is logged with a hint: grant the reload once, or, when
-    this kernel has no uvcvideo module at all, install it. Command errors and
-    timeouts abort the remaining steps and are logged without propagating to
-    the caller.
+
+def find_driverless_uvc_interfaces():
+    """Return the UVC VideoControl interfaces that no kernel driver has bound.
+
+    A camera that libuvc opened keeps the usbfs driver while it is open. One
+    left by a process that ended without closing it has no driver, and so no
+    /dev/video node, until uvcvideo binds it again.
+
+    Returns:
+        Sorted sysfs interface names such as ``1-3.4:1.0``.
     """
+    interfaces = []
+    for path in sorted(glob.glob(os.path.join(_USB_INTERFACES, "*:*"))):
+        try:
+            interface_class = Path(path, "bInterfaceClass").read_text().strip()
+            interface_subclass = Path(path, "bInterfaceSubClass").read_text().strip()
+        except OSError:
+            continue
+        # Video class 0e, VideoControl subclass 01: one per UVC camera.
+        if interface_class == "0e" and interface_subclass == "01" and not os.path.exists(os.path.join(path, "driver")):
+            interfaces.append(os.path.basename(path))
+    return interfaces
+
+
+def reload_uvcvideo_module():
+    """Reload the Linux UVC driver when a UVC camera has no driver bound.
+
+    Only such a camera lacks its /dev/video node, so nothing happens while
+    every UVC camera has a driver, as in a container whose host bound them.
+    Otherwise the module is unloaded (a nonzero exit status is tolerated) and
+    loaded again (it must succeed), then pending udev events are awaited.
+    Non-root calls use non-interactive sudo; without root or sudo the reload is
+    skipped and the cameras must be bound on the host. On failure the stderr is
+    logged with a hint: grant the reload once, or install the module when this
+    kernel visibly has none. Command errors and timeouts abort the remaining
+    steps and are logged without propagating to the caller.
+    """
+    driverless = find_driverless_uvc_interfaces()
+    if not driverless:
+        return
+    names = ", ".join(driverless)
+    if os.geteuid() != 0 and shutil.which("sudo") is None:
+        logger_mp.error(
+            f"[Teleimager] UVC interfaces {names} have no driver, and without root or sudo this process cannot "
+            "reload uvcvideo. As root on the host, bind each one:\n"
+            "    echo <interface> > /sys/bus/usb/drivers/uvcvideo/bind")
+        return
+    logger_mp.info(f"[Teleimager] UVC interfaces {names} have no driver; reloading uvcvideo.")
     # Root needs no escalation and may not have a matching sudoers entry.
     sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
     try:
@@ -62,13 +102,26 @@ def reload_uvcvideo_module():
         subprocess.run([*sudo, "modprobe", "uvcvideo"], check=True, capture_output=True, timeout=30)
         # Waiting for udev does not need the modprobe privilege grant.
         subprocess.run(["udevadm", "settle"], capture_output=True, timeout=30)
-        logger_mp.info("[Teleimager] UVC driver reloaded.")
+        # The unload fails while another camera is open; uvcvideo then stays
+        # loaded and does not probe the driverless interfaces again.
+        still = find_driverless_uvc_interfaces()
+        if still:
+            logger_mp.error(
+                f"[Teleimager] UVC interfaces {', '.join(still)} still have no driver; uvcvideo stays loaded "
+                "while another camera is open. As root, bind each one:\n"
+                "    echo <interface> > /sys/bus/usb/drivers/uvcvideo/bind")
+        else:
+            logger_mp.info("[Teleimager] UVC driver reloaded.")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         logger_mp.error(f"[Teleimager] Failed to reload driver: {e}")
         if isinstance(e, subprocess.CalledProcessError) and e.stderr:
             logger_mp.error("[Teleimager] " + e.stderr.decode(errors="replace").strip())
         rel = os.uname().release
-        if glob.glob(f"/lib/modules/{rel}/**/uvcvideo.ko*", recursive=True):
+        modules = f"/lib/modules/{rel}"
+        # A loaded or built-in driver shows in /sys/module; /lib/modules may be
+        # absent where the kernel's modules are not visible, as in a container.
+        if (os.path.isdir("/sys/module/uvcvideo") or not os.path.isdir(modules)
+                or glob.glob(f"{modules}/**/uvcvideo.ko*", recursive=True)):
             logger_mp.error('[Teleimager] Grant it once with:\n'
                             '    sudo "$(which teleimager-server)" --setup-permissions')
         else:
