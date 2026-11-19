@@ -1,0 +1,19 @@
+[Unit]
+Description=Unitree R1 TeleImager (robotree 2.1, paired R1-D head)
+After=network-online.target
+Wants=network-online.target
+Conflicts=unitree-r1-teleimager.service
+
+[Service]
+Type=simple
+User=unitree
+WorkingDirectory=/home/unitree/teleimager_robotree
+# The conda env still has the old 2.0.5 editable install; PYTHONPATH puts this tree first.
+Environment=PYTHONPATH=/home/unitree/teleimager_robotree/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/unitree/teleimager-conda/bin/python -m teleimager.server --config /home/unitree/teleimager_robotree/configs/r1d/teleimager_r1d.yaml
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

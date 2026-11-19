@@ -24,7 +24,7 @@ teleimager-server --config configs/r1d/teleimager_r1d.yaml
 
 **前提：** 头部 PC1 要发送**左右目原图**。在 `http://192.168.123.161:9080` 选"左右目原图"：MJPG，1280x1088，30 FPS，左目 RTP 发到 .164 的 UDP 5004，右目发到 5005。机器人重启后需要在 App 里重新打开这个推流。
 
-**注意：** 5004/5005 端口同一时间只能有一个进程接收。.164 上现在跑的是旧版系统服务 `unitree-r1-teleimager`（见第 7 节），手动启动新版前先停掉它：`sudo systemctl stop unitree-r1-teleimager`。
+**注意：** 5004/5005 端口同一时间只能有一个进程接收。.164 上已经有系统服务 `unitree-r1-teleimager-robotree` 在运行（见第 7 节），手动调试前先停掉它：`sudo systemctl stop unitree-r1-teleimager-robotree`。
 
 ## 2. 文件
 
@@ -33,6 +33,7 @@ teleimager-server --config configs/r1d/teleimager_r1d.yaml
 | `teleimager_r1d.yaml` | **主配置（正式使用）**。头部左右眼配对成一路并排图；两个手腕相机按 USB 物理路径识别 |
 | `streaming_r1d.yaml` | 主配置引用的输出设置：ZMQ 端口、App 推流（`stereo_quad`），WebRTC 关闭 |
 | `r1d_164_r1_stereo.yaml` | **这台 .164 头部专用**的左右眼外参（R/T）。要拷到 `~/.config/teleimager/r1_stereo.yaml` 才生效，换机器不能用（见第 4 节） |
+| `unitree-r1-teleimager-robotree.service` | .164 上的 systemd 服务文件（第 7 节） |
 | `teleimager_r1d_independent.yaml`、`streaming_r1d_independent.yaml` | 对比用：左右眼不配对，各发一路（55559 左 / 55558 右）。现有下游不认这种输出，不要用于任务 |
 
 ## 3. 输出
@@ -131,28 +132,40 @@ sudo systemctl start unitree-r1-teleimager
 | `rectify.alpha` | 0.0 | 0 表示裁掉黑边，1 表示保留全部原始视野 |
 | `rectify.eye` | — | 仅单路模式需要：`left` 或 `right` |
 
-## 7. 现状和切换步骤
+## 7. .164 上的部署和回退
 
-**现状（2026-11-19）：** .164 上运行的是旧版系统服务 `unitree-r1-teleimager`（TeleImager 2.0.5 加 R1 补丁，配置在 `/home/unitree/teleimager/r1_a7_d_stereo_head.yaml`）。它的输出和本目录的配对模式完全一样，任务正在用它。本配置（新版 + 配对模式）已经在 .164 上实测，30 fps，60000 端口的兼容字段正确，但还**没有替换**旧服务。
+**现状（2026-11-19 切换）：** .164 运行新版系统服务 `unitree-r1-teleimager-robotree`，开机自启。旧版服务 `unitree-r1-teleimager`（TeleImager 2.0.5 加 R1 补丁）保留但已停用，用于回退。
 
-**切换到新版：**
+| | 新版（在用） | 旧版（停用） |
+|---|---|---|
+| 服务 | `unitree-r1-teleimager-robotree` | `unitree-r1-teleimager` |
+| 代码 | `/home/unitree/teleimager_robotree`（`DEPLOYED_COMMIT` 记录提交号） | `/home/unitree/teleimager` |
+| 配置 | `~/teleimager_robotree/configs/r1d/teleimager_r1d.yaml` | `~/teleimager/r1_a7_d_stereo_head.yaml` |
+
+两者共用 conda 环境 `/home/unitree/teleimager-conda`。这个环境里 editable 安装的仍是旧版，所以 `teleimager-server` 命令跑的是**旧代码**。新版服务用 `PYTHONPATH=~/teleimager_robotree/src python -m teleimager.server` 启动，见 `unitree-r1-teleimager-robotree.service`。不要用 `--setup-service`，它会把旧代码装成服务。新版服务文件里写了 `Conflicts=unitree-r1-teleimager.service`。systemd 的这项设置双向生效，启动任意一个都会停掉另一个，两者不会同时抢 5004/5005。
+
+**更新新版代码：**
 ```bash
-sudo systemctl stop unitree-r1-teleimager && sudo systemctl disable unitree-r1-teleimager
-cp configs/r1d/r1d_164_r1_stereo.yaml ~/.config/teleimager/r1_stereo.yaml     # 仅限这台 .164；别的机器先按第 4 节标定
-sudo "$(which teleimager-server)" --setup-service --config "$(pwd)/configs/r1d/teleimager_r1d.yaml"
-journalctl -u teleimager.service -f      # 应看到 "rectifying (eeprom intrinsics + stereo override ..." 和三个相机启动
+# 在本机仓库
+git archive --format=tar.gz -o /tmp/ti.tgz HEAD && scp /tmp/ti.tgz unitree@192.168.123.164:/tmp/
+# 在 .164
+mv ~/teleimager_robotree ~/teleimager_robotree.bak-$(date +%s) && mkdir ~/teleimager_robotree
+tar xzf /tmp/ti.tgz -C ~/teleimager_robotree       # .164 时钟落后，tar 会提示时间戳在未来，可忽略
+sudo systemctl restart unitree-r1-teleimager-robotree
 ```
 
 **回退到旧版：**
 ```bash
-sudo systemctl disable --now teleimager.service
+sudo systemctl disable --now unitree-r1-teleimager-robotree
 sudo systemctl enable --now unitree-r1-teleimager
 ```
 
-**切换后检查：**
-- 55555 是 30 fps；
-- 60000 端口 `head_camera.rectified` 中 f 约 133、基线约 60.2 mm；
-- 技能服务器能正常收到三路画面。
+**检查：**
+- `journalctl -u unitree-r1-teleimager-robotree -f`：应看到 `TeleImager v2.1.0+robotree.2`、`rectifying (eeprom intrinsics + stereo override ...)` 和两个手腕相机启动。`Failed to reload driver ... sudo: a password is required` 这条错误旧版也有：服务想用 sudo 重载 uvcvideo 驱动，而我们的相机走 v4l2，不受影响。
+- 55555/6/7 都是 30 fps；60000 端口 `head_camera.rectified` 中 f 约 133、基线约 60.2 mm。
+- 切换当天的实测：三路都是 30.0–30.2 fps，进程 CPU 约 174%；unitree-deploy 的 `ImageClient` 不改代码就拿到了头部左右眼（544x448）和两个手腕（640x480）。
+
+**换一台 R1-D：** 先按第 4 节标定左右外参，再按上面的方式部署。不要拷贝这台的 `r1d_164_r1_stereo.yaml`，指纹对不上会被忽略。如果那台是全新安装，`pip install -e ".[server]"` 装的就是新版，可以直接用 `sudo "$(which teleimager-server)" --setup-service --config ...`。
 
 ## 8. 常见问题
 
