@@ -70,13 +70,29 @@ class ZMQ_Responder:
                 socks = dict(poller.poll(timeout=200))
                 if self._socket in socks and socks[self._socket] == zmq.POLLIN:
                     _ = self._socket.recv()
-                    self._socket.send_json(self._server_config)
+                    self._socket.send_json(self._response())
             except zmq.ZMQError as e:
                 if not self._running:
                     break
                 logger_mp.error(f"[Teleimager] ZMQError in Responder: {e}")
             except Exception as e:
                 logger_mp.error(f"[Teleimager] Unexpected error in Responder: {e}")
+
+    def _response(self):
+        """The server mapping; with top-level legacy_client_keys: true, each camera also carries the
+        TeleImager 2.0 key names (type, enable_zmq, zmq_port) so 2.0 clients keep working."""
+        config = self._server_config
+        if not config.get("legacy_client_keys"):
+            return config
+        cameras = {}
+        for topic, camera in config.get("camera", {}).items():
+            camera = dict(camera)
+            camera.setdefault("type", camera.get("driver_type"))
+            camera.setdefault("enable_zmq", bool(camera.get("enable_color_zmq", False)))
+            camera.setdefault("zmq_port", camera.get("color_zmq_port"))
+            cameras[topic] = camera
+        return dict(config, camera=cameras)
+
     # Public API.
     def get_port(self):
         """Return the configured responder port."""

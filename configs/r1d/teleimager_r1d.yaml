@@ -1,0 +1,53 @@
+# =====================================================
+# TeleImager on the Unitree R1-D development computer (PC2, 192.168.123.164)
+#
+#   teleimager-server --config configs/r1d/teleimager_r1d.yaml
+#
+# Head: the stereo sender on PC1 (192.168.123.161) must send both raw eyes ("左右目原图" on
+# http://192.168.123.161:9080: MJPG 1280x1088 @ 30 FPS, RTP to UDP 5004 left / 5005 right).
+# They are paired here into one side-by-side frame (rtp_ports) and rectified with the head's own
+# calibration (http://192.168.123.161:9080/cam_param.txt, cached; left->right R/T from
+# ~/.config/teleimager/r1_stereo.yaml when present, see `python -m teleimager.camera.r1_calib`).
+# The rectified pinhole parameters are served as camera.head_camera.rectified on the config port 60000.
+#
+# Topic names mirror TeleImager 2.0 and legacy_client_keys makes the config port (60000) also answer with
+# the 2.0 key names (enable_zmq, zmq_port, type), so existing clients (unitree_deploy ImageClient,
+# r1d-sandwich skill server) keep working unchanged:
+# head_camera 55555 (1088x448 side-by-side), left_wrist_camera 55556, right_wrist_camera 55557.
+# For independent, unpaired eyes use two cameras with rtp_port: 5004 / 5005 instead of rtp_ports.
+# =====================================================
+camera:
+  head_camera:
+    driver_type: rtp
+    rtp_ports: [5004, 5005]        # [left, right]: paired side-by-side output
+    rtp_encoding: JPEG
+    jpeg_depay: python             # R1 sends whole JPEG files per RTP frame; GStreamer depay truncates them
+    source_host: 192.168.123.161
+    image_shape: [448, 1088]       # [height, width] of the side-by-side output (544x448 per eye)
+    binocular: true
+    fps: 30
+    receive_timeout: 2.0
+    max_pair_delay: 0.02           # seconds between the two eyes' reception times
+    rectify:
+      source: http://192.168.123.161:9080/cam_param.txt
+      cache: ~/.config/teleimager/r1_cam_param.txt
+      wait_s: 20                   # PC1 may come up after PC2; then the cache is used
+      stereo: ~/.config/teleimager/r1_stereo.yaml
+      alpha: 0.0
+
+  left_wrist_camera:
+    driver_type: v4l2
+    physical_path: /sys/devices/platform/3610000.xhci/usb1/1-1/1-1.4/1-1.4:1.0
+    image_shape: [480, 640]
+    binocular: false
+    fps: 30
+
+  right_wrist_camera:
+    driver_type: v4l2
+    physical_path: /sys/devices/platform/3610000.xhci/usb1/1-1/1-1.1/1-1.1:1.0
+    image_shape: [480, 640]
+    binocular: false
+    fps: 30
+
+legacy_client_keys: true         # config port 60000 also answers with the 2.0 key names
+streaming: streaming_r1d.yaml

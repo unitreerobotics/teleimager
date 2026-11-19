@@ -1,0 +1,41 @@
+# Outputs for configs/r1d/teleimager_r1d.yaml (TeleImager 2.0 topic names and ports).
+zmq:
+  enabled: true
+  codec: jpeg
+  ports:
+    head_camera: 55555            # side-by-side rectified stereo head, 1088x448
+    left_wrist_camera: 55556
+    right_wrist_camera: 55557
+
+tcp:
+  enabled: true                   # RoboTree App
+  codec: h264
+  control_host: 0.0.0.0
+  control_port: 13579
+  stream_name: robotree
+  camera_topics:
+    head_stereo: head_camera
+    wrist_left: left_wrist_camera
+    wrist_right: right_wrist_camera
+  layout: stereo_quad
+  width: 1280
+  height: 960
+  eye_shape: [960, 1280]
+  max_bitrate: 20000000
+  min_bitrate: 4000000
+  fps: 30
+  bitrate: 5000000
+  gop_length: 60
+  intra_refresh: true
+  vbv_seconds: 0.04
+  pixel_format: yuv420p
+  preset: superfast
+  tune: zerolatency
+  threads: 4
+  codecs: [h264]
+
+webrtc:
+  enabled: false
+  codec: h264
+  ports:
+    head_camera: 60001

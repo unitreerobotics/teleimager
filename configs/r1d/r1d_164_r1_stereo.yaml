@@ -1,0 +1,16 @@
+# Left->right stereo extrinsic of THIS robot's head (R1-D at 192.168.123.164), fitted 2026-11-18 with
+# stereoCalibrate (EEPROM intrinsics fixed) on an 8x11 / 3 cm chessboard at 0.6 m and 1.0 m: rms 0.21 px,
+# baseline 60.2 mm. The EEPROM r_t_info of this head is ~3 deg off (3.3 px row offset, 6 px disparity error).
+# Install: copy to ~/.config/teleimager/r1_stereo.yaml on the receiving computer. Valid ONLY for the head whose
+# EEPROM gives head_fingerprint below; on any other head the server ignores it (warning) and uses the EEPROM R/T.
+# Re-measure per robot with
+#   python -m teleimager.camera.r1_calib capture --tag d060      # board ~0.6 m (repeat at ~1.0 m: --tag d100)
+#   python -m teleimager.camera.r1_calib fit --write ~/.config/teleimager/r1_stereo.yaml
+head_fingerprint: b5395095593b24e5
+R: [[0.998583, 0.00590364, 0.052881], [-0.00455295, 0.999661, -0.0256261], [-0.0530144, 0.025349, 0.998272]]
+T: [-0.0602205, 0.000905926, 0.00144808]
+rms_px: 0.212
+views: [d060, d100]
+pattern: [8, 11]
+square_m: 0.03
+date: 2026-11-18 21:00

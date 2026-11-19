@@ -405,6 +405,9 @@ sudo $(which teleimager-server) --cf --uvc
 版本 `2.1.0+robotree.2`，公版基线为 TeleImager 2.1.0，源码提交 `19fdf9329a82c13860da0a7dbfe3ce749f940456`。未采用其中的：双 RGB RealSense 相机（`sensors_config_mode`、RealSense 双目、`all_config_modes` 相机搜索报告）、移除 IsaacSim，以及自动创建默认服务端配置。
 
 - `camera.<topic>.driver_type: rtp` 每个实例接收一条 RTP/JPEG 或 RTP/H264 流，用 `rtp_port` 选择端口并按 `source_host` 过滤。左右眼独立发布、独立恢复，不配对、不拼接；过期帧停止输出。
+  - 可选配对：用 `rtp_ports: [左, 右]` 代替 `rtp_port`，一个实例同时收左右眼，只把接收时间相差不超过 `max_pair_delay` 秒（默认 0.02）的两帧拼成左右并排图发布（`image_shape` 是整幅尺寸，每眼占一半宽），现有按单个双目话题读图的客户端无需修改。
+  - `jpeg_depay: python` 在进程内重组 RTP/JPEG，代替 GStreamer 解包（默认 `gstreamer`）；R1 固件每个 RTP 帧里是完整 JPEG 文件，`rtpjpegdepay` 会把它截断。
+  - `rectify:` 用头部自带的标定做去畸变和极线矫正（`source` 默认 `http://192.168.123.161:9080/cam_param.txt`，缓存到 `cache`；可选的左右外参覆盖 `stereo`）。单路实例要写 `eye: left|right`。矫正后的针孔参数以 `rectified` 写进该相机的配置，由配置端口发布。外参覆盖用 `python -m teleimager.camera.r1_calib capture|fit` 标定，文件和头部绑定（`head_fingerprint`），换到别的头部会被忽略并警告。R1-D 的部署、端口、标定和切换步骤见 [configs/r1d/README.md](configs/r1d/README.md)。
 - 顶层 `app_stream`（即推流文件的 `tcp` 段）支持 RoboTree App H264/TCP 直连、单画面、拼接及 `stereo_quad` 四宫格；控制端口默认 `13579`，图像连接使用 App 请求的地址和端口。使用 `stereo_quad` 时，App 还可以请求协议 v2，见下文“App 推流协议”。
 - App 推流读取自己的 BGR 和显示缓冲；WebRTC 另有一个视频帧缓冲，只在浏览器连接时写入。四宫格对缺失、过期画面显示占位。`teleimager.client.TeleImageClient` 与公版客户端一致。
 - 一路相机打不开、5 秒内没有首帧或运行中出错，只停这一路并记一条错误日志，其余相机照常输出，服务不退出；公版服务端遇到相机错误会整体停止。ZMQ（彩色和深度）和 WebRTC 在新帧到达时发布，停掉的相机什么都不发，客户端看到的是“没有帧”而不是冻结的画面；每个输出每次断流只警告一次。`GET_DATA` 仍返回完整配置。

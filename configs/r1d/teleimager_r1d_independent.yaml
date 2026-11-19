@@ -1,0 +1,53 @@
+# Comparison config: the same R1-D head as teleimager_r1d.yaml, but as two independent, unpaired eye
+# topics (robotree's default RTP design): head_left_camera 55559, head_right_camera 55558.
+camera:
+  head_left_camera:
+    driver_type: rtp
+    rtp_port: 5004
+    rtp_encoding: JPEG
+    jpeg_depay: python
+    source_host: 192.168.123.161
+    image_shape: [448, 544]
+    fps: 30
+    receive_timeout: 2.0
+    rectify:
+      eye: left
+      source: http://192.168.123.161:9080/cam_param.txt
+      cache: ~/.config/teleimager/r1_cam_param.txt
+      wait_s: 20
+      stereo: ~/.config/teleimager/r1_stereo.yaml
+      alpha: 0.0
+
+  head_right_camera:
+    driver_type: rtp
+    rtp_port: 5005
+    rtp_encoding: JPEG
+    jpeg_depay: python
+    source_host: 192.168.123.161
+    image_shape: [448, 544]
+    fps: 30
+    receive_timeout: 2.0
+    rectify:
+      eye: right
+      source: http://192.168.123.161:9080/cam_param.txt
+      cache: ~/.config/teleimager/r1_cam_param.txt
+      wait_s: 20
+      stereo: ~/.config/teleimager/r1_stereo.yaml
+      alpha: 0.0
+
+  left_wrist_camera:
+    driver_type: v4l2
+    physical_path: /sys/devices/platform/3610000.xhci/usb1/1-1/1-1.4/1-1.4:1.0
+    image_shape: [480, 640]
+    binocular: false
+    fps: 30
+
+  right_wrist_camera:
+    driver_type: v4l2
+    physical_path: /sys/devices/platform/3610000.xhci/usb1/1-1/1-1.1/1-1.1:1.0
+    image_shape: [480, 640]
+    binocular: false
+    fps: 30
+
+legacy_client_keys: true         # config port 60000 also answers with the 2.0 key names
+streaming: streaming_r1d_independent.yaml
