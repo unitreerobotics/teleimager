@@ -29,7 +29,6 @@ import av
 import logging_mp
 import numpy as np
 
-from ..frame import fit_frame
 from .camera import BaseCamera
 
 logger_mp = logging_mp.getLogger(__name__)
@@ -188,9 +187,9 @@ class RtpCamera(BaseCamera):
             self._source_shape = bgr.shape[:2]
             display_shape = self._display_shape
             if display_shape is not None:
-                # Fit the decoded frame once here, in this camera's thread, so
-                # the App stream only copies it into place.
-                self._display_buffer.write(fit_frame(bgr, display_shape[1], display_shape[0]))
+                # Fit or rectify the decoded frame once here, in this camera's
+                # thread, so the App stream only copies it into place.
+                self._display_buffer.write(self._render_display(bgr, display_shape))
             height, width = self._img_shape
             scale = min(width / bgr.shape[1], height / bgr.shape[0])
             resized_width = max(1, round(bgr.shape[1] * scale))
@@ -217,7 +216,7 @@ class RtpCamera(BaseCamera):
         return super().get_bgr_frame()
 
     def get_display_frame(self):
-        """Return the display frame fitted from the decoded source while fresh."""
+        """Return the display frame fitted or rectified from the decoded source while fresh."""
         if self._display_shape is None or self._display_buffer is None:
             return None
         if self._last_frame_time is None or time.monotonic() - self._last_frame_time >= self._receive_timeout:

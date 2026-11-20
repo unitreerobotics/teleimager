@@ -20,7 +20,7 @@ from turbojpeg import TurboJPEG
 import av
 import logging_mp
 
-from ..frame import DepthPacket, TripleRingBuffer
+from ..frame import DepthPacket, TripleRingBuffer, fit_frame
 
 logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
@@ -59,8 +59,10 @@ class BaseCamera:
     arrives and a stopped camera sends nothing. BGR arrays and display frames
     serve the App stream only: backends that decode a frame larger than
     image_shape fill the display buffer at the requested display shape; the
-    others return their BGR output. BGR and display reads return references
-    without waiting for another capture.
+    others return their BGR output. A head camera with a calibration has a
+    ``Rectifier``, which turns display frames into rectified eyes; the BGR,
+    ZMQ and WebRTC outputs stay as captured. BGR and display reads return
+    references without waiting for another capture.
     """
 
     # Hardware reads already block on capture. Extra pacing would prevent
@@ -127,6 +129,8 @@ class BaseCamera:
         self._bgr_buffer = None
         self._display_shape = None
         self._display_buffer = None
+        self._rectifier = None
+        self._rectified = None  # (BGR frame, its display frame) of the last read
 
     def __str__(self):
         raise NotImplementedError
@@ -259,15 +263,28 @@ class BaseCamera:
         if self._display_buffer is None:
             self._display_buffer = TripleRingBuffer()
 
+    def set_rectifier(self, rectifier):
+        """Rectify display frames with rectifier, the ``Rectifier`` of this camera's eyes."""
+        self._rectifier = rectifier
+
     def get_display_frame(self):
         """Return the latest display frame, or None when none is selected.
 
         Backends without a larger native frame return their BGR output; the
-        App stream fits it into its rectangle.
+        App stream fits it into its rectangle. With a rectifier, the BGR
+        output is rectified to the display shape once per captured frame.
         """
-        if self._display_shape is None:
+        shape = self._display_shape
+        if shape is None:
             return None
-        return self.get_bgr_frame()
+        frame = self.get_bgr_frame()
+        if frame is None or self._rectifier is None:
+            return frame
+        rectified = self._rectified
+        if rectified is None or rectified[0] is not frame or rectified[1].shape[:2] != shape:
+            rectified = (frame, self._render_display(frame, shape))
+            self._rectified = rectified
+        return rectified[1]
 
     def get_source_shape(self):
         """Return the (height, width) of one captured frame, or None if unknown."""
@@ -282,3 +299,9 @@ class BaseCamera:
     def release(self):
         """Release capture resources; subclasses must implement this method."""
         raise NotImplementedError
+
+    def _render_display(self, frame, shape):
+        """Return frame as a display frame of shape (height, width): rectified, or else fitted."""
+        if self._rectifier is not None:
+            return self._rectifier.render(frame, shape)
+        return fit_frame(frame, shape[1], shape[0])

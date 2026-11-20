@@ -71,6 +71,11 @@ tcp:
 
   # ---- immersive view (version two) ----
   eye_shape: [960, 1280]      # Upper limit of one eye [height, width], multiples of 16
+  # Head cameras whose capture sets rectify_immersive: true and that have a
+  # calibration are undistorted and their two eyes row-aligned; each rectified
+  # eye spans eye_fov degrees across. Keep one value for every robot, so every
+  # rectified head camera shows at the same scale.
+  eye_fov: 110
   max_bitrate: 20000000       # Immersive budget in bits per second; sized for a dedicated 5 GHz router
   min_bitrate: 4000000        # Floor when adapting to a congested link
 

@@ -38,6 +38,7 @@ from .camera.uvc import UVCCamera
 from .camera.v4l2 import V4L2Camera
 from .config import read_server_config
 from .host import reload_uvcvideo_module, set_performance_mode, setup_permissions, setup_service
+from .rectification import DEFAULT_EYE_FOV, Rectifier
 from .transport import webrtc
 from .transport.webrtc import WebRTC_PublisherManager
 from .transport.zmq_publisher import ZMQ_PublisherManager
@@ -55,6 +56,8 @@ PUBLISH_TIMEOUT = 0.5  # s
 # Camera keys renamed in TeleImager 2.1.0, as (old, new).
 RENAMED_CAMERA_KEYS = (("type", "driver_type"), ("enable_zmq", "enable_color_zmq"),
                        ("zmq_port", "color_zmq_port"), ("enable_depth", "enable_depth_zmq"))
+# Calibration views each head role shows; a binocular head_stereo frame shows both.
+HEAD_ROLE_EYES = {"head_left": ("left",), "head_right": ("right",), "head_mono": ("mono",)}
 
 
 def load_server_config(cli_path=None, *, streaming_config=None):
@@ -82,7 +85,11 @@ class TeleImageServer:
 
     Construction opens active camera backends and the configuration responder.
     start() launches capture and output workers; stop() requests shutdown, and
-    wait_until_stopped() waits for that request and performs cleanup.
+    wait_until_stopped() waits for that request and performs cleanup. A head
+    camera of the stereo_quad App stream whose settings set
+    ``rectify_immersive: true`` and carry a ``calibration`` (see
+    ``teleimager.rectification``) shows the immersive view rectified, eye_fov
+    degrees across; the others show it as captured.
     """
 
     def __init__(self, server_config, enable_isaacsim=False):
@@ -93,8 +100,10 @@ class TeleImageServer:
             enable_isaacsim: Use shared-memory cameras for every active topic.
 
         Raises:
-            ValueError: A camera uses a renamed key, or enables depth without
-                driver_type realsense.
+            TypeError: A head camera's rectify_immersive is not a boolean.
+            ValueError: A camera uses a renamed key, enables depth without
+                driver_type realsense, or rectifies with a calibration that
+                does not fit its head role.
         """
         for cam_topic, server_cfg in server_config["camera"].items():
             # Renamed keys fail loudly instead of being ignored.
@@ -166,6 +175,7 @@ class TeleImageServer:
                 stereo_enabled=self._app_stream_layout == "stereo_quad",
                 eye_source_shape=self._eye_source_shape,
             )
+        self._rectifiers = self._build_rectifiers()
 
         if not self._enable_isaacsim and any(
             cfg.get("driver_type", "uvc").lower() in ("uvc", "v4l2", "realsense")
@@ -219,6 +229,9 @@ class TeleImageServer:
                     logger_mp.warning(f"[App Stream] {camera_topic} unavailable; using nocarema tile.")
                     continue
                 camera.enable_bgr_output()
+            for camera_topic, rectifier in self._rectifiers.items():
+                if self._cameras.get(camera_topic) is not None:
+                    self._cameras[camera_topic].set_rectifier(rectifier)
         except Exception:
             logger_mp.error("[Teleimager] Initialization failed", exc_info=True)
             self._clean_up()
@@ -427,6 +440,37 @@ class TeleImageServer:
             except Exception as exc:
                 logger_mp.warning(f"[App Stream] Failed to publish frame: {exc}")
                 self._stop_event.wait(0.1)
+
+    def _build_rectifiers(self):
+        """Return the ``Rectifier`` of each head topic that rectifies, logging why the others do not.
+
+        A head topic rectifies when its settings set rectify_immersive: true,
+        which a source that already delivers rectified eyes leaves out, and
+        carry a calibration.
+        """
+        fov = self._app_stream_config.get("eye_fov", DEFAULT_EYE_FOV)
+        cameras = self._server_config["camera"]
+        rectifiers = {}
+        for role, topic in self._app_stream_roles.items():
+            if not role.startswith("head") or topic not in cameras:
+                continue
+            rectify = cameras[topic].get("rectify_immersive", False)
+            if type(rectify) is not bool:
+                raise TypeError(f"[Teleimager] {topic}: rectify_immersive must be a boolean, got {rectify!r}.")
+            calibration = cameras[topic].get("calibration")
+            if not rectify:
+                if calibration is not None:
+                    logger_mp.info("[App Stream] %s: rectify_immersive is off; the immersive view shows it as captured.",
+                                   topic)
+                continue
+            if calibration is None:
+                logger_mp.info("[App Stream] %s has no calibration; the immersive view shows it unrectified.", topic)
+                continue
+            eyes = HEAD_ROLE_EYES.get(role, ("left", "right") if cameras[topic].get("binocular", False) else ("mono",))
+            rectifiers[topic] = Rectifier.from_calibration(calibration, eyes=eyes, fov=fov, label=topic)
+            logger_mp.info("[App Stream] %s: immersive view rectified from its calibration (%s, %g degrees across).",
+                           topic, " and ".join(eyes), fov)
+        return rectifiers
 
     def _head_topics(self):
         """Return the opened camera topics that feed head roles."""

@@ -66,7 +66,7 @@ def apply_streaming_config(server_config: dict, streaming: dict, *, protocols=("
             raise TypeError(f"streaming.{protocol}.enabled must be a boolean.")
         if protocol == "tcp":
             allowed = {"enabled", "codec", "control_host", "control_port", "stream_name", "layout", "camera_topics", "width", "height", "fps", "bitrate", "gop_length", "pixel_format", "preset", "tune", "threads",
-                       "eye_shape", "max_bitrate", "min_bitrate", "vbv_seconds", "intra_refresh", "codecs"}
+                       "eye_shape", "eye_fov", "max_bitrate", "min_bitrate", "vbv_seconds", "intra_refresh", "codecs"}
         else:
             allowed = {"enabled", "codec", "ports"}
             if protocol == "zmq":
@@ -174,7 +174,8 @@ def _check_app_stream_settings(settings: dict) -> None:
     """Validate the optional version-two App stream fields of streaming.tcp.
 
     eye_shape is the (height, width) upper limit of one immersive eye in
-    16-pixel blocks; max_bitrate is the immersive budget and min_bitrate the
+    16-pixel blocks; eye_fov is the horizontal field of view in degrees of a
+    rectified immersive eye (head cameras with a calibration); max_bitrate is the immersive budget and min_bitrate the
     floor of bitrate adaptation; vbv_seconds sizes the rate-control buffer;
     codecs lists the encoders offered to the App.
     """
@@ -183,6 +184,9 @@ def _check_app_stream_settings(settings: dict) -> None:
         if (not isinstance(eye_shape, (list, tuple)) or len(eye_shape) != 2
                 or any(type(value) is not int or value < 16 or value % 16 for value in eye_shape)):
             raise ValueError("streaming.tcp.eye_shape must be [height, width] in multiples of 16.")
+    eye_fov = settings.get("eye_fov")
+    if eye_fov is not None and (type(eye_fov) not in (int, float) or not 0 < eye_fov < 180):
+        raise ValueError("streaming.tcp.eye_fov must be between 0 and 180 degrees.")
     for field in ("max_bitrate", "min_bitrate"):
         value = settings.get(field)
         if value is not None and (type(value) is not int or value <= 0):
