@@ -4,7 +4,11 @@
 # Used by teleimager.server.run_isaacsim_server() when no config path is given. The cameras read the
 # simulator's shared-memory images:
 #   head stereo left / right eye : "head" / "head_right"   wrist cameras : "left" / "right"
-# Topic names and ports match the real robot, so xr_teleoperate connects to the simulator unchanged.
+# Topic names and ports match the real robot, so clients connect to the simulator unchanged:
+#   head_stereo_camera / wrist_left_camera / wrist_right_camera (the stream names of unirobot / robotree), and the
+#   camera config on port 60000 carries the TeleImager 2.1.0 field names (enable_color_zmq, color_zmq_port,
+#   driver_type, enable_depth_zmq) besides the 2.0 ones; teleimager 1.x clients such as xr_teleoperate find the
+#   cameras at the top level under their old names head_camera / left_wrist_camera / right_wrist_camera.
 # =====================================================
 
 webrtc:
@@ -15,7 +19,7 @@ webrtc:
   gop_length: null    # keyframe interval in FRAMES; null = 2 seconds (2 x camera fps)
 
 camera:
-  head_camera:
+  head_stereo_camera:
     enable_zmq: true
     zmq_port: 55555
     enable_webrtc: true
@@ -25,7 +29,7 @@ camera:
     image_shape: [480, 1280]   # side-by-side stereo frame [H, 2*W]
     binocular: true            # left eye "head" + right eye "head_right"
     fps: 30
-  left_wrist_camera:
+  wrist_left_camera:
     enable_zmq: true
     zmq_port: 55556
     enable_webrtc: true
@@ -35,7 +39,7 @@ camera:
     image_shape: [480, 640]
     binocular: false
     fps: 30
-  right_wrist_camera:
+  wrist_right_camera:
     enable_zmq: true
     zmq_port: 55557
     enable_webrtc: true

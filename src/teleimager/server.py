@@ -70,6 +70,39 @@ def load_server_config(cli_path=None, *, streaming_config=None):
         sys.exit(1)
 
 
+# Published camera fields of TeleImager 2.1.0 (feat/robotree-dev; read by unirobot / robotree's TeleImager driver),
+# as (2.0 name used in this server's configuration, 2.1.0 name).
+PUBLISHED_FIELD_NAMES = (("type", "driver_type"), ("enable_zmq", "enable_color_zmq"),
+                         ("zmq_port", "color_zmq_port"), ("enable_depth", "enable_depth_zmq"))
+# 1.x topic names (xr_teleoperate) of the topics this server publishes under the robotree names.
+LEGACY_TOPIC_NAMES = {"head_stereo_camera": "head_camera", "wrist_left_camera": "left_wrist_camera",
+                      "wrist_right_camera": "right_wrist_camera"}
+
+
+def published_config(server_config, legacy=False):
+    """The camera configuration answered on the config port (60000).
+
+    Every camera carries the 2.1.0 field names (``driver_type``, ``enable_color_zmq``, ``color_zmq_port``,
+    ``enable_depth_zmq``; feat/robotree-dev clients read only these) next to the 2.0 ones (2.0 clients). With
+    ``legacy`` the cameras are also listed at the top level, under their 1.x names where they were renamed
+    (teleimager 1.x clients such as xr_teleoperate read config["head_camera"]...). Only the answer changes: the
+    server itself keeps reading its 2.0 configuration.
+    """
+    cameras = {}
+    for topic, cfg in (server_config.get("camera") or {}).items():
+        cam = dict(cfg)
+        for old, new in PUBLISHED_FIELD_NAMES:
+            if old in cam and new not in cam:
+                cam[new] = cam[old]
+        cam.setdefault("enable_depth_zmq", False)  # no aligned depth stream (simulator / 2.0 cameras)
+        cameras[topic] = cam
+    response = {**server_config, "camera": cameras}
+    if legacy:
+        top = {LEGACY_TOPIC_NAMES.get(topic, topic): cam for topic, cam in cameras.items()}
+        response = {**top, **response}
+    return response
+
+
 class TeleImageServer:
     """Own camera capture workers and the configured streaming outputs.
 
@@ -162,11 +195,7 @@ class TeleImageServer:
 
         if legacy_config_response is None:
             legacy_config_response = enable_isaacsim
-        response = self._server_config
-        if legacy_config_response:
-            # 1.x clients read config["head_camera"]...; 2.x clients read config["camera"]["head_camera"]
-            response = {**self._server_config["camera"], **self._server_config}
-        self._responser = ZMQ_Responser(response)
+        self._responser = ZMQ_Responser(published_config(self._server_config, legacy=legacy_config_response))
         self._zmq_publisher_manager = ZMQ_PublisherManager.get_instance()
         self._webrtc_publisher_manager = WebRTC_PublisherManager.get_instance()
         self._publisher_threads = []  # Retain workers for bounded cleanup joins.
